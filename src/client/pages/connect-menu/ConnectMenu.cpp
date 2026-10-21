@@ -236,7 +236,7 @@ void RenderConnectMenu() {
         }
         cy += barH + 16 * s;
         nat::Endpoint ep;
-        uint8_t key = 0;
+        uint32_t key = 0;
         if (phase == flow::Phase::Connecting && nat::ParseInviteCode(Trim(Narrow(g_addr)), ep, key))
             para(TR("Подключение по коду может занять до 20 секунд.", "Connecting by code can take up to 20 seconds."), kSaMuted,
                  FONT_SMALL, true);

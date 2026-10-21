@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "common/api/nat-traversal/NatTraversal.h"
 #include "common/api/net/Net.h"
 #include "common/config/version/Version.h"
 #include "common/lib/log/Log.h"
@@ -20,10 +21,10 @@ static constexpr uint32_t kColorError = 0xFF6464FF;
 bool Server::Start(const Config& cfg) {
     m_cfg = cfg;
     if (m_cfg.maxPlayers < 1) m_cfg.maxPlayers = 1;
-    if (m_cfg.maxPlayers > kGamePlayers) {
-        LOGW("В max_players указано %d, но игра поддерживает только %d игроков. Мест будет %d.", m_cfg.maxPlayers, kGamePlayers,
-             kGamePlayers);
-        m_cfg.maxPlayers = kGamePlayers;
+    if (m_cfg.maxPlayers > kMaxPlayers) {
+        LOGW("В max_players указано %d, но игроков может быть не больше %d. Мест будет %d.", m_cfg.maxPlayers, kMaxPlayers,
+             kMaxPlayers);
+        m_cfg.maxPlayers = kMaxPlayers;
     }
     EnsureDirectory(m_cfg.dataDir + L"profiles");
     EnsureDirectory(m_cfg.dataDir + L"world");
@@ -43,7 +44,16 @@ bool Server::Start(const Config& cfg) {
     }
     enet_host_compress_with_range_coder(m_host);
     m_host->mtu = net::kMtu;
-    if (m_cfg.internet) m_internet.Start(m_host, m_cfg.port, m_cfg.turn);
+    // the code always carries a key; it is asked for when the game started this server for its host, or by server.ini
+    m_key = m_cfg.inviteKey ? m_cfg.inviteKey & nat::kInviteKeyMask : nat::NewInviteKey();
+    m_keyRequired = m_cfg.inviteKey != 0 || m_cfg.requireKey;
+    if (m_cfg.internet) {
+        m_internet.Start(m_host, m_cfg.port, m_cfg.turn, m_key);
+    } else if (nat::Endpoint lan{nat::LocalIp(), m_cfg.port}; lan.Valid()) {  // a local network only: its code
+        m_lanCode = nat::MakeInviteCode(lan, m_key);
+        WriteFileBytes(m_cfg.dataDir + L"invite.txt", m_lanCode.data(), m_lanCode.size());
+        LOGI("Код для локальной сети: %s (%s)", m_lanCode.c_str(), lan.ToString().c_str());
+    }
 
     // initial world: explicit file from the launcher, otherwise the last uploaded one
     if (!m_cfg.worldFile.empty()) {
@@ -56,8 +66,8 @@ bool Server::Start(const Config& cfg) {
     }
 
     for (int i = 0; i < kMaxPlayers; ++i) m_players[i].id = (uint8_t)i;
-    LOGI("Сервер \"%s\" запущен на порту %u, мест: %d%s", m_cfg.name.c_str(), m_cfg.port, m_cfg.maxPlayers,
-         m_cfg.password.empty() ? "" : ", с паролем");
+    LOGI("Сервер \"%s\" запущен на порту %u, мест: %d%s%s", m_cfg.name.c_str(), m_cfg.port, m_cfg.maxPlayers,
+         m_cfg.password.empty() ? "" : ", с паролем", m_keyRequired ? ", вход по коду приглашения" : "");
     m_running = true;
     return true;
 }
@@ -215,6 +225,11 @@ void Server::OnPacket(ENetPeer* peer, uint8_t channel, const uint8_t* data, size
         Relay(*p, channel, data, size, flags);
         return;
     }
+    if (id == C_RELAY_TO) {  // [C_RELAY_TO][u16 mask][id >= G_FIRST][payload]
+        PlayerMask mask = r.U16();
+        if (r.Ok() && size > 3 && IsRelayed(data[3])) Relay(*p, channel, data + 3, size - 3, flags, mask);
+        return;
+    }
     switch (id) {
         case C_CHAT: {
             std::string text = r.Str(kMaxChatLen * 4);
@@ -283,17 +298,31 @@ void Server::HandleHello(Player& p, Reader& r) {
     // the version comes first in every hello: an older client's shorter one was told "damaged data" instead
     bool read = h.Read(r);
     if (h.protocol != 0 && h.protocol != kProtocolVersion)
-        return reject(Format("у вас другая версия мода (у сервера %u, у вас %u). Версия должна быть одинаковой у обоих",
+        return reject(Format("у вас другая версия мода (у сервера %u, у вас %u). Версия должна быть одинаковой у всех",
                              kProtocolVersion, h.protocol),
-                      Format("your version of the mod differs (the server has %u, you have %u). Both players need the "
+                      Format("your version of the mod differs (the server has %u, you have %u). Every player needs the "
                              "same version", kProtocolVersion, h.protocol));
     if (!read) return reject("клиент прислал повреждённые данные", "the client sent damaged data");
+    uint32_t ip = p.peer->address.host;
+    if (KeyFailedTooOften(ip))
+        return reject("слишком много неудачных попыток входа. Подождите минуту", "too many failed attempts to join. Wait a minute");
     std::string name = SanitizeNickname(h.name);
     if (name.size() < 2)
         return reject("в нике должно быть от 2 до 20 символов (буквы, цифры, знаки _-.[])",
                       "a nickname needs 2 to 20 characters (letters, digits, _-.[])");
     if (ReservedFileName(name))  // the profile is a file named after it: profiles\con.bin is a device on Windows 10
         return reject("такой ник занят системой Windows, выберите другой", "this nickname is reserved by Windows, pick another one");
+    // the invite code is a ticket of its own; the password lets in those who join by address
+    bool keyOk = m_keyRequired && h.inviteKey == m_key;
+    bool passOk = !m_cfg.password.empty() && h.password == m_cfg.password;
+    if (!keyOk && !passOk && (m_keyRequired || !m_cfg.password.empty())) {
+        KeyFailed(ip);
+        if (!m_cfg.password.empty() && !h.password.empty()) return reject("неверный пароль", "wrong password");
+        if (m_keyRequired && h.inviteKey)
+            return reject("код приглашения устарел: попросите у хоста новый", "the invite code is out of date: ask the host for a new one");
+        return reject(m_cfg.password.empty() ? "на этот сервер входят по коду приглашения" : "нужен пароль или код приглашения",
+                      m_cfg.password.empty() ? "this server is joined with its invite code" : "a password or the invite code is needed");
+    }
     if (Player* old = FindByName(name)) {
         // the same player again while its old connection has not timed out (its game crashed, the line dropped): the
         // old one goes when it has been silent for 3 s (ENet pings a live game twice a second)
@@ -306,7 +335,6 @@ void Server::HandleHello(Player& p, Reader& r) {
         enet_peer_reset(ghost);
     }
     if (JoinedCount() >= m_cfg.maxPlayers) return reject("на сервере нет свободных мест", "the server is full");
-    if (!m_cfg.password.empty() && h.password != m_cfg.password) return reject("неверный пароль", "wrong password");
 
     p.name = name;
     p.joined = true;
@@ -332,6 +360,7 @@ void Server::HandleHello(Player& p, Reader& r) {
     // the default greeting has an English one, a greeting of the server's owner is shown as it is
     wel.motdEn = m_cfg.motd == Config{}.motd ? "Welcome! Type /help to see the commands." : "";
     wel.friendlyFire = m_cfg.friendlyFire;
+    wel.maxPlayers = (uint8_t)m_cfg.maxPlayers;
     wel.worldAvailable = !m_world.empty();
     Writer w(S_WELCOME);
     wel.Write(w);
@@ -385,14 +414,17 @@ void Server::HandleCommand(Player* p, const std::string& text) {
     bool admin = !p || p->isHost;
 
     if (cmd == "help" || cmd == "?") {
-        reply(kColorServer, "Команды: /players, /pm <id> <текст>, /me <действие>",
-              "Commands: /players, /pm <id> <text>, /me <action>");
+        reply(kColorServer, "Команды: /players, /pm <ник или номер> <текст>, /me <действие>",
+              "Commands: /players, /pm <nickname or number> <text>, /me <action>");
         if (admin)
-            reply(kColorServer, "Для хоста: /kick <ник или номер> [причина], /say <текст>",
-                  "For the host: /kick <nickname or number> [reason], /say <text>");
-        reply(kColorServer, "В игре: /tp (переместиться к напарнику), /tphere (позвать напарника к себе)",
-              "In the game: /tp (go to your partner), /tphere (bring your partner to you)");
+            reply(kColorServer, "Для хоста: /kick <ник или номер> [причина], /say <текст>, /go (начать миссию, не дожидаясь всех)",
+                  "For the host: /kick <nickname or number> [reason], /say <text>, /go (start the mission without waiting for all)");
+        reply(kColorServer, "В игре: /tp [ник] (к игроку), /tphere [ник] (игрока к себе), /mute <ник> (не слышать его голос)",
+              "In the game: /tp [nickname] (go to a player), /tphere [nickname] (bring a player over), /mute <nickname> "
+              "(stop hearing their voice)");
     } else if (cmd == "players" || cmd == "status") {
+        reply(kColorInfo, Format("Игроков: %d из %d", JoinedCount(), m_cfg.maxPlayers),
+              Format("Players: %d of %d", JoinedCount(), m_cfg.maxPlayers));
         for (auto& o : m_players) {
             if (!o.joined) continue;
             static const char* st[] = {"в меню", "загрузка", "в игре", "пауза"};
@@ -403,7 +435,8 @@ void Server::HandleCommand(Player* p, const std::string& text) {
                   Format("[%d] %s%s, ping %u ms, %s", o.id, o.name.c_str(), o.isHost ? " (host)" : "", ping, stEn[s]));
         }
     } else if (cmd == "pm" && parts.size() >= 3 && p) {
-        Player* to = FindById(atoi(parts[1].c_str()));
+        Player* to = FindByName(parts[1]);
+        if (!to && parts[1].find_first_not_of("0123456789") == std::string::npos) to = FindById(atoi(parts[1].c_str()));
         std::string msg = rest.size() > parts[1].size() ? Trim(rest.substr(parts[1].size())) : std::string();
         if (!to || !to->joined) return reply(kColorError, "Нет такого игрока.", "There is no such player.");
         SendChat(to, kServerId, 0xFFFF80FF, Format("[ЛС от %s] %s", p->name.c_str(), msg.c_str()),
@@ -429,7 +462,8 @@ void Server::HandleCommand(Player* p, const std::string& text) {
         SendChat(nullptr, kServerId, kColorServer, "[Сервер] " + rest, "[Server] " + rest);
     } else if (cmd == "quit" && !p) {
         Stop();
-    } else if (cmd == "tp" || cmd == "tphere" || cmd == "voice" || cmd == "save" || cmd == "skin") {
+    } else if (cmd == "tp" || cmd == "tphere" || cmd == "voice" || cmd == "save" || cmd == "skin" || cmd == "mute" ||
+               cmd == "unmute" || cmd == "go") {
         // handled by the game client locally; nothing to do on the server
     } else {
         reply(kColorError, "Такой команды нет. Чтобы увидеть список команд, напишите /help.",
@@ -631,7 +665,13 @@ void Server::SendWorld(Player& p) {
 }
 
 std::wstring Server::ProfilePath(const std::string& name) const {
-    return m_cfg.dataDir + L"profiles\\" + Utf8ToWide(ToLower(name)) + L".bin";
+    // CON, NUL, COM1... are devices in any folder: "con.bin" would write to the console, not to a file
+    std::string file = ToLower(name), base = file.substr(0, file.find('.'));
+    static const char* const kDevices[] = {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"};
+    bool device = (base.size() == 4 && (base.rfind("com", 0) == 0 || base.rfind("lpt", 0) == 0) && isdigit((uint8_t)base[3]));
+    for (const char* d : kDevices) device = device || base == d;
+    if (device || file.empty() || file.back() == '.') file = "_" + file + "_";  // a trailing dot is dropped by Windows too
+    return m_cfg.dataDir + L"profiles\\" + Utf8ToWide(file) + L".bin";
 }
 
 void Server::SendProfile(Player& p) {
@@ -643,7 +683,7 @@ void Server::SendProfile(Player& p) {
 }
 
 void Server::SendInvite(Player* to) {
-    std::string code = m_internet.Code();
+    std::string code = m_cfg.internet ? m_internet.Code() : m_lanCode;
     if (code.empty()) return;
     Writer w(S_INVITE);
     w.Str(code, 32);
@@ -657,22 +697,44 @@ void Server::SaveProfile(Player& p, const std::vector<uint8_t>& data) {
         LOGW("Не удалось записать профиль %s", p.name.c_str());
 }
 
-void Server::Relay(Player& from, uint8_t channel, const uint8_t* data, size_t size, uint32_t flags) {
-    if (channel >= CH_COUNT) return;
-    // [id][sender][payload]
-    ENetPacket* pkt = enet_packet_create(nullptr, size + 1, flags & (ENET_PACKET_FLAG_RELIABLE | ENET_PACKET_FLAG_UNSEQUENCED));
-    pkt->data[0] = data[0];
-    pkt->data[1] = from.id;
-    memcpy(pkt->data + 2, data + 1, size - 1);
-    bool sent = false;
+void Server::Relay(Player& from, uint8_t channel, const uint8_t* data, size_t size, uint32_t flags, PlayerMask mask) {
+    if (channel >= CH_COUNT || size == 0) return;
+    ENetPacket* pkt = nullptr;  // one packet for every receiver (ENet counts its references)
     for (auto& o : m_players) {
-        if (!o.joined || &o == &from) continue;
+        if (!o.joined || &o == &from || !(mask & Bit(o.id))) continue;
         // states for a player still loading or in the menu piled up there and came stale all at once (voice goes on:
         // players talk while one of them loads)
         if (channel == CH_STATE && o.status != STATUS_INGAME) continue;
-        sent = enet_peer_send(o.peer, channel, pkt) == 0 || sent;  // a peer going away takes nothing
+        if (!pkt) {
+            // [id][sender][payload]
+            pkt = enet_packet_create(nullptr, size + 1, flags & (ENET_PACKET_FLAG_RELIABLE | ENET_PACKET_FLAG_UNSEQUENCED));
+            pkt->data[0] = data[0];
+            pkt->data[1] = from.id;
+            memcpy(pkt->data + 2, data + 1, size - 1);
+        }
+        enet_peer_send(o.peer, channel, pkt);
     }
-    if (!sent) enet_packet_destroy(pkt);
+    if (pkt && pkt->referenceCount == 0) enet_packet_destroy(pkt);  // no queue took it
+}
+
+// Eight wrong keys or passwords from one address in a minute close the door to it for a minute: a key of 28 bits is not
+// to be guessed one connection at a time.
+bool Server::KeyFailedTooOften(uint32_t ip) {
+    auto it = m_failures.find(ip);
+    if (it == m_failures.end()) return false;
+    if (NowMs() - it->second.lastMs > 60000) {
+        m_failures.erase(it);
+        return false;
+    }
+    return it->second.count >= 8;
+}
+
+void Server::KeyFailed(uint32_t ip) {
+    Failures& f = m_failures[ip];
+    if (NowMs() - f.lastMs > 60000) f.count = 0;
+    ++f.count;
+    f.lastMs = NowMs();
+    if (m_failures.size() > 4096) m_failures.clear();  // a flood of addresses: forget them all rather than grow
 }
 
 void Server::SendChat(Player* to, uint8_t fromId, uint32_t rgba, const std::string& text, const std::string& en) {

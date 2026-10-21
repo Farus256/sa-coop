@@ -35,6 +35,7 @@ int g_hostSlot = 0;          // slot chosen for hosting (0 = current game)
 uint16_t g_port = 7788;
 std::string g_password, g_hostAddr;
 bool g_isHosting = false;
+uint32_t g_inviteKey = 0;    // host: the key its server asks for (in the invite code), new for every server
 uint64_t g_phaseTime = 0;
 int g_connectAttempts = 0;
 
@@ -103,6 +104,10 @@ bool StartServerProcess(const std::wstring& worldPath, bool newGame) {
     if (!worldPath.empty()) cmd += L" --world \"" + worldPath + L"\"";
     if (newGame) cmd += L" --new-game";
     cmd += cfg.friendlyFire ? L" --friendly-fire 1" : L" --friendly-fire 0";  // the checkbox wins over server.ini
+    cmd += L" --max " + std::to_wstring(std::clamp(cfg.maxPlayers, 2, (int)kMaxPlayers));  // and so does the window's count
+    wchar_t key[16];
+    swprintf(key, 16, L"%08X", (unsigned)g_inviteKey);
+    cmd += L" --key " + std::wstring(key);  // only the code (or the password) lets in
 
     if (!g_serverJob) {
         g_serverJob = CreateJobObjectW(nullptr, nullptr);
@@ -204,6 +209,7 @@ void SaveConnectSettings() {
     ini.SetInt("connect", "port", cfg.port);
     ini.Set("connect", "password", cfg.password);
     ini.SetInt("connect", "friendly_fire", cfg.friendlyFire);
+    ini.SetInt("connect", "max_players", cfg.maxPlayers);
     ini.Save(cfg.iniPath);
 }
 
@@ -223,7 +229,7 @@ std::string StatusText() {
         case Phase::Connecting: {
             if (g_isHosting) return TR("Запускаем сервер...", "Starting the server...");
             nat::Endpoint ep;
-            uint8_t key = 0;
+            uint32_t key = 0;
             if (nat::ParseInviteCode(g_hostAddr, ep, key)) return TR("Подключаемся по коду...", "Connecting by code...");
             return Format(TR("Подключаемся к %s:%u...", "Connecting to %s:%u..."), g_hostAddr.c_str(), g_port);
         }
@@ -298,6 +304,7 @@ void Host(int slot, uint16_t port, const std::string& password) {
         if (core::SaveWorldSnapshot(snap)) world = Cfg().coopDir + L"world\\host_snapshot.b";
     }
     StopServerProcess();
+    g_inviteKey = nat::NewInviteKey();
     if (!StartServerProcess(world, slot < 0)) return;
     SetPhase(Phase::StartingServer);
     g_connectAttempts = 0;
@@ -411,7 +418,7 @@ void Update() {
                 break;
             }
             if (NowMs() - g_phaseTime > 400) {
-                net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true);
+                net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true, g_inviteKey);
                 SetPhase(Phase::Connecting);
                 g_connectAttempts = 1;
             }
@@ -420,7 +427,7 @@ void Update() {
             if (net.GetState() == Session::State::Failed) {
                 if (g_isHosting && g_connectAttempts < 5 && ServerProcessAlive()) {
                     ++g_connectAttempts;
-                    net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true);
+                    net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true, g_inviteKey);
                 } else {
                     Fail(net.FailReason());
                 }

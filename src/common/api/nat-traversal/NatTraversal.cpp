@@ -359,38 +359,62 @@ static int DecodeChar(char c) {
     return p && c ? (int)(p - kAlphabet) : -1;
 }
 
-std::string MakeInviteCode(const Endpoint& ep, uint8_t key) {
-    // 60 bits: [version:4][ip:32][port:16][key:8]
-    const uint8_t* b = (const uint8_t*)&ep.ip;
-    uint64_t v = 1;  // version 1
-    for (int i = 0; i < 4; ++i) v = (v << 8) | b[i];
-    v = (v << 16) | ep.port;
-    v = (v << 8) | key;
-    std::string out;
-    for (int i = 11; i >= 0; --i) out += kAlphabet[(v >> (i * 5)) & 31];
-    return out.substr(0, 4) + "-" + out.substr(4, 4) + "-" + out.substr(8, 4);
+// The 80 bits of a version 2 code as two words: hi holds the top 16 bits, lo the low 64.
+static uint32_t Get5(uint64_t hi, uint64_t lo, int pos) {  // the 5 bits from bit `pos` up
+    uint64_t v = pos >= 64 ? hi >> (pos - 64) : pos == 0 ? lo : (lo >> pos) | (hi << (64 - pos));
+    return (uint32_t)(v & 31);
 }
 
-bool ParseInviteCode(const std::string& code, Endpoint& ep, uint8_t& key) {
-    uint64_t v = 0;
+std::string MakeInviteCode(const Endpoint& ep, uint32_t key) {
+    // 80 bits: [version 2:4][ip:32][port:16][key:28]
+    const uint8_t* b = (const uint8_t*)&ep.ip;
+    uint32_t ip = (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3];
+    uint64_t lo = (uint64_t)(ip & 0xFFFFF) << 44 | (uint64_t)ep.port << 28 | (key & kInviteKeyMask);
+    uint64_t hi = (uint64_t)2 << 12 | ip >> 20;
+    std::string out;
+    for (int i = 0; i < 16; ++i) {
+        if (i && i % 4 == 0) out += '-';
+        out += kAlphabet[Get5(hi, lo, 75 - 5 * i)];
+    }
+    return out;
+}
+
+bool ParseInviteCode(const std::string& code, Endpoint& ep, uint32_t& key) {
+    uint64_t hi = 0, lo = 0;
     int n = 0;
     std::string c = code;
     if (c.size() > 3 && (c.rfind("SA-", 0) == 0 || c.rfind("sa-", 0) == 0)) c = c.substr(3);
     for (char ch : c) {
         if (ch == '-' || ch == ' ') continue;
         int d = DecodeChar(ch);
-        if (d < 0) return false;
-        v = (v << 5) | (uint64_t)d;
-        ++n;
+        if (d < 0 || ++n > 16) return false;
+        hi = (hi << 5) | (lo >> 59);
+        lo = (lo << 5) | (uint64_t)d;
     }
-    if (n != 12) return false;
-    if ((v >> 56) != 1) return false;  // version
-    key = (uint8_t)(v & 0xFF);
-    ep.port = (uint16_t)((v >> 8) & 0xFFFF);
-    uint32_t ipHost = (uint32_t)((v >> 24) & 0xFFFFFFFF);
+    uint32_t ipHost = 0;
+    if (n == 12) {  // version 1: [version:4][ip:32][port:16][key:8], the key meant nothing
+        if ((lo >> 56) != 1) return false;
+        key = 0;
+        ep.port = (uint16_t)((lo >> 8) & 0xFFFF);
+        ipHost = (uint32_t)((lo >> 24) & 0xFFFFFFFF);
+    } else if (n == 16) {
+        if ((hi >> 12) != 2) return false;
+        key = (uint32_t)(lo & kInviteKeyMask);
+        ep.port = (uint16_t)((lo >> 28) & 0xFFFF);
+        ipHost = (uint32_t)((hi & 0xFFF) << 20 | lo >> 44);
+    } else {
+        return false;
+    }
     uint8_t b[4] = {(uint8_t)(ipHost >> 24), (uint8_t)(ipHost >> 16), (uint8_t)(ipHost >> 8), (uint8_t)ipHost};
     memcpy(&ep.ip, b, 4);
     return ep.Valid();
+}
+
+uint32_t NewInviteKey() {
+    std::random_device rd;
+    uint32_t k = 0;
+    while (!k) k = ((uint32_t)rd() ^ ((uint32_t)rd() << 7) ^ (uint32_t)GetTickCount()) & kInviteKeyMask;
+    return k;
 }
 
 std::string SignalTopic(const std::string& code) {

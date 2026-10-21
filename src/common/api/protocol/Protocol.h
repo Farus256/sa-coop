@@ -5,6 +5,8 @@
 //  * ids < 64  — service messages, handled by the server itself;
 //  * ids >= 64 — game messages: the client sends [id][payload], the server relays them to the other
 //    players as [id][u8 senderId][payload]. The server never parses game payloads.
+//  * C_RELAY_TO wraps a game message for some of the players only: [C_RELAY_TO][u16 mask][id][payload]. The
+//    others never get it (a car's state goes to the players near that car, not across the whole map).
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -13,13 +15,17 @@
 
 namespace coop::proto {
 
-constexpr int kMaxPlayers = 4;  // hard protocol limit (the game client supports 2 at the moment)
-// what the game client supports: the other player's character takes the game's second player slot (CWorld::Players[1]),
-// and a third player's could not be made (fires, props and trains are keyed by the sender's own ids too)
-constexpr int kGamePlayers = 2;
+// The protocol's limit: a player id is 0..15, a set of players is a 16-bit mask, a network id of a car or a ped
+// carries its owner in its top 4 bits. A server takes kDefaultMaxPlayers unless it is told otherwise (max_players).
+constexpr int kMaxPlayers = 16;
+constexpr int kDefaultMaxPlayers = 4;
 constexpr uint8_t kServerId = 255;
 constexpr size_t kMaxChatLen = 160;
 constexpr size_t kWorldChunk = 16 * 1024;
+
+using PlayerMask = uint16_t;
+constexpr PlayerMask kAllPlayers = 0xFFFF;
+inline PlayerMask Bit(uint8_t id) { return id < kMaxPlayers ? (PlayerMask)(1u << id) : 0; }
 
 enum Channel : uint8_t {
     CH_RELIABLE = 0,  // ordered, reliable: events
@@ -42,6 +48,7 @@ enum MsgId : uint8_t {
     C_WORLD_KEEP = 9,        // host: a fresh snapshot is impossible now (mission), send the stored world
     C_WORLD_NEWGAME = 10,    // host: it plays a new game's prologue (no save of it can exist yet)
     C_WORLD_FOLLOW = 11,     // host: the prologue is over but cannot be saved yet: partners follow in a new game
+    C_RELAY_TO = 12,         // u16 mask, then a game message ([id >= 64][payload]): relayed to the players of the mask
 
     // ---- server -> client ----
     S_WELCOME = 20,          // see Welcome
@@ -167,6 +174,7 @@ struct Hello {
     std::string password;
     bool wantsHost = false;
     uint32_t exeSize = 0;
+    uint32_t inviteKey = 0;  // the key of the invite code the player came with (0: joined by address)
 
     void Write(Writer& w) const {
         w.U32(protocol);
@@ -175,6 +183,7 @@ struct Hello {
         w.Str(password, 64);
         w.Bool(wantsHost);
         w.U32(exeSize);
+        w.U32(inviteKey);
     }
     bool Read(Reader& r) {
         protocol = r.U32();
@@ -183,6 +192,8 @@ struct Hello {
         password = r.Str(64);
         wantsHost = r.Bool();
         exeSize = r.U32();
+        // a client of the original two-player mod sends no key: it still reads, and the server tells it the versions
+        inviteKey = r.Remaining() >= 4 ? r.U32() : 0;
         return r.Ok();
     }
 };
@@ -200,6 +211,7 @@ struct Welcome {
     std::string motd, motdEn;
     bool worldAvailable = false;
     bool friendlyFire = false;  // the players can hurt each other (the host chose it creating the game)
+    uint8_t maxPlayers = kDefaultMaxPlayers;  // the server's places
     std::vector<PlayerEntry> players;  // already connected players (excluding you)
 
     void Write(Writer& w) const {
@@ -216,6 +228,7 @@ struct Welcome {
         }
         w.Str(motdEn, 512);
         w.Bool(friendlyFire);
+        w.U8(maxPlayers);
     }
     bool Read(Reader& r) {
         yourId = r.U8();
@@ -234,6 +247,7 @@ struct Welcome {
         }
         motdEn = r.Str(512);
         friendlyFire = r.Bool();
+        maxPlayers = r.U8();
         return r.Ok();
     }
 };

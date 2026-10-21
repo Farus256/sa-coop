@@ -1,7 +1,7 @@
 // coop-server.exe — SA:COOP relay server.
 //
 //   coop-server.exe [--port N] [--name "..."] [--password X] [--world <save file> | --new-game] [--host <nick>]
-//                   [--friendly-fire 0|1] [--config server.ini] [--data <dir>]
+//                   [--friendly-fire 0|1] [--max N] [--key HEX] [--config server.ini] [--data <dir>]
 #include <windows.h>
 
 #include <cstdio>
@@ -36,7 +36,11 @@ static void WriteDefaultConfig(const std::wstring& path) {
         "port = 7788\r\n"
         "; Оставьте пустым, если пароль не нужен.\r\n"
         "password =\r\n"
-        "max_players = 2\r\n"
+        "; Сколько игроков вместе с хостом: от 2 до 16. Сюжет удобнее всего проходить вчетвером.\r\n"
+        "max_players = 4\r\n"
+        "; Поставьте 1, чтобы входить можно было только по коду приглашения (или с паролем).\r\n"
+        "; Сервер, который запускает игра хоста, так делает всегда.\r\n"
+        "require_invite = 0\r\n"
         "; Ник игрока, который всегда будет хостом. Если пусто, хостом становится тот, кто зашёл первым.\r\n"
         "host =\r\n"
         "motd = Добро пожаловать! Чтобы увидеть список команд, напишите /help.\r\n"
@@ -77,7 +81,8 @@ int wmain(int argc, wchar_t** argv) {
     cfg.name = ini.Get("server", "name", cfg.name);
     cfg.port = (uint16_t)ini.GetInt("server", "port", kDefaultPort);
     cfg.password = ini.Get("server", "password", "");
-    cfg.maxPlayers = ini.GetInt("server", "max_players", 2);
+    cfg.maxPlayers = ini.GetInt("server", "max_players", proto::kDefaultMaxPlayers);
+    cfg.requireKey = ini.GetBool("server", "require_invite", false);
     cfg.hostName = ini.Get("server", "host", "");
     cfg.motd = ini.Get("server", "motd", cfg.motd);
     cfg.friendlyFire = ini.GetBool("server", "friendly_fire", false);
@@ -93,6 +98,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--password") cfg.password = next();
         else if (a == L"--host") cfg.hostName = next();
         else if (a == L"--max") cfg.maxPlayers = atoi(next().c_str());
+        else if (a == L"--key") cfg.inviteKey = (uint32_t)strtoul(next().c_str(), nullptr, 16);
         else if (a == L"--world" && i + 1 < argc) cfg.worldFile = argv[++i];
         else if (a == L"--new-game") cfg.newGame = true;
         else if (a == L"--friendly-fire") cfg.friendlyFire = next() == "1";

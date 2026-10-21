@@ -8,6 +8,7 @@ SA:COOP build script (llvm-mingw, i686).
     python tools/build.py --clean      remove the build output (build/release, build/debug)
     python tools/build.py dist         build everything and assemble dist/ (ready-to-play package)
     python tools/build.py --with DIR   also compile the .cpp files of DIR into coop.dll (the test bot)
+    python tools/build.py servertest   coop-server-test.exe: checks coop-server.exe with fake clients (tools/test)
 
 The toolchain is expected in toolchain/llvm-mingw (see tools/get-toolchain.ps1).
 """
@@ -88,7 +89,17 @@ def targets(extra=()):
         "libs": ["-lkernel32", "-luser32"],
         "ldflags": [str(ROOT / "src" / "loader" / "app" / "entry" / "vorbisFile.def")],
     }
-    return {"client": client, "server": server, "loader": loader}
+    # coop-server-test.exe: the server checked from the outside by a few fake game clients (tools/test). Not in the
+    # default build: python tools/build.py servertest, then run it next to coop-server.exe (Windows or Wine).
+    servertest = {
+        "name": "servertest", "kind": "exe", "out": "coop-server-test.exe", "optional": True,
+        "sources": glob("tools/test", "*.cpp"),
+        "includes": COMMON_INC, "defines": [], "cflags": [],
+        "deps": [common, ENET],
+        "libs": ["-lws2_32", "-lwinmm", "-lwinhttp"],
+        "ldflags": ["-municode"],
+    }
+    return {"client": client, "server": server, "loader": loader, "servertest": servertest}
 
 
 def parse_depfile(text: str):
@@ -256,7 +267,7 @@ def main():
         return 1
     extra = [str(p.resolve()) for d in args.extra for p in sorted(Path(d).glob("**/*.cpp"))]
     all_t = targets(extra)
-    want = [w for w in args.what if w != "dist"] or list(all_t.keys())
+    want = [w for w in args.what if w != "dist"] or [k for k, t in all_t.items() if not t.get("optional")]
     compdb = []
     ok = True
     built_deps = {}

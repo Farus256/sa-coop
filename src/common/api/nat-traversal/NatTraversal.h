@@ -48,9 +48,13 @@ bool ParseStunResponse(const uint8_t* data, size_t len, const uint8_t txid[12], 
 bool IsStunPacket(const uint8_t* data, size_t len);
 
 // ---------------------------------------------------------------- invite code
-// 12 characters of Crockford base32: 4 bits version, 32 bits IPv4, 16 bits port, 8 bits key.
-std::string MakeInviteCode(const Endpoint& ep, uint8_t key);
-bool ParseInviteCode(const std::string& code, Endpoint& ep, uint8_t& key);
+// Crockford base32. Version 2 (this fork): 16 characters, 4 bits version, 32 bits IPv4, 16 bits port and a 28-bit key
+// the server asks for, so the code is the ticket into the game ("XXXX-XXXX-XXXX-XXXX"). Version 1 (the original
+// two-player mod): 12 characters with an 8-bit key nobody checked; it still parses, with key 0.
+constexpr uint32_t kInviteKeyMask = 0x0FFFFFFF;
+std::string MakeInviteCode(const Endpoint& ep, uint32_t key);
+bool ParseInviteCode(const std::string& code, Endpoint& ep, uint32_t& key);
+uint32_t NewInviteKey();  // random, never 0
 std::string SignalTopic(const std::string& code);  // channel name derived from the code
 
 // ---------------------------------------------------------------- HTTP / signalling

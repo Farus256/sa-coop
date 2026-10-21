@@ -159,7 +159,7 @@ void NetClient::ThreadMain(std::string host, uint16_t port) {
     client->mtu = net::kMtu;
     ENetAddress addr{}, relay{};
     nat::Endpoint codeEp;
-    uint8_t key = 0;
+    uint32_t key = 0;
     if (nat::ParseInviteCode(host, codeEp, key)) {
         addr.host = codeEp.ip;
         addr.port = codeEp.port;

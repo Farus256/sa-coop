@@ -11,9 +11,10 @@ namespace {
 Internet* g_self = nullptr;
 }
 
-void Internet::Start(ENetHost* host, uint16_t port, const std::string& turnSpec) {
+void Internet::Start(ENetHost* host, uint16_t port, const std::string& turnSpec, uint32_t key) {
     m_host = host;
     m_port = port;
+    m_key = key;
     m_turnEnabled = !turnSpec.empty();
     if (m_turnEnabled) m_turn.Start(turnSpec, port);
     g_self = this;
@@ -116,11 +117,20 @@ void Internet::Worker() {
     for (int i = 0; i < 150 && m_turnEnabled && !m_quit && !(relay = m_turn.Relayed()).Valid(); ++i) Sleep(100);
     if (!ep.Valid()) ep = relay;
     if (!ep.Valid()) {
-        LOGW("Внешний адрес не определён (нет интернета?). Подключиться можно только по локальной сети или по IP");
+        // no internet: a code with this computer's address in the local network (its key lets the friend in)
+        ep = {nat::LocalIp(), m_port};
+        if (!ep.Valid()) {
+            LOGW("Внешний адрес не определён (нет интернета?). Подключиться можно только по локальной сети или по IP");
+            return;
+        }
+        std::string code = nat::MakeInviteCode(ep, m_key);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_code = code;
+        m_codeNew = true;
+        LOGW("Внешний адрес не определён (нет интернета?). Код для локальной сети: %s (%s)", code.c_str(), ep.ToString().c_str());
         return;
     }
-    std::random_device rd;
-    std::string code = nat::MakeInviteCode(ep, (uint8_t)rd());
+    std::string code = nat::MakeInviteCode(ep, m_key);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_code = code;

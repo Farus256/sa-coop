@@ -1,5 +1,9 @@
 #include "shared/api/net-session/Session.h"
 
+#include <algorithm>
+#include <cstdlib>
+
+#include "common/api/nat-traversal/NatTraversal.h"
 #include "common/config/version/Version.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
@@ -17,11 +21,14 @@ Session& Net() {
 }
 
 void Session::Connect(const std::string& host, uint16_t port, const std::string& nick, const std::string& password,
-                      bool wantsHost) {
+                      bool wantsHost, uint32_t inviteKey) {
     Disconnect();
     m_nick = nick;
     m_password = password;
     m_wantsHost = wantsHost;
+    nat::Endpoint ep;
+    uint32_t codeKey = 0;
+    m_inviteKey = inviteKey ? inviteKey : nat::ParseInviteCode(host, ep, codeKey) ? codeKey : 0;
     m_failReason.clear();
     m_peers.clear();
     m_inviteCode.clear();
@@ -57,6 +64,39 @@ std::string Session::PeerName(uint8_t id) const {
     return p ? p->name : Format(TR("игрок %d", "player %d"), id);
 }
 
+uint8_t Session::FindPeer(const std::string& nameOrId) const {
+    std::string want = ToLower(Trim(nameOrId));
+    if (want.empty()) return 255;
+    for (auto& [id, p] : m_peers)  // the whole nickname first
+        if (ToLower(p.name) == want) return id;
+    uint8_t found = 255;
+    int matches = 0;
+    for (auto& [id, p] : m_peers)
+        if (ToLower(p.name).rfind(want, 0) == 0) found = id, ++matches;
+    if (matches == 1) return found;
+    if (matches == 0 && want.find_first_not_of("0123456789") == std::string::npos && want.size() <= 2) {
+        int id = atoi(want.c_str());
+        if (m_peers.count((uint8_t)id)) return (uint8_t)id;
+    }
+    return 255;
+}
+
+proto::PlayerMask Session::PeersMask() const {
+    proto::PlayerMask m = 0;
+    for (auto& [id, p] : m_peers) m |= proto::Bit(id);
+    return m;
+}
+
+void Session::SendTo(proto::PlayerMask mask, uint8_t channel, const Writer& w) {
+    mask &= PeersMask();
+    if (!mask || w.Size() == 0) return;
+    if (mask == PeersMask()) return Send(channel, w);  // all of them: no mask to carry
+    Writer t(C_RELAY_TO);
+    t.U16(mask);
+    t.Raw(w.Data(), w.Size());
+    m_net.Send(channel, t);
+}
+
 void Session::SendChat(const std::string& text) {
     Writer w(C_CHAT);
     w.Str(text, kMaxChatLen * 4);
@@ -72,6 +112,7 @@ void Session::Update() {
         h.password = m_password;
         h.wantsHost = m_wantsHost;
         h.exeSize = kSupportedExeSize;
+        h.inviteKey = m_inviteKey;
         Writer w(C_HELLO);
         h.Write(w);
         m_net.Send(CH_RELIABLE, w);
@@ -123,6 +164,7 @@ void Session::HandleService(uint8_t id, Reader& r) {
             m_hostId = w.hostId;
             m_serverName = w.serverName;
             m_friendlyFire = w.friendlyFire;
+            m_maxPlayers = std::clamp<int>(w.maxPlayers, 1, kMaxPlayers);
             m_peers.clear();
             for (auto& p : w.players) m_peers[p.id] = PeerInfo{p.id, p.name, p.isHost, 0};
             m_state = State::Online;

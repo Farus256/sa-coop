@@ -25,8 +25,10 @@ public:
     enum class State { Offline, Connecting, Online, Failed };
     using Handler = void (*)(uint8_t from, Reader& r);
 
+    // host: an address or an invite code (whose key goes along); inviteKey: the key when it is not in `host` (the host's
+    // own game connecting to the server it started)
     void Connect(const std::string& host, uint16_t port, const std::string& nick, const std::string& password,
-                 bool wantsHost);
+                 bool wantsHost, uint32_t inviteKey = 0);
     void Disconnect(const std::string& reason = "");
     void Update();  // once per frame, game thread
 
@@ -38,13 +40,21 @@ public:
     const std::string& FailReason() const { return m_failReason; }
     const std::string& ServerName() const { return m_serverName; }
     bool FriendlyFire() const { return Online() && m_friendlyFire; }  // the host let the players hurt each other
+    int MaxPlayers() const { return m_maxPlayers; }  // the server's places, the host included
     const std::map<uint8_t, PeerInfo>& Peers() const { return m_peers; }
     const PeerInfo* Peer(uint8_t id) const;
     std::string PeerName(uint8_t id) const;
+    // a player by nickname (case-insensitive, a unique beginning of it is enough) or by number; 255: nobody
+    uint8_t FindPeer(const std::string& nameOrId) const;
+    proto::PlayerMask PeersMask() const;  // every other player
     uint32_t Rtt() const { return m_net.Rtt(); }
     NetClient& Net() { return m_net; }
 
     void Send(uint8_t channel, const Writer& w) { m_net.Send(channel, w); }
+    // A game message for some players only (the server relays it to them alone). A mask with every other player in it
+    // goes as an ordinary message, an empty one nowhere.
+    void SendTo(proto::PlayerMask mask, uint8_t channel, const Writer& w);
+    void SendTo(uint8_t player, uint8_t channel, const Writer& w) { SendTo(proto::Bit(player), channel, w); }
     void SendChat(const std::string& text);
 
     void SetHandler(uint8_t msgId, Handler h) { m_handlers[msgId] = h; }
@@ -75,9 +85,11 @@ private:
     std::string m_failReason;
     std::string m_nick, m_password;
     bool m_wantsHost = false;
+    uint32_t m_inviteKey = 0;
     uint8_t m_myId = 255, m_hostId = 255;
     std::string m_serverName;
     bool m_friendlyFire = false;
+    int m_maxPlayers = proto::kDefaultMaxPlayers;
     std::string m_inviteCode;
     std::map<uint8_t, PeerInfo> m_peers;
     Handler m_handlers[256] = {};

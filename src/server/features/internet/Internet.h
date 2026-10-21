@@ -19,8 +19,8 @@ namespace coop::server {
 class Internet {
 public:
     ~Internet() { Stop(); }
-    // returns at once, the work runs on a thread; turnSpec: optional relay (see TurnRelay)
-    void Start(ENetHost* host, uint16_t port, const std::string& turnSpec);
+    // returns at once, the work runs on a thread; turnSpec: optional relay (see TurnRelay); key: the invite code's
+    void Start(ENetHost* host, uint16_t port, const std::string& turnSpec, uint32_t key);
     void Stop();
     void Service();                              // network thread: punch packets
     std::string Code();                          // empty until known
@@ -33,6 +33,7 @@ private:
 
     ENetHost* m_host = nullptr;
     uint16_t m_port = 0;
+    uint32_t m_key = 0;
     std::thread m_thread;
     std::atomic<bool> m_quit{false};
     nat::UpnpResult m_upnp;
