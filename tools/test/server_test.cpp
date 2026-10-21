@@ -203,6 +203,22 @@ bool GotTag(const Bot& b, uint8_t id, uint8_t from, uint32_t tag) {
 }
 
 // ---------------------------------------------------------------- the checks
+// the ids the games give their vehicles and peds: never 0, the owner in the top bits, no two owners alike
+void EntityIds() {
+    printf("entity ids\n");
+    bool zero = false, owners = true;
+    for (int owner = 0; owner < kMaxPlayers; ++owner)
+        for (uint32_t serial = 0; serial < 9000; ++serial) {
+            uint16_t id = EntityId((uint8_t)owner, (uint16_t)serial);
+            zero |= id == 0;
+            owners &= (id >> 12) == owner;
+        }
+    CHECK(!zero, "an id was 0");
+    CHECK(owners, "an id did not carry its owner");
+    CHECK(EntityId(3, 0) != EntityId(3, 1) && EntityId(3, 4094) != EntityId(3, 4095) - 0, "serials repeat too early");
+    CHECK(Bit(15) == 0x8000 && Bit(16) == 0 && Bit(255) == 0, "player bits");
+}
+
 void InviteCodes() {
     printf("invite codes\n");
     nat::Endpoint ep, back;
@@ -425,6 +441,7 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     net::Init();
+    EntityIds();
     InviteCodes();
     Places(exe);
     Sixteen(exe);

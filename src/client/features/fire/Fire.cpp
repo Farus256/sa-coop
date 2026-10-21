@@ -1,4 +1,4 @@
-// Fires, explosions, projectiles and water cannons both games share. Fires on the ground from explosions and molotovs start in each
+// Fires, explosions, projectiles and water cannons the games share. Fires on the ground from explosions and molotovs start in each
 // game by themselves (those are synced, see below), so only these travel: a fire on a player, a ped or a vehicle this game owns (shot with a molotov,
 // a flamethrower, a burning car), and the host's mission fires (START_SCRIPT_FIRE). The other game lights the same
 // fire on its copy of the entity, or at the spot: such a fire never spreads, never burns the copy (copies are
@@ -42,10 +42,12 @@ std::map<uintptr_t, Sent> g_sent;         // our fires the other game copied
 struct Copy {
     uintptr_t fire;
     uint8_t from;      // whose fire it copies
+    uint16_t id;       // its id there
     CEntity* target;   // what it burns (nullptr: a spot)
     CVector at;        // a spot's place
 };
-std::map<uint16_t, Copy> g_copies;    // fires lit here for the other game, by its id
+std::map<uint32_t, Copy> g_copies;    // fires lit here for the other games, by sender and its id
+uint32_t CopyKey(uint8_t from, uint16_t id) { return (uint32_t)from << 16 | id; }
 uint16_t g_nextId = 1;
 uint64_t g_scanMs = 0;
 
@@ -143,6 +145,7 @@ void Scan() {
 }
 
 void Light(uint8_t from, uint16_t id, uint8_t kind, uint16_t entityId, const CVector& pos, float strength) {
+    uint32_t key = CopyKey(from, id);
     uintptr_t fire = 0;
     if (kind == ON_SPOT) {
         // CFireManager::StartFire(CVector, size, unused, creator, lifetime, generations, unused): no spreading
@@ -165,12 +168,12 @@ void Light(uint8_t from, uint16_t id, uint8_t kind, uint16_t entityId, const CVe
         fire = Field<uintptr_t>(e, e->IsPed() ? 0x730 : 0x490);  // CPed::m_pFire, CVehicle::m_pFire
     }
     if (!fire) return;
-    g_copies[id] = {fire, from, Target(fire), Ref<CVector>(fire + 0x04)};
-    LOGD("Fire %04X lit (on %d %04X)", id, kind, entityId);
+    g_copies[key] = {fire, from, id, Target(fire), Ref<CVector>(fire + 0x04)};
+    LOGD("Fire %04X of player %d lit (on %d %04X)", id, from, kind, entityId);
 }
 
-void PutOut(uint16_t id) {
-    auto it = g_copies.find(id);
+void PutOut(uint32_t key) {
+    auto it = g_copies.find(key);
     if (it == g_copies.end()) return;
     if (Burns(it->second)) CallMethod<0x5393F0>((void*)it->second.fire);  // CFire::Extinguish
     g_copies.erase(it);
@@ -384,7 +387,7 @@ void __cdecl HookWaterCannon(uint32_t vehicle, CVector* start, CVector* speed) {
     w.U16(nv->netId);
     w.Vec({at.x, at.y, at.z});
     w.Vec({speed->x, speed->y, speed->z});
-    Net().Send(proto::CH_STATE, w);
+    Net().SendTo(PlayersNear(nv->veh->GetPosition(), nv->veh->AreaCode(), 250.0f, false), proto::CH_STATE, w);
 }
 
 void ShootJets() {
@@ -421,14 +424,14 @@ public:
             uint8_t op = r.U8();
             uint16_t id = r.U16();
             if (!r.Ok() || !core::IsPlayerReady()) return;
-            if (op == FIRE_STOP) return PutOut(id);
+            if (op == FIRE_STOP) return PutOut(CopyKey(from, id));
             if (op == FIRE_OUT) return PutOutOwn(id);
             uint8_t kind = r.U8();
             uint16_t entityId = r.U16();
             Vec3 p = r.Vec();
             float strength = r.F32();
             if (!r.Ok()) return;
-            PutOut(id);
+            PutOut(CopyKey(from, id));
             Light(from, id, kind, entityId, {p.x, p.y, p.z}, strength);
         });
     }
@@ -456,9 +459,9 @@ public:
             if (PlayerFighting(Ref<CVector>(it->second.fire + 0x04))) {
                 Writer w(proto::G_FIRE);
                 w.U8(FIRE_OUT);
-                w.U16(it->first);
-                Net().Send(proto::CH_RELIABLE, w);
-                LOGI("Fire %04X of player %d put out here", it->first, it->second.from);
+                w.U16(it->second.id);
+                Net().SendTo(it->second.from, proto::CH_RELIABLE, w);  // its owner's id: for that game alone
+                LOGI("Fire %04X of player %d put out here", it->second.id, it->second.from);
             }
             it = g_copies.erase(it);
         }

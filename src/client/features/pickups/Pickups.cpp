@@ -1,4 +1,4 @@
-// Pickups both players see. Both games start from the same save, so their pickups match by model and place (the
+// Pickups all players see. Both games start from the same save, so their pickups match by model and place (the
 // position is stored in eighths of a metre). What one player takes goes in the other game too:
 //  * a pickup that comes back (weapons, health, armour on the street) is gone there for the same time;
 //  * one that does not is removed and recorded as collected, so a script waiting for it (the host's mission) goes on;
@@ -147,7 +147,7 @@ bool Announced(int type, int model) {
         return Net().IsHost() && Field<uint8_t>(script, 0xDC) && HostReplicating();  // CRunningScript::m_bIsMission
     return true;  // the engine: loot, a dropped jetpack, gang war rewards
 }
-void SendCreate(uintptr_t p) {
+void SendCreate(uintptr_t p, proto::PlayerMask to = proto::kAllPlayers) {
     Writer w(proto::G_PICKUP_CREATE);
     w.U16((uint16_t)Model(p));
     for (int k = 0; k < 3; ++k) w.I16(Pos(p)[k]);
@@ -155,7 +155,7 @@ void SendCreate(uintptr_t p) {
     w.U32(Ref<uint32_t>(p + 0x08));  // ammo, money
     w.U16(Ref<uint16_t>(p + 0x16));  // money per day
     w.U8(Ref<uint8_t>(p + 0x1D) & 2);  // empty
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
 }
 int __cdecl HookGenerateNewOne(float x, float y, float z, uint32_t model, int type, uint32_t ammo, uint32_t moneyPerDay,
                                int isEmpty, char* message) {
@@ -266,13 +266,13 @@ public:
     }
     void OnSessionEnd() override { g_announced.clear(); }
     void OnGameStarted() override { g_announced.clear(); }
-    void OnPeerResync(uint8_t) override {
-        // a restarted game lost what was announced to it: what is still here goes again
+    void OnPeerResync(uint8_t id) override {
+        // a restarted game lost what was announced to it: what is still here goes there again
         std::vector<int> alive;
         for (int h : g_announced) {
             int i = h & 0xFFFF;
             if (i >= kNumPickups || Ref<uint16_t>(Pickup(i) + 0x1A) != (uint16_t)(h >> 16) || !Type(Pickup(i))) continue;
-            SendCreate(Pickup(i));
+            SendCreate(Pickup(i), proto::Bit(id));
             alive.push_back(h);
         }
         g_announced = std::move(alive);

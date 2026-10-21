@@ -1,6 +1,7 @@
 // Population control for co-op:
-//  * near the host only the host generates random peds, traffic and parked cars (the partner sees the
-//    host's population through Peds/Vehicles sync), unless the partner is wanted (police chases);
+//  * where players are together, one game generates the random peds, traffic and parked cars for all of them (they see
+//    its population through Peds/Vehicles sync): the host's, else the lowest-numbered one's that generates its own;
+//    a wanted player's game makes its own (police chases);
 //  * entities owned by this game are not removed while the other player is close to them
 //    (CPopulation::ManagePed / CCarCtrl::PossiblyRemoveVehicle measure distance to the nearest player);
 //  * farther from this game's player, an ordinary ped or car the other player is nearer to goes to the other game
@@ -14,6 +15,7 @@
 #include "entities/ped/Peds.h"
 #include "entities/player/Players.h"
 #include "entities/vehicle/Vehicles.h"
+#include "entities/world-share/WorldShare.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
@@ -24,7 +26,7 @@ namespace coop {
 namespace {
 using namespace game;
 
-// partner closer than this to the host: the host's population (spawned 40-55 m around the host) covers both
+// a player closer than this to one whose game generates: that population (spawned 40-55 m around it) covers both
 constexpr float kShareRadius = 60.0f;
 constexpr float kShareRadiusOff = 90.0f;  // hysteresis
 
@@ -35,18 +37,28 @@ int LocalWantedLevel() {
     return wanted ? Field<int32_t>(wanted, 0x2C) : 0;
 }
 
+// A game leaves the population to a player before it (MakesBefore) whose game makes its own (its state says so) close
+// by; one that leaves it too does not count, so a line of players apart gets people all along.
 void UpdateSuppression() {
     bool want = false;
-    if (Net().Online() && !Net().IsHost() && core::IsPlayerReady()) {
+    uint8_t by = 255;
+    if (Net().Online() && !Net().IsHost() && core::IsPlayerReady() && LocalWantedLevel() == 0) {
         CPlayerPed* me = FindPlayerPed(0);
-        if (const RemotePlayer* host = Players::Instance().Get(Net().HostId()); host && host->hasState) {
-            float d = (host->state.pos - me->GetPosition()).Length2D();
-            bool sameArea = host->state.area == me->AreaCode();
-            float limit = g_suppress ? kShareRadiusOff : kShareRadius;
-            want = sameArea && d < limit && LocalWantedLevel() == 0;
+        float limit = g_suppress ? kShareRadiusOff : kShareRadius;
+        for (auto& [id, rp] : Players::Instance().All()) {
+            if (!rp.hasState || !(rp.state.flags & OnFootState::F_POPULATION) || !MakesBefore(id) ||
+                NowMs() - rp.stateRecvMs > 3000 || rp.state.area != me->AreaCode())
+                continue;
+            if ((rp.state.pos - me->GetPosition()).Length2D() < limit) {
+                want = true;
+                by = id;
+                break;
+            }
         }
     }
-    if (want != g_suppress) LOGI("Population generation %s (host nearby: %d)", want ? "handed to the host" : "local", want);
+    if (want != g_suppress)
+        LOGI("Population generation %s", want ? Format("handed to player %d", by).c_str() : "local");
+    Share().population = !want;
     if (g_suppress && !want) {
         // the engine adds one ped a frame at the edge of view: the empty streets around would fill slowly. The
         // countdowns of a game's start (and of a respawn) fill them at once
@@ -177,7 +189,10 @@ public:
         mem::HookFn(0x424F80, &HookPossiblyRemoveVehicle, &g_origPossiblyRemove, "CCarCtrl::PossiblyRemoveVehicle");
     }
     void OnPreProcess() override { UpdateSuppression(); }
-    void OnSessionEnd() override { g_suppress = false; }
+    void OnSessionEnd() override {
+        g_suppress = false;
+        Share().population = true;
+    }
 };
 
 Population g_pop;

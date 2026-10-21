@@ -3,6 +3,7 @@
 #include <map>
 #include <string>
 
+#include "common/api/protocol/Protocol.h"
 #include "common/lib/buffer/Buffer.h"
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
@@ -37,7 +38,8 @@ struct PedSyncState {
     };
 };
 
-// NPC known to both players. owner == my id: simulated here and announced; otherwise a mirror.
+// NPC known to the players. owner == my id: simulated here and announced; otherwise a mirror (a record without a ped
+// while this game's player is far from it).
 struct NetPed {
     uint16_t netId = 0;
     game::CPed* ped = nullptr;  // mirror: nullptr until it could be spawned (model streaming, vehicle missing)
@@ -98,8 +100,8 @@ public:
     // a script here fills that slot with another character: the copies wearing it are made again elsewhere (the game
     // drops the model from under script people, and a copy is one)
     void RespawnCopiesOf(int model);
-    // a partner (re)started its game: announce our peds again
-    void Reannounce();
+    // a player (re)started its game: announce our peds to it again
+    void Reannounce(uint8_t to);
     // our ped goes to player `to` (it takes the mirror over as its own) and ours is deleted
     void GiveAway(uint16_t netId, uint8_t to);
     // this game would drop the ped, the other player is nearer: it goes to that player's game (false: not ours to give)
@@ -109,8 +111,11 @@ public:
 
 private:
     void ScanOwned();
-    void Announce(NetPed& np);
+    void Announce(NetPed& np, proto::PlayerMask to = proto::kAllPlayers);
     void SendState(NetPed& np);
+    proto::PlayerMask StateTargets(NetPed& np);
+    bool WantMirror(const NetPed& np) const;  // whether this game keeps a copy of another game's ped now
+    void Unspawn(NetPed& np);
     void HandleCreate(uint8_t from, Reader& r);
     void HandleRemove(uint8_t from, Reader& r);
     void HandleSync(uint8_t from, Reader& r);

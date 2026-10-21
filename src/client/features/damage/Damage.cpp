@@ -1,4 +1,4 @@
-// Damage between the two games. Who decides a hit:
+// Damage between the games. Who decides a hit:
 //  * NPCs and vehicles are damaged only by their owner's game: a hit of the local player on a mirror is
 //    sent to the owner, which applies it with the game's own damage functions (the NPC then reacts to
 //    the remote player as the attacker: flees, fights back, dies);
@@ -125,7 +125,7 @@ void SendDamage(uint8_t kind, uint8_t owner, uint16_t netId, int weapon, float d
     w.U8((uint8_t)piece);
     w.U8((uint8_t)dir);
     w.Vec({pos.x, pos.y, pos.z});
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(owner, proto::CH_RELIABLE, w);  // the game it is for decides, the others need not hear of it
 }
 
 using GenerateDamageFn = bool(__cdecl*)(CPed*, CEntity*, int, int, int, int);

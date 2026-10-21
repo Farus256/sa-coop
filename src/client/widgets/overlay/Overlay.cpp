@@ -32,8 +32,9 @@ void RenderOverlay() {
     // status line, bottom-right
     std::string line;
     if (net.Online()) {
-        line = Format(TR("SA:COOP · %s · %u мс", "SA:COOP · %s · %u ms"),
-                      net.IsHost() ? TR("хост", "host") : TR("напарник", "partner"), net.Rtt());
+        line = Format(TR("SA:COOP · %s · %d/%d · %u мс", "SA:COOP · %s · %d/%d · %u ms"),
+                      net.IsHost() ? TR("хост", "host") : TR("напарник", "partner"), 1 + (int)net.Peers().size(),
+                      net.MaxPlayers(), net.Rtt());
     } else if (frontend) {
         line = TR("SA:COOP " COOP_VERSION_STR " · F9: совместная игра", "SA:COOP " COOP_VERSION_STR " · F9: co-op");
     }
@@ -59,27 +60,37 @@ void RenderOverlay() {
     }
 
     if (g_playerList && net.Online()) {
-        float W = 520 * s;
-        float lh = g.LineHeight(FONT_NORMAL) + 6 * s;
+        // up to 16 rows: a smaller font once there are many, so the list stays on the screen
         int rows = 1 + (int)net.Peers().size();
-        float H = lh * (rows + 1) + 30 * s;
-        float x = (g.Width() - W) * 0.5f, y = g.Height() * 0.25f;
+        FontId font = rows > 8 ? FONT_SMALL : FONT_NORMAL;
+        float W = 560 * s;
+        float lh = g.LineHeight(font) + (rows > 8 ? 3 : 6) * s;
+        float H = lh * rows + g.LineHeight(FONT_MENU_SMALL) + 36 * s;
+        float x = (g.Width() - W) * 0.5f, y = std::max(8 * s, std::min(g.Height() * 0.25f, (g.Height() - H) * 0.5f));
         g.Rect(x, y, W, H, 0xE0000000);
         g.RectOutline(x, y, W, H, w::kSaLine, std::max(1.0f, s));
         g.Text(FONT_MENU_SMALL, x + 16 * s, y + 12 * s,
-               Format(TR("%s · игроков: %d", "%s · players: %d"), net.ServerName().c_str(), rows), w::kSaMuted);
-        float cy = y + 10 * s + lh * 1.3f;
-        auto row = [&](const std::string& name, bool host, uint32_t ping, bool me, bool talking) {
-            std::string shown = (talking ? "{FFDC50}((•)){FFFFFF} " : "") + name + (me ? TR(" (вы)", " (you)") : "");
-            g.Text(FONT_NORMAL, x + 16 * s, cy, shown, me ? 0xFFFFFFFF : 0xFFD0D0D0, TEXT_SHADOW);
-            // the role ends before the ping column ("999 мс"): "напарник" in this font reached into it
-            g.Text(FONT_MENU_SMALL, x + W - 104 * s, cy + 3 * s, host ? TR("хост", "host") : TR("напарник", "partner"),
-                   host ? w::kSaBlue : w::kSaGreen, TEXT_RIGHT);
-            g.Text(FONT_NORMAL, x + W - 16 * s, cy, Format(TR("%u мс", "%u ms"), ping), w::kSaMuted, TEXT_RIGHT | TEXT_SHADOW);
+               Format(TR("%s · игроков: %d из %d", "%s · players: %d of %d"), net.ServerName().c_str(), rows, net.MaxPlayers()),
+               w::kSaMuted);
+        float cy = y + 22 * s + g.LineHeight(FONT_MENU_SMALL);
+        game::CPlayerPed* mePed = core::IsPlayerReady() ? game::FindPlayerPed(0) : nullptr;
+        auto row = [&](uint8_t id, const std::string& name, bool host, uint32_t ping, bool me, bool talking) {
+            char dot[24];
+            snprintf(dot, sizeof dot, "{%06X}●{FFFFFF} ", (unsigned)(PlayerColor(id) & 0xFFFFFF));
+            std::string shown = dot + std::string(talking ? "{FFDC50}((•)){FFFFFF} " : "") + name + (me ? TR(" (вы)", " (you)") : "");
+            g.Text(font, x + 16 * s, cy, shown, me ? 0xFFFFFFFF : 0xFFD0D0D0, TEXT_SHADOW);
+            std::string where;  // how far, for the others in the game
+            if (const RemotePlayer* rp = me ? nullptr : Players::Instance().Get(id); rp && rp->ped && mePed)
+                where = Format(TR("%.0f м", "%.0f m"), (rp->ped->GetPosition() - mePed->GetPosition()).Length());
+            else if (!me)
+                where = TR("не в игре", "not in game");
+            if (!where.empty()) g.Text(font, x + W - 200 * s, cy, where, w::kSaMuted, TEXT_RIGHT | TEXT_SHADOW);
+            if (host) g.Text(FONT_MENU_SMALL, x + W - 104 * s, cy + 2 * s, TR("хост", "host"), w::kSaBlue, TEXT_RIGHT);
+            g.Text(font, x + W - 16 * s, cy, Format(TR("%u мс", "%u ms"), ping), w::kSaMuted, TEXT_RIGHT | TEXT_SHADOW);
             cy += lh;
         };
-        row(Cfg().nickname, net.IsHost(), net.Rtt(), true, VoiceIsTransmitting());
-        for (auto& [id, p] : net.Peers()) row(p.name, p.isHost, p.ping, false, VoiceIsSpeaking(id));
+        row(net.MyId(), Cfg().nickname, net.IsHost(), net.Rtt(), true, VoiceIsTransmitting());
+        for (auto& [id, p] : net.Peers()) row(id, p.name, p.isHost, p.ping, false, VoiceIsSpeaking(id));
     }
 
     if (Cfg().debugOverlay) {

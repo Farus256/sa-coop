@@ -20,6 +20,16 @@ Session& Net() {
     return s;
 }
 
+uint32_t PlayerColor(uint8_t id) {
+    // light enough for the dark chat background and the radar, apart from one another; the first two are the ones the
+    // host and its partner always had
+    static const uint32_t kColors[kMaxPlayers] = {
+        0xFF64B4FF, 0xFF78DC78, 0xFFFFB450, 0xFFE678E6, 0xFFFFE65A, 0xFF5AE6E6, 0xFFFF7878, 0xFFB48CFF,
+        0xFFA0E650, 0xFFFF8CC8, 0xFF50C8A0, 0xFFE6A078, 0xFF8CA0FF, 0xFFDCDC96, 0xFFC878FF, 0xFFB4DCFF,
+    };
+    return kColors[id % kMaxPlayers];
+}
+
 void Session::Connect(const std::string& host, uint16_t port, const std::string& nick, const std::string& password,
                       bool wantsHost, uint32_t inviteKey) {
     Disconnect();
@@ -221,9 +231,8 @@ void Session::HandleService(uint8_t id, Reader& r) {
             if (from == kServerId) {
                 chat.Add(Cfg().english && !en.empty() ? en : text, ui::RgbaToArgb(rgba));
             } else {
-                uint32_t nameColor = from == m_hostId ? 0xFF64B4FF : 0xFF78DC78;
                 char hex[16];
-                snprintf(hex, sizeof(hex), "{%06X}", nameColor & 0xFFFFFF);
+                snprintf(hex, sizeof(hex), "{%06X}", PlayerColor(from) & 0xFFFFFF);
                 chat.Add(std::string(hex) + PeerName(from) + "{FFFFFF}: " + text, 0xFFFFFFFF);
             }
             break;

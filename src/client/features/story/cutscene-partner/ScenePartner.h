@@ -1,12 +1,14 @@
 #pragma once
-// The partner's character in the host's cutscenes: where it is in each shot and what it does there.
-// The host's game picks the spot (the partner's follows) from the cutscene camera, the actors and what is drawn
+// The partners' characters in the host's cutscenes: where each is in each shot and what it does there (up to three of
+// them; with more partners the rest keep out of the scene). The host's game picks the spots (the partners' follow)
+// from the cutscene camera, the actors and what is drawn
 // around CJ (cutscene sets often have no collision): a chair, sofa or steps (sits down), a wall behind it (leans on
 // it, maybe smoking) or free floor (stands about), always on CJ's floor, inside the frame, seen by the camera and
 // covering nobody, out of the way of the scene's people and cars, and so for the whole shot: the cutscene camera's
 // spline and the animation tracks tell how the shot goes on.
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "shared/game/Game.h"
 
@@ -28,13 +30,19 @@ void Prepare();
 // Looks at the frame being drawn: on a cut to another shot the spot is chosen again. Call it from the render
 // hook while a cutscene runs: only then does the screen projection match the camera of the shot.
 void Analyse();
-// host: the spot just chosen and the moment (the camera's clock, ms) its shot begins, once per shot
-bool TakeDecision(Spot& s, float& at);
+// host: the partners in the scene, in the order they get places (call it before Analyse)
+void SetCast(const std::vector<uint8_t>& ids);
+// host: a spot just chosen for player id and the moment (the camera's clock, ms) its shot begins, once per shot and
+// player: call it until it says false
+bool TakeDecision(uint8_t& id, Spot& s, float& at);
 // partner: the host's choices; Follow (instead of Analyse) takes each on when this game's cutscene gets there
-void FollowSpot(const Spot& s, float at);
+void FollowSpot(uint8_t id, const Spot& s, float at);
 void Follow();
-// The spot for the current shot. False: no cutscene with CJ (yet) to place the partner in.
-bool CurrentSpot(Spot& out);
+// a shot of a cutscene with CJ was taken on (spots chosen or followed)
+bool HaveShot();
+// Player id's spot for the current shot. False: none (no cutscene with CJ yet, or no place for that player).
+bool CurrentSpot(uint8_t id, Spot& out);
+void ForEachSpot(void (*fn)(uint8_t id, const Spot& s));
 int ShotNumber();                     // grows with every new shot
 float ShotLeftMs();                   // until the current shot's cut, by the camera's spline; -1 unknown
 const char* Describe(const Spot& s);  // "lean GANGS/leanIDLE", for logs

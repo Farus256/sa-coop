@@ -26,6 +26,11 @@ constexpr size_t kWorldChunk = 16 * 1024;
 using PlayerMask = uint16_t;
 constexpr PlayerMask kAllPlayers = 0xFFFF;
 inline PlayerMask Bit(uint8_t id) { return id < kMaxPlayers ? (PlayerMask)(1u << id) : 0; }
+// Ids of the vehicles and peds a player's game announces: its number in the top 4 bits, 1..4095 below (0 stands for
+// "none" in the messages, so no id is 0)
+inline uint16_t EntityId(uint8_t owner, uint16_t serial) {
+    return (uint16_t)(((owner & 0x0F) << 12) | (serial % 4095 + 1));
+}
 
 enum Channel : uint8_t {
     CH_RELIABLE = 0,  // ordered, reliable: events

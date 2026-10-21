@@ -417,8 +417,10 @@ void Server::HandleCommand(Player* p, const std::string& text) {
         reply(kColorServer, "Команды: /players, /pm <ник или номер> <текст>, /me <действие>",
               "Commands: /players, /pm <nickname or number> <text>, /me <action>");
         if (admin)
-            reply(kColorServer, "Для хоста: /kick <ник или номер> [причина], /say <текст>, /go (начать миссию, не дожидаясь всех)",
-                  "For the host: /kick <nickname or number> [reason], /say <text>, /go (start the mission without waiting for all)");
+            reply(kColorServer, "Для хоста: /kick <ник или номер> [причина], /say <текст>, /go (начать миссию, не дожидаясь всех), "
+                                "/tphere all (собрать всех к себе)",
+                  "For the host: /kick <nickname or number> [reason], /say <text>, /go (start the mission without waiting for all), "
+                  "/tphere all (bring everyone over)");
         reply(kColorServer, "В игре: /tp [ник] (к игроку), /tphere [ник] (игрока к себе), /mute <ник> (не слышать его голос)",
               "In the game: /tp [nickname] (go to a player), /tphere [nickname] (bring a player over), /mute <nickname> "
               "(stop hearing their voice)");

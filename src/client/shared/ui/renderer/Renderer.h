@@ -31,6 +31,7 @@ constexpr uint32_t Argb(uint8_t a, uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
 inline uint32_t RgbaToArgb(uint32_t rgba) { return (rgba >> 8) | ((rgba & 0xFF) << 24); }
+inline uint32_t ArgbToRgba(uint32_t argb) { return (argb << 8) | (argb >> 24); }
 inline uint32_t WithAlpha(uint32_t argb, float a) {
     uint32_t al = (uint32_t)((float)(argb >> 24) * (a < 0 ? 0 : a > 1 ? 1 : a));
     return (argb & 0x00FFFFFF) | (al << 24);

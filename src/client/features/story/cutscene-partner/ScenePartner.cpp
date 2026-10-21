@@ -634,9 +634,18 @@ struct Decision {
     Spot spot;
     float at;
 };
-std::deque<Decision> g_follow;  // partner: the host's choices still to come
-bool g_decided = false;         // host: a choice not sent yet
-float g_decidedAt = 0;
+// Every partner in the scene is an extra of its own: up to kMaxExtras (more would crowd the scene), the rest keep out
+// of it. The host's game chooses the spots in turn, those placed before counting as people of the scene.
+constexpr size_t kMaxExtras = 3;
+struct Extra {
+    Spot spot;
+    bool haveSpot = false;
+    bool decided = false;          // host: a choice not sent yet
+    float decidedAt = 0;
+    std::deque<Decision> follow;   // a partner's game: the host's choices still to come
+};
+std::map<uint8_t, Extra> g_extras;  // by player
+std::vector<uint8_t> g_cast;        // host: who gets places this shot, in order
 struct {
     CVector cj;
     float at;
@@ -669,8 +678,9 @@ struct Scene {
 float PoseHeight(Pose p) { return p == POSE_SIT || p == POSE_STEP ? 1.35f : 1.8f; }
 float PoseBonus(Pose p) { return p == POSE_SIT ? 1.6f : p == POSE_STEP ? 1.3f : p == POSE_LEAN ? 1.0f : 0.0f; }
 
-Spot g_spot;
-bool g_haveSpot = false;
+Spot g_prev;              // the spot of the extra being placed, from the shot before
+bool g_havePrev = false;
+bool g_haveSpot = false;  // a shot of this cutscene was taken on (chosen or followed)
 Scene g_lastScene;
 bool g_live = false;  // a cutscene with CJ was analysed in the last frame
 CVector g_lastCam, g_lastCj;
@@ -903,7 +913,7 @@ float Rate(const Scene& sc, Spot& s, bool loose = false) {
     float score = PoseBonus(s.pose) - std::fabs(d - 2.2f) * 0.5f + std::min(clear, 2.5f) * 0.3f -
                   (shown ? std::fabs(std::fabs(b.x / sc.w - 0.5f) - 0.25f) * 0.8f : 0.4f) + 0.5f * (float)(1 + later.in) / (float)n;
     if (shown && b.bottom - b.top < sc.h * 0.12f) score -= 1.0f;  // too small to notice
-    if (g_haveSpot && g_spot.pose == s.pose && (g_spot.ground - s.ground).Length2D() < 0.3f) score += 2.5f;  // stays put
+    if (g_havePrev && g_prev.pose == s.pose && (g_prev.ground - s.ground).Length2D() < 0.3f) score += 2.5f;  // stays put
     return score;
 }
 
@@ -1258,15 +1268,36 @@ bool WalkFits(const Scene& sc, const Track& tr, int side) {
 
 const char* g_how = "";  // how the shot's spot came about (logs)
 
+// An extra placed before is one of the scene's people for the next one: nobody stands in him, covers him or walks
+// into him over the shot (walking with CJ, he is where his walk takes him at each moment).
+void AddExtraToScene(Scene& sc, const Spot& s) {
+    if (s.pose == POSE_HIDDEN) return;
+    CEntity* cj = CutsceneCj();
+    Track tr;
+    bool walk = s.pose == POSE_WALK && cj && cj->Matrix() && TrackOf(cj, tr) && PathOf(tr).size() > 1;
+    CVector feetNow{sc.cj.x, sc.cj.y, sc.floor}, fwd = cj && cj->Matrix() ? cj->Matrix()->forward : CVector{0, 1, 0};
+    auto at = [&](float dt) {
+        CVector p = walk ? WalkerAt(PathOf(tr), tr.time, feetNow, fwd, tr.time + dt, (int)s.act - 1).feet : BodyOf(s);
+        p.z = sc.floor;
+        return p;
+    };
+    Actor a{};
+    a.e = nullptr;
+    a.feet = at(0);
+    a.onScreen = Project(a.feet, PoseHeight(s.pose), a.body);
+    sc.actors.push_back(a);
+    for (Sample& m : g_ahead) m.actors.push_back(at(m.dt));
+}
+
 Spot Choose(const Scene& sc) {
     const Places* own = PlacesOf(g_cutscene);
-    bool may = !sc.cjInCar && !(own && own->hidden), before = may && g_haveSpot && g_spot.pose != POSE_HIDDEN;
+    bool may = !sc.cjInCar && !(own && own->hidden), before = may && g_havePrev && g_prev.pose != POSE_HIDDEN;
     Track tr;
     bool track = TrackOf(CutsceneCj(), tr) && PathOf(tr).size() > 1;
     CEntity* cj = CutsceneCj();
     CVector cjFwd = cj && cj->Matrix() ? cj->Matrix()->forward : CVector{0, 1, 0};
     // where he is now: a walk has got on, it stands there if this shot is no walk
-    Spot prev = g_spot;
+    Spot prev = g_prev;
     if (before && prev.pose == POSE_WALK && track) {
         Walker w = WalkerAt(PathOf(tr), tr.time, CVector{sc.cj.x, sc.cj.y, sc.floor}, cjFwd, tr.time, (int)prev.act - 1);
         prev = Spot{w.feet, w.heading, POSE_STAND, 0};  // the clips, not a cigarette out of nowhere
@@ -1274,7 +1305,7 @@ Spot Choose(const Scene& sc) {
     // CJ walks: the partner goes along, on his side of CJ if he was walking already, unless that is a jump the
     // shot shows
     if (may && !(own && !own->spots.empty()) && track && MocapWalkCount() && MocapCount() > 1 && CjWalks(sc, tr)) {
-        int first = before && g_spot.pose == POSE_WALK ? (int)g_spot.act - 1 : 1;
+        int first = before && g_prev.pose == POSE_WALK ? (int)g_prev.act - 1 : 1;
         for (int side : {first, first ? -first : 1, first ? 0 : -1}) {
             if (!WalkFits(sc, tr, side)) continue;
             Walker w = WalkerAt(PathOf(tr), tr.time, CVector{sc.cj.x, sc.cj.y, sc.floor}, cjFwd, tr.time, side);
@@ -1315,8 +1346,8 @@ Spot Choose(const Scene& sc) {
     // CJ in a car, or no room near him at all: where we were if the camera does not see that place, otherwise
     // out of the cutscene for this shot
     g_how = "";
-    if (g_haveSpot && g_spot.pose != POSE_HIDDEN && !Shows(sc, prev)) return prev;
-    Spot hidden = g_haveSpot ? prev : Spot{{sc.cj.x, sc.cj.y, sc.floor}, 0, POSE_STAND, 0};  // on the floor, not in the air
+    if (g_havePrev && g_prev.pose != POSE_HIDDEN && !Shows(sc, prev)) return prev;
+    Spot hidden = g_havePrev ? prev : Spot{{sc.cj.x, sc.cj.y, sc.floor}, 0, POSE_STAND, 0};  // on the floor, not in the air
     hidden.pose = POSE_HIDDEN;
     return hidden;
 }
@@ -1606,6 +1637,7 @@ void Analyse() {
         g_seed = 2166136261u;
         for (const char* c = g_cutscene; *c; ++c) g_seed = (g_seed ^ (uint8_t)*c) * 16777619u;
         g_haveSpot = false;
+        for (auto& [id, x] : g_extras) x.haveSpot = false;
     }
     float clock = Ref<float>(cam::Active() + 0x90);
     if (g_check.armed && clock >= g_check.at) {
@@ -1628,8 +1660,23 @@ void Analyse() {
     std::fill(std::begin(g_rejects), std::end(g_rejects), 0);
     std::fill(std::begin(g_attractors), std::end(g_attractors), 0);
     g_tried.clear();
-    g_spot = Choose(sc);
-    g_decided = true, g_decidedAt = start;
+    std::vector<uint8_t> cast = g_cast;
+    if (cast.size() > kMaxExtras) cast.resize(kMaxExtras);
+    std::string chosen;
+    uint32_t seed = g_seed;
+    for (size_t k = 0; k < cast.size(); ++k) {
+        Extra& x = g_extras[cast[k]];
+        g_prev = x.spot, g_havePrev = x.haveSpot;
+        g_seed = seed ^ (uint32_t)(k * 0x9E3779B9u);  // each his own acts
+        x.spot = Choose(sc);
+        x.haveSpot = x.decided = true, x.decidedAt = start;
+        chosen += Format("%s[%d] %s%s", k ? "; " : "", cast[k], Describe(x.spot), g_how);
+        AddExtraToScene(sc, x.spot);
+    }
+    g_seed = seed;
+    for (auto& [id, x] : g_extras)  // out of the cast now (more partners than places): out of the scene
+        if (std::find(cast.begin(), cast.end(), id) == cast.end() && x.haveSpot && x.spot.pose != POSE_HIDDEN)
+            x.spot.pose = POSE_HIDDEN, x.decided = true, x.decidedAt = start;
     g_lastScene = sc;
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::string kinds;
@@ -1638,10 +1685,10 @@ void Analyse() {
     if (!kinds.empty()) LOGD("  ped attractors around (type:count):%s", kinds.c_str());
     g_haveSpot = true;
     ++g_shot;
-    LOGD("Cutscene %s shot %d (%.1f s ahead%s): %s%s in %.1f ms (rejected: distance %d, crowd %d, frame %d, covers CJ %d, "
+    LOGD("Cutscene %s shot %d (%.1f s ahead%s): %s in %.1f ms (rejected: distance %d, crowd %d, frame %d, covers CJ %d, "
          "covers actor %d, solid %d, floor %d, not seen %d, in the way %d, later in the shot %d)",
          g_cutscene, g_shot, g_ahead.empty() ? 0.0f : g_ahead.back().dt, sc.cjInCar ? ", CJ in a car" : "",
-         Describe(g_spot), g_how, ms, g_rejects[R_DISTANCE],
+         chosen.empty() ? "nobody to place" : chosen.c_str(), ms, g_rejects[R_DISTANCE],
          g_rejects[R_CROWD], g_rejects[R_FRAME], g_rejects[R_COVERS_CJ], g_rejects[R_COVERS_ACTOR], g_rejects[R_SOLID],
          g_rejects[R_FLOOR], g_rejects[R_HIDDEN], g_rejects[R_FRONT], g_rejects[R_LATER]);
     // the people's root tracks are read from the engine's own data: CJ's is checked against where CJ gets to
@@ -1651,14 +1698,19 @@ void Analyse() {
     }
 }
 
-bool TakeDecision(Spot& s, float& at) {
-    if (!g_decided) return false;
-    g_decided = false;
-    s = g_spot, at = g_decidedAt;
-    return true;
+void SetCast(const std::vector<uint8_t>& ids) { g_cast = ids; }
+
+bool TakeDecision(uint8_t& id, Spot& s, float& at) {
+    for (auto& [pid, x] : g_extras)
+        if (x.decided) {
+            x.decided = false;
+            id = pid, s = x.spot, at = x.decidedAt;
+            return true;
+        }
+    return false;
 }
 
-void FollowSpot(const Spot& s, float at) { g_follow.push_back({s, at}); }
+void FollowSpot(uint8_t id, const Spot& s, float at) { g_extras[id].follow.push_back({s, at}); }
 
 void Follow() {
     UpdateTalk();
@@ -1666,17 +1718,30 @@ void Follow() {
     if (!g_live || cam::Mode() != kModeFlyBy) return;
     float clock = Ref<float>(cam::Active() + 0x90);
     bool due = false;
-    for (; !g_follow.empty() && g_follow.front().at <= clock + 30.0f; g_follow.pop_front()) g_spot = g_follow.front().spot, due = true;
+    for (auto& [id, x] : g_extras) {
+        bool mine = false;
+        for (; !x.follow.empty() && x.follow.front().at <= clock + 30.0f; x.follow.pop_front()) x.spot = x.follow.front().spot, mine = true;
+        if (!mine) continue;
+        x.haveSpot = due = true;
+        LOGD("Cutscene: player %d's spot from the host: %s", id, Describe(x.spot));
+    }
     if (!due) return;
     g_haveSpot = true;
     ++g_shot;
-    LOGD("Cutscene shot %d from the host: %s", g_shot, Describe(g_spot));
 }
 
-bool CurrentSpot(Spot& out) {
-    if (!g_live || !g_haveSpot) return false;
-    out = g_spot;
+bool HaveShot() { return g_live && g_haveSpot; }
+
+bool CurrentSpot(uint8_t id, Spot& out) {
+    auto it = g_extras.find(id);
+    if (!g_live || !g_haveSpot || it == g_extras.end() || !it->second.haveSpot) return false;
+    out = it->second.spot;
     return true;
+}
+
+void ForEachSpot(void (*fn)(uint8_t id, const Spot& s)) {
+    for (auto& [id, x] : g_extras)
+        if (x.haveSpot) fn(id, x.spot);
 }
 
 int ShotNumber() { return g_shot; }
@@ -1836,11 +1901,10 @@ void ReleaseAll() {
     }
     g_held.clear();
     g_talk.clear();
-    g_haveSpot = false;
+    g_haveSpot = g_havePrev = false;
     g_live = false;
     g_cutscene[0] = 0;
-    g_follow.clear();
-    g_decided = false;
+    g_extras.clear();
 }
 
 // ---- review harness
@@ -1861,8 +1925,10 @@ void DumpShot(const std::string& path) {
         body(a.body);
         fprintf(f, "\n");
     }
-    fprintf(f, "spot %.3f %.3f %.3f %.3f %d %d\n", g_spot.ground.x, g_spot.ground.y, g_spot.ground.z, g_spot.heading,
-            g_spot.pose, g_spot.act);
+    for (auto& [id, x] : g_extras)
+        if (x.haveSpot)
+            fprintf(f, "spot %.3f %.3f %.3f %.3f %d %d\n", x.spot.ground.x, x.spot.ground.y, x.spot.ground.z, x.spot.heading,
+                    x.spot.pose, x.spot.act);
     // the rest of the shot: the camera's path and the people's tracks
     for (const Sample& m : g_ahead) {
         fprintf(f, "ahead %.2f %.3f %.3f %.3f %.4f %.4f %.4f %.3f %.3f", m.dt, m.view.pos.x, m.view.pos.y, m.view.pos.z,

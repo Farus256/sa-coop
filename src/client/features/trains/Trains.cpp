@@ -1,9 +1,11 @@
-// Trains both games share. A train is its own game's (a random one, a mission's): that game tells the others where it
-// is (kind, track, distance along the rails, speed), and they show it as a mission train of the same kind kept where the
-// real one is, set every frame. The copies are locked, the driver is in the train's game. Random trains come from the
-// host's game while the players are together: the partner's game makes its own only while its player is far from the
-// host (CTrain::DisableRandomTrains). Whoever rides a train sits in the cab of its copy (Players). The kind of a train is
-// not kept on it: it is noted when the train is made (CTrain::CreateMissionTrain makes the random ones too).
+// Trains the games share. A train is its own game's (a random one, a mission's): that game tells the players near it
+// where it is (kind, track, distance along the rails, speed), and their games show it as a mission train of the same
+// kind kept where the real one is, set every frame, while their player is near it (a train is several vehicles: 16
+// players' trains everywhere would fill the vehicle pool). The copies are locked, the driver is in the train's game.
+// Random trains come from one game where players are together: the host's, else the lowest-numbered one's that makes
+// its own; a game makes its own only while no such player is near (CTrain::DisableRandomTrains). Whoever rides a
+// train sits in the cab of its copy (Players). The kind of a train is not kept on it: it is noted when the train is
+// made (CTrain::CreateMissionTrain makes the random ones too).
 #include <cmath>
 #include <map>
 
@@ -11,6 +13,7 @@
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
 #include "entities/player/Players.h"
+#include "entities/world-share/WorldShare.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/game/Game.h"
 #include "shared/game/Script.h"
@@ -27,10 +30,11 @@ enum : uint8_t { TRAIN_STATE = 1, TRAIN_GONE = 2 };
 constexpr uintptr_t kDisableRandomTrains = 0xC38010;  // CTrain::bDisableRandomTrains
 constexpr uint16_t kFrontCarriage = 0x8, kClockwise = 0x40;  // CTrain::m_nTrainFlags (+0x5B8)
 constexpr int kTrainModels[] = {449, 537, 538, 569, 570, 590};  // tram, freight, streak and their carriages
-// The partner's game makes random trains this far from the host. The host's game removes its random trains 220 m from
-// its camera (CTrain::DoTrainGenerationAndRemoval, 0x863994): the partner 220 to 600 m away saw none.
+// A game makes random trains this far from the players before it that do. A game removes its random trains 220 m from
+// its camera (CTrain::DoTrainGenerationAndRemoval, 0x863994): a player 220 to 600 m away from the one making them saw none.
 constexpr float kOwnRandomFrom = 220.0f;
-constexpr float kSendWithin = 300.0f;  // a train is sent this near another player (a copy goes 3 s after the last state)
+constexpr float kCopyIn = 450.0f, kCopyOut = 550.0f;  // a copy here while this game's player is this near the train
+constexpr float kSendTo = 600.0f;                     // a train's place goes to the players this near it
 
 float& Speed(CVehicle* t) { return Field<float>(t, 0x5A4); }         // CTrain::m_fTrainSpeed
 float& RailDistance(CVehicle* t) { return Field<float>(t, 0x5A8); }  // CTrain::m_fCurrentRailDistance
@@ -83,10 +87,6 @@ void SendOurs() {
         }
         if (id == g_ids.end()) id = g_ids.emplace(t, g_nextId++).first;
         CVector p = t->GetPosition();
-        if (RemoteDistance(p, 0) > kSendWithin) {
-            ++it;
-            continue;
-        }
         Writer w(proto::G_TRAIN);
         w.U8(TRAIN_STATE);
         w.U16(id->second);
@@ -96,7 +96,7 @@ void SendOurs() {
         w.F32(RailDistance(t));
         w.F32(Speed(t));
         w.Vec({p.x, p.y, p.z});
-        Net().Send(proto::CH_STATE, w);
+        Net().SendTo(PlayersNear(p, 0, kSendTo, false), proto::CH_STATE, w);
         ++it;
     }
 }
@@ -141,6 +141,9 @@ void HandleTrain(uint8_t from, Reader& r) {
     if (!r.Ok() || kind > 15 || track < 0 || track > 3) return;  // CTrain's kinds and tracks
     // CTrain::ProcessControl brings the distance back onto the track a length at a time: NaN or a huge one froze it
     if (!std::isfinite(rail) || !std::isfinite(speed) || std::fabs(rail) > 1e6f || std::fabs(speed) > 50.0f) return;
+    CPlayerPed* me = FindPlayerPed(0);
+    float d = me ? (CVector{p.x, p.y, p.z} - me->GetPosition()).Length() : 1e9f;
+    if (it == g_copies.end() && d > kCopyIn) return;  // far from here: no copy (yet)
     if (it != g_copies.end() && (it->second.kind != kind || !IsEngine(it->second.engine))) {
         RemoveCopy(it->second);
         g_copies.erase(it);
@@ -162,14 +165,19 @@ void HandleTrain(uint8_t from, Reader& r) {
     it->second.ms = NowMs();
 }
 
-// the partner near the host makes no random trains: the host's game makes them for both
+// near a player before it whose game makes random trains, a game makes none: that one makes them for both
 void SwitchRandomTrains() {
     bool off = false;
     if (!Net().IsHost()) {
-        RemotePlayer* host = Players::Instance().Get(Net().HostId());
         CPlayerPed* me = FindPlayerPed(0);
-        off = host && host->ped && (host->ped->GetPosition() - me->GetPosition()).Length2D() < kOwnRandomFrom;
+        for (auto& [id, rp] : Players::Instance().All())
+            if (rp.hasState && (rp.state.flags & OnFootState::F_TRAINS) && MakesBefore(id) && NowMs() - rp.stateRecvMs < 3000 &&
+                (rp.state.pos - me->GetPosition()).Length2D() < kOwnRandomFrom) {
+                off = true;
+                break;
+            }
     }
+    Share().trains = !off;
     if (off == g_randomOff) return;
     Ref<uint8_t>(kDisableRandomTrains) = off ? 1 : 0;
     g_randomOff = off;
@@ -187,6 +195,7 @@ public:
         RemoveCopies();
         g_ids.clear();
         if (g_randomOff) Ref<uint8_t>(kDisableRandomTrains) = 0, g_randomOff = false;
+        Share().trains = true;
     }
     void OnPeerLeave(uint8_t id) override { RemoveCopies(id); }
     void OnPeerResync(uint8_t id) override { RemoveCopies(id); }  // its game started over
@@ -195,15 +204,18 @@ public:
         g_kinds.clear();
         g_ids.clear();
         g_randomOff = false;
+        Share().trains = true;
     }
 
     void OnPreProcess() override {
         if (!Net().Online() || !core::IsPlayerReady()) return;
         SwitchRandomTrains();
         // where the real train is now: its place and speed as sent, moved on by the time since (a step is 20 ms)
+        CPlayerPed* me = FindPlayerPed(0);
         for (auto it = g_copies.begin(); it != g_copies.end();) {
             Copy& c = it->second;
-            if (!IsEngine(c.engine) || NowMs() - c.ms > 3000) {
+            bool far = IsEngine(c.engine) && (c.engine->GetPosition() - me->GetPosition()).Length() > kCopyOut;
+            if (!IsEngine(c.engine) || NowMs() - c.ms > 3000 || far) {
                 RemoveCopy(c);
                 it = g_copies.erase(it);
                 continue;

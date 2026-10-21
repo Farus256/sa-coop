@@ -3,26 +3,53 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Karimov-Akbar/sa-coop/releases/latest"><img src="https://img.shields.io/github/v/release/Karimov-Akbar/sa-coop" alt="Release"></a>
-  <a href="https://github.com/Karimov-Akbar/sa-coop/releases"><img src="https://img.shields.io/github/downloads/Karimov-Akbar/sa-coop/total" alt="Downloads"></a>
-  <a href="https://github.com/Karimov-Akbar/sa-coop/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/Karimov-Akbar/sa-coop/build.yml?branch=main" alt="Build"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Karimov-Akbar/sa-coop" alt="MIT license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/GTA_San_Andreas-1.0_US-orange" alt="GTA San Andreas 1.0 US">
+  <img src="https://img.shields.io/badge/players-2–16-green" alt="2–16 players">
 </p>
 
 <p align="center"><a href="README.md">Русский</a> · <b>English</b></p>
 
-SA:COOP is a mod for GTA San Andreas that lets two players go through the story together over the network. One
-player is the host: the game runs on their save, and they start the missions. The other player connects to them
-and plays in the same world as a character of their own, with their own money, skills and look.
+SA:COOP is a mod for GTA San Andreas that lets two to sixteen players go through the story together over the
+network. One player is the host: the game runs on their save, and they start the missions. The others connect to
+them and play in the same world as characters of their own, with their own money, skills and look.
+
+> This is a fork of [SA:COOP](https://github.com/Karimov-Akbar/sa-coop) by Karimov-Akbar (MIT license). The original
+> is made for two players, the fork for 2–16. See [What's new in the fork](#whats-new-in-the-fork-030).
+
+## What's new in the fork (0.3.0)
+
+- **Up to 16 players.** The host picks the number of places (2–16, 4 by default) on the "Host a game" tab of the F9
+  window, or with `max_players` in `coop\server.ini`.
+- **Traffic by distance.** Players near each other (within 350 m) get each other's state 30 times a second, distant
+  ones twice a second. Another game's cars and pedestrians appear for a player only near them (cars within 190 m,
+  pedestrians within 135 m); distant ones stay records and do not fill the game's pools.
+- **The invite code is a ticket.** The 16-character code `XXXX-XXXX-XXXX-XXXX` holds a random server key besides the
+  address. You join with the code or with the password. After 8 wrong codes a minute the server blocks that address
+  for a minute. Old 12-character codes still parse.
+- **Missions.** A marker waits only for the players within 200 m of it; distant ones catch up later. The host can
+  start without the missing ones with `/go`. The marker shows whom it waits for.
+- **Cutscenes.** Up to three partners stand next to CJ, each in a spot of their own; the others watch on their screen.
+- **Player colours** for the name over the head, in the chat, in the F2 list and on the radar.
+- **Commands:** `/tp <nick>`, `/tphere <nick>`, `/tphere all` (host), `/go` (host), `/mute <nick>`, `/unmute <nick>`.
+- **The microphone** opens only while B is held and closes after 30 s of silence (unless voice is always on).
+- **A shared world per group.** Where players are together, one game makes the pedestrians, traffic and trains: the
+  host's, or the lowest-numbered player's. Groups in different parts of the map each get their own.
+- **Linux and macOS builds** (`LLVM_MINGW`) and server tests (`python tools/build.py servertest`).
+
+Version 0.3.0 does not connect to the original 0.2.x: every player needs to update.
+
+**Status:** the server and the protocol pass automated tests with 16 bots (274 checks). Behaviour in the game with
+three or more players has not been tried in practice yet — please report bugs with `coop\coop.log`.
 
 ![The host and the partner on Grove Street](docs/images/en/street-host.jpg)
 
 ## What the mod does
 
-### The story for two
+### The story together
 
-The host starts a mission, but it only begins once both players stand in the marker. The partner sees the same
+The host starts a mission, but it only begins once every partner nearby stands in the marker (or the host types
+`/go`). The partner sees the same
 texts, subtitles, radar blips, markers, race checkpoints and timers, and the texts come in the language of the
 partner's own game. The partner also hears the lines characters say during missions outside cutscenes. Weapons
 the mission gives CJ go to the partner as well. Both players get the mission reward. Enemies attack both of them,
@@ -34,11 +61,11 @@ and either player can hurt them.
 
 ### Cutscenes
 
-Cutscenes play for both players at the same time, and the partner's character stands next to CJ in them. The
+Cutscenes play for everyone at the same time, and the partners' characters (up to three) stand next to CJ in them. The
 character listens to the conversation, shifts their weight, nods and looks at whoever is talking, and when CJ
 walks, keeps a little behind him and to the side. These movements come from the animations of the cutscenes
-themselves. A cutscene can only be skipped by both players: one presses Enter, and the other agrees with Enter or
-refuses with Esc.
+themselves. A cutscene can only be skipped by everyone: one presses Enter, and the others agree with Enter or refuse
+with Esc.
 
 | | |
 |---|---|
@@ -131,12 +158,12 @@ The archive also contains a detailed player guide in Russian, `Инструкц�
 
 The host presses F9, opens the "Host a game" tab, picks a save and clicks "Start the server". If the host is
 already in the game, the server is created from the current game. The "Friendly fire" checkbox above the button
-lets the players hurt each other. A couple of seconds later the window shows a code like `XXXX-XXXX-XXXX`, which
-the host sends to the friend. The code contains the host's external IP address, so only send it to the person you
-play with.
+lets the players hurt each other, and "Players: up to N" sets the places (2–16). A couple of seconds later the
+window shows a code like `XXXX-XXXX-XXXX-XXXX`, which the host sends to the friends. The code contains the host's
+external IP address and the server's key, so only send it to the people you play with: it is the pass to the server.
 
-The friend opens the "Join a game" tab, pastes the code and clicks "Connect". After that, the host's world loads
-on the friend's side.
+The friends open the "Join a game" tab, paste the code and click "Connect". After that, the host's world loads on
+their side.
 
 ![The SA:COOP window in the main menu](docs/images/en/menu.jpg)
 
@@ -160,11 +187,25 @@ guide describes.
 | F2 | the player list |
 | Enter / Esc | in a cutscene: offer to skip it, agree / refuse |
 
-The chat supports the `/help`, `/players` and `/tp` (go to your partner) commands. The host can kick a player with
-`/kick <nickname> [reason]`.
+Chat commands:
+
+| Command | What it does |
+|---|---|
+| `/help`, `/players` | the commands and the players |
+| `/tp [nick]` | go to a player (no nick: when there is only one partner in the game) |
+| `/tphere [nick]` | bring a player over; `/tphere all` brings everyone (host only) |
+| `/go` | host: start the mission without waiting for the missing ones |
+| `/mute <nick>`, `/unmute <nick>` | stop / start hearing a player's voice (for you only) |
+| `/pm <nick> <text>` | private message |
+| `/kick <nick> [reason]` | host: kick a player |
+
+A unique beginning of a nickname is enough.
 
 ## Limitations
 
+- The more players are together, the more the host uploads (the server runs on the host's PC): about 8–10 Mbit/s
+  for 16 players in one place, about 0.5 Mbit/s for 4. Players spread over the map load the network much less.
+- A cutscene shows at most three partners next to CJ.
 - Only the host can start story missions, Cesar's races and turf wars. When a mission has CJ carry something, like
   the crates in the house robbery with Ryder, the host does it.
 - You see the other player's train but cannot get into it: it is driven by the player whose game made it.
@@ -206,7 +247,11 @@ python tools/build.py          # coop.dll, coop-server.exe and vorbisFile.dll in
 python tools/build.py dist     # the same plus the ready archive dist/SA-COOP.zip
 python tools/fsd_check.py      # checks the dependencies between the layers
 python tools/i18n_check.py     # checks that every text of the game has its English one
+python tools/build.py servertest  # server tests: build/release/bin/coop-server-test.exe
 ```
+
+On Linux and macOS set `LLVM_MINGW` to the llvm-mingw folder; the server tests run under Wine:
+`LLVM_MINGW=~/llvm-mingw python3 tools/build.py && wine build/release/bin/coop-server-test.exe`.
 
 GitHub Actions builds every push and keeps the archive in the build artifacts. A tag like `v0.2.0` publishes a
 release with `SA-COOP.zip` attached.
@@ -225,7 +270,7 @@ src/
 │   ├── features/  story and cutscenes, progress, garages, voice, weather and more
 │   ├── entities/  session, player, vehicle, ped, mission, profile
 │   └── shared/    engine wrappers, network, drawing and input, config
-├── server/        coop-server.exe, the server for two players
+├── server/        coop-server.exe, the server for 2–16 players
 ├── loader/        vorbisFile.dll, the ASI loader for a clean game
 └── common/        protocol, network, log and utilities for all three
 ```
@@ -243,7 +288,8 @@ inside and why it is built this way is described in [docs/ARCHITECTURE.md](docs/
 
 ## License
 
-The SA:COOP code is released under the MIT license (see [LICENSE](LICENSE)). ENet and MinHook have their own
+The SA:COOP code is released under the MIT license (see [LICENSE](LICENSE)): the original project © Karimov-Akbar,
+the fork's changes © their authors. ENet and MinHook have their own
 licenses, and their texts are in `third_party` and in the `coop\licenses` folder of the archive.
 
 SA:COOP is not affiliated with Rockstar Games or Take-Two Interactive. You need your own copy of GTA San Andreas,

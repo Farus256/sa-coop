@@ -280,6 +280,7 @@ public:
         });
     }
 
+    void OnPeerResync(uint8_t id) override { m_newcomers |= proto::Bit(id); }  // its game is ready: our look goes there
     void OnSessionEnd() override {
         m_profileReceived = m_applied = m_resetPending = m_reset = false;
         m_profile.clear();
@@ -333,28 +334,32 @@ public:
             LOGI("The respect help the profile caused is cleared");
         }
 
-        // look and stats for the other game: on change, and every 10 s for late joiners
-        if (now - m_lastLookMs >= 1000) {
+        // look and stats for the other games: on change, at once to a game that (re)starts, and every 30 s to all
+        if (now - m_lastLookMs >= 1000 || m_newcomers) {
             m_lastLookMs = now;
+            proto::PlayerMask newcomers = m_newcomers;
+            m_newcomers = 0;
             std::vector<uint8_t> desc((uint8_t*)me->ClothesDesc(), (uint8_t*)me->ClothesDesc() + kClothesSize);
             uint16_t model = me->ModelIndex();
-            if (desc != m_sentLook || model != m_sentModel || now - m_lookSentMs > 10000) {
+            bool lookAll = desc != m_sentLook || model != m_sentModel || now - m_lookSentMs > 30000;
+            if (lookAll || newcomers) {
                 Writer w(proto::G_PLAYER_LOOK);
                 w.Bytes(desc.data(), desc.size());
                 w.U16(model);
                 w.Str(model >= 290 && model <= 299 ? Peds::Instance().SpecialName(model) : std::string(), 16);
-                Net().Send(proto::CH_RELIABLE, w);
+                Net().SendTo(lookAll ? proto::kAllPlayers : newcomers, proto::CH_RELIABLE, w);
                 m_sentLook = std::move(desc);
                 m_sentModel = model;
-                m_lookSentMs = now;
+                if (lookAll) m_lookSentMs = now;
             }
             std::vector<uint8_t> stats((uint8_t*)kStatsBlock, (uint8_t*)kStatsBlock + kStatsSize);
-            if ((stats != m_sentStats && now - m_statsSentMs > 3000) || now - m_statsSentMs > 10000) {
+            bool statsAll = (stats != m_sentStats && now - m_statsSentMs > 3000) || now - m_statsSentMs > 30000;
+            if (statsAll || newcomers) {
                 Writer w(proto::G_PLAYER_STATS);
                 w.Bytes(stats.data(), stats.size());
-                Net().Send(proto::CH_RELIABLE, w);
+                Net().SendTo(statsAll ? proto::kAllPlayers : newcomers, proto::CH_RELIABLE, w);
                 m_sentStats = std::move(stats);
-                m_statsSentMs = now;
+                if (statsAll) m_statsSentMs = now;
             }
         }
 
@@ -412,6 +417,7 @@ private:
     bool m_profileReceived = false, m_applied = false;
     bool m_resetPending = false, m_reset = false;  // a new game emptied the profile: applied in the next world
     uint64_t m_lastSaveMs = 0, m_lastLookMs = 0, m_lookSentMs = 0, m_statsSentMs = 0, m_quietUntil = 0;
+    proto::PlayerMask m_newcomers = 0;  // games that (re)started since the last look went out
 };
 
 void PartnerSaved() {

@@ -2,6 +2,8 @@
 // (~68 kbit/s), sent unreliable on the voice channel. Every remote player gets its own waveOut stream
 // with a small jitter buffer; the volume fades with distance down to a "radio" floor.
 // WinMM runs without callbacks: buffers are polled once per game frame (8 x 20 ms of capture headroom).
+// The microphone opens when push-to-talk is first held (at once only with "always on") and closes again after half a
+// minute without it, so Windows shows it in use only around talking. /mute <nick> silences one player here.
 #include "features/voice/Voice.h"
 
 #include <windows.h>
@@ -12,6 +14,8 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <set>
+#include <string>
 #include <vector>
 
 #include "common/api/protocol/Protocol.h"
@@ -78,7 +82,33 @@ public:
 
     void OnSessionStart() override {
         m_micWarned = m_silenceWarned = false;
-        if (Cfg().voiceEnabled && !m_testTone) OpenMic();
+        if (Cfg().voiceEnabled && Cfg().voiceAlwaysOn && !m_testTone) OpenMic();
+    }
+    bool OnCommand(const std::string& cmd, const std::vector<std::string>& args) override {
+        if (cmd != "mute" && cmd != "unmute") return false;
+        auto& chat = ui::TheChat();
+        if (args.empty()) {
+            std::string names;
+            for (const std::string& n : m_muted) names += (names.empty() ? "" : ", ") + n;
+            if (names.empty()) chat.AddSystem(TR("Заглушить игрока: /mute <ник>, вернуть звук: /unmute <ник>.", "Mute a player: /mute <nick>, unmute: /unmute <nick>."));
+            else chat.AddSystem(Format(TR("Заглушены: %s.", "Muted: %s."), names.c_str()));
+            return true;
+        }
+        uint8_t id = Net().FindPeer(args[0]);
+        std::string name = id != 255 ? Net().PeerName(id) : args[0];
+        if (cmd == "mute") {
+            if (id == 255) {
+                chat.AddError(Format(TR("Нет игрока «%s».", "There is no player \"%s\"."), args[0].c_str()));
+                return true;
+            }
+            m_muted.insert(ToLower(name));
+            if (auto it = m_streams.find(id); it != m_streams.end()) it->second->queue.clear();
+            chat.AddSystem(Format(TR("Голос %s заглушён (только у вас).", "%s is muted (for you only)."), name.c_str()));
+        } else {
+            m_muted.erase(ToLower(name));
+            chat.AddSystem(Format(TR("Голос %s снова слышен.", "You hear %s again."), name.c_str()));
+        }
+        return true;
     }
     void OnSessionEnd() override {
         CloseMic();
@@ -89,6 +119,11 @@ public:
     void OnPostProcess() override {
         if (!Net().Online()) return;
         PumpCapture();
+        if (m_transmitting) m_talkedMs = NowMs();
+        else if (m_in && !Cfg().voiceAlwaysOn && NowMs() - m_talkedMs > 30000) {  // not in use: Windows stops showing it
+            CloseMic();
+            LOGI("Voice: microphone closed (not used for 30 s)");
+        }
         for (auto& [id, s] : m_streams) PumpPlayback(*s);
         if (m_rxFrames && NowMs() - m_rxLogMs > 5000) {
             m_rxLogMs = NowMs();
@@ -237,8 +272,8 @@ private:
         uint16_t seq = r.U16();
         std::vector<uint8_t> data = r.Bytes(1024);
         std::vector<int16_t> pcm;
-        if (!r.Ok() || from == Net().MyId() || !Cfg().voiceEnabled || !adpcm::Decode(data.data(), data.size(), pcm) ||
-            pcm.size() != kFrame)
+        if (!r.Ok() || from == Net().MyId() || !Cfg().voiceEnabled || m_muted.count(ToLower(Net().PeerName(from))) ||
+            !adpcm::Decode(data.data(), data.size(), pcm) || pcm.size() != kFrame)
             return;
         auto& slot = m_streams[from];
         if (!slot) slot = std::make_unique<Stream>();
@@ -300,7 +335,8 @@ private:
 
     HWAVEIN m_in = nullptr;
     int m_nextIn = 0;  // the capture buffer the device fills first
-    uint64_t m_micTriedMs = 0;
+    uint64_t m_micTriedMs = 0, m_talkedMs = 0;
+    std::set<std::string> m_muted;  // nicknames (lower case): a muted player stays so when it joins again
     bool m_micWarned = false, m_silenceWarned = false;
     WAVEHDR m_inHdr[kInBuffers] = {};
     int16_t m_inBuf[kInBuffers][kFrame] = {};

@@ -1,10 +1,10 @@
-// Objects of the map (lamp posts, signs, fences, bins, hydrants, trees, boxes, windows) in both games. Each game makes
+// Objects of the map (lamp posts, signs, fences, bins, hydrants, trees, boxes, windows) in every game. Each game makes
 // them from the same map data, so an object is known by its model and the place its map entry (CDummyObject) holds.
-// What a player does to one, the other game repeats: it breaks (CObject::ObjectDamage: smashed, in pieces, its damaged
-// model), its window cracks or shatters, or it is knocked loose and moves. The game where it moves sends its pose until
-// it lies still, and the other game's copy follows. A game that meets such an object later (it was not streamed in
-// then, or it streamed out and in again) gets it as it was left, for a few minutes; after that the map puts it back as
-// it always does.
+// What a player does to one, the other games repeat: it breaks (CObject::ObjectDamage: smashed, in pieces, its damaged
+// model), its window cracks or shatters, or it is knocked loose and moves. The game of the player nearest to it sends
+// its pose until it lies still (to the players near it), and the other games' copies follow. A game that meets such an
+// object later (it was not streamed in then, or it streamed out and in again) gets it as it was left, for a few
+// minutes; after that the map puts it back as it always does.
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -88,7 +88,7 @@ Thing* Find(uint16_t model, const CVector& origin) {
     return nullptr;
 }
 
-void Send(const Thing& t, bool reliable) {
+void Send(const Thing& t, bool reliable, proto::PlayerMask to = proto::kAllPlayers) {
     Writer w(proto::G_WORLD_OBJ);
     w.U16(t.model);
     w.Vec({t.origin.x, t.origin.y, t.origin.z});
@@ -101,7 +101,7 @@ void Send(const Thing& t, bool reliable) {
         w.Vec({t.speed.x, t.speed.y, t.speed.z});
         w.Vec({t.turn.x, t.turn.y, t.turn.z});
     }
-    Net().Send(reliable ? proto::CH_RELIABLE : proto::CH_STATE, w);
+    Net().SendTo(to, reliable ? proto::CH_RELIABLE : proto::CH_STATE, w);
     ++g_sent;
 }
 
@@ -196,7 +196,8 @@ void Scan() {
         t->turn = ((CPhysical*)o)->TurnSpeed();
         t->weapon = Field<uint8_t>(o, 0x148);  // m_nLastWeaponDamage
         t->updatedMs = t->sentMs = now;
-        Send(*t, changed);
+        // a change goes to everyone (a game that comes later finds it so); the poses of its flight to those near it
+        Send(*t, changed, changed ? proto::kAllPlayers : PlayersNear(at, o->AreaCode(), kRange + 30.0f, false));
         if (changed && !moving) LOGD("World object %d at %.1f,%.1f: stage %d%s", t->model, origin.x, origin.y, stage, moved ? ", moved" : "");
     }
     // records nobody needs any more
@@ -205,14 +206,25 @@ void Scan() {
                    g_things.end());
 }
 
-// Each game has a copy of the other player, and that copy pushes things too (a mirror car runs a little ahead of the
-// real one): the game of the player nearer to it moves it, the host's when both are about as near
-bool OursToMove(const CVector& at, uint8_t from) {
+// Each game has copies of the other players, and those push things too (a mirror car runs a little ahead of the real
+// one): the game of the player nearest to it moves it (in steps of 5 m; the host's, then the lower number, when they
+// are about as near)
+uint8_t Mover(const CVector& at) {
     CPlayerPed* me = FindPlayerPed(0);
-    const RemotePlayer* rp = Players::Instance().Get(from);
-    if (!me || !rp || !rp->hasState) return false;
-    float mine = (me->GetPosition() - at).Length(), theirs = (rp->state.pos - at).Length();
-    return mine + 5.0f < theirs || (std::fabs(mine - theirs) <= 5.0f && Net().IsHost());
+    if (!me) return 255;
+    uint8_t host = Net().HostId(), best = Net().MyId();
+    int bestStep = (int)((me->GetPosition() - at).Length() / 5.0f);
+    auto before = [&](uint8_t id, int step) {
+        if (step != bestStep) return step < bestStep;
+        if ((id == host) != (best == host)) return id == host;
+        return id < best;
+    };
+    for (auto& [id, rp] : Players::Instance().All()) {
+        if (!rp.hasState || !Net().Peer(id)) continue;
+        int step = (int)((rp.state.pos - at).Length() / 5.0f);
+        if (before(id, step)) best = id, bestStep = step;
+    }
+    return best;
 }
 
 void Handle(uint8_t from, Reader& r) {
@@ -231,7 +243,7 @@ void Handle(uint8_t from, Reader& r) {
     ++g_received;
     CVector origin{o.x, o.y, o.z};
     Thing* t = Find(model, origin);
-    if ((flags & F_MOVING) && OursToMove(origin, from)) return;  // our physics moves it; where it lies still comes
+    if ((flags & F_MOVING) && Mover(origin) != from) return;  // ours or a third game's to move; where it lies still comes
     if (!t) {
         g_things.push_back({});
         t = &g_things.back();
@@ -258,9 +270,9 @@ public:
     void OnGameStarted() override {  // a new world: what was broken came back
         for (Thing& t : g_things) t.following = false;
     }
-    void OnPeerResync(uint8_t) override {  // its world is new: what both games know goes again
+    void OnPeerResync(uint8_t id) override {  // its world is new: what the games know goes there again
         for (const Thing& t : g_things)
-            if (!t.moving) Send(t, true);
+            if (!t.moving) Send(t, true, proto::Bit(id));
     }
     void OnPostProcess() override {
         if (!Net().Online() || !core::IsPlayerReady() || NowMs() - g_scanMs < 100) return;

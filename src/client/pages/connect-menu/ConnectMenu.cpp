@@ -204,21 +204,34 @@ void RenderConnectMenu() {
             }
             cy += 20 * s;
         }
-        caption(cx, Format(TR("Игроки: %d", "Players: %d"), 1 + (int)net.Peers().size()));
+        int rows = 1 + (int)net.Peers().size();
+        caption(cx, Format(TR("Игроки: %d из %d", "Players: %d of %d"), rows, net.MaxPlayers()));
         cy += ch + 8 * s;
-        auto row = [&](const std::string& name, bool isHost, uint32_t ping, bool me) {
-            float rh = lh + 14 * s;
-            g.Rect(cx, cy, cw, rh, 0xFF090C10);
-            g.Text(FONT_NORMAL, cx + 14 * s, cy + 7 * s, me ? name + TR(" (вы)", " (you)") : name, me ? 0xFFFFFFFF : kText,
-                   TEXT_SHADOW);
-            g.Text(FONT_MENU_SMALL, cx + cw * 0.55f, cy + (rh - ch) * 0.5f, isHost ? TR("хост", "host") : TR("напарник", "partner"),
-                   isHost ? kSaBlue : kSaGreen);
-            g.Text(FONT_SMALL, cx + cw - 14 * s, cy + (rh - sh) * 0.5f, Format(TR("%u мс", "%u ms"), ping), kSaMuted, TEXT_RIGHT);
-            cy += rh + 4 * s;
+        // up to 16: two columns of smaller rows once one column of big ones would not fit
+        bool compact = rows > 5;
+        int columns = compact ? 2 : 1;
+        float gap = 10 * s, colW = (cw - gap * (columns - 1)) / columns;
+        float rh = compact ? std::min(sh + 10 * s, (bodyBottom - cy) / ((rows + 1) / 2) - 4 * s) : lh + 14 * s;
+        FontId font = compact ? FONT_SMALL : FONT_NORMAL;
+        float top = cy;
+        int index = 0;
+        auto row = [&](uint8_t id, const std::string& name, bool isHost, uint32_t ping, bool me) {
+            int col = index % columns, line = index / columns;
+            ++index;
+            float rx = cx + col * (colW + gap), ry = top + line * (rh + 4 * s);
+            g.Rect(rx, ry, colW, rh, 0xFF090C10);
+            char dot[24];
+            snprintf(dot, sizeof dot, "{%06X}●{FFFFFF} ", (unsigned)(PlayerColor(id) & 0xFFFFFF));
+            float fh = g.LineHeight(font);
+            g.Text(font, rx + 10 * s, ry + (rh - fh) * 0.5f, dot + (me ? name + TR(" (вы)", " (you)") : name),
+                   me ? 0xFFFFFFFF : kText, TEXT_SHADOW);
+            if (isHost) g.Text(FONT_MENU_SMALL, rx + colW * (compact ? 0.62f : 0.55f), ry + (rh - ch) * 0.5f, TR("хост", "host"), kSaBlue);
+            g.Text(FONT_SMALL, rx + colW - 10 * s, ry + (rh - sh) * 0.5f, Format(TR("%u мс", "%u ms"), ping), kSaMuted, TEXT_RIGHT);
+            cy = std::max(cy, ry + rh + 4 * s);
         };
-        row(Cfg().nickname, host, net.Rtt(), true);
-        for (auto& [id, p] : net.Peers()) row(p.name, p.isHost, p.ping, false);
-        if (host && net.Peers().empty()) para(TR("Ждём друга...", "Waiting for your friend..."), kSaMuted);
+        row(net.MyId(), Cfg().nickname, host, net.Rtt(), true);
+        for (auto& [id, p] : net.Peers()) row(id, p.name, p.isHost, p.ping, false);
+        if (host && net.Peers().empty()) para(TR("Ждём друзей...", "Waiting for your friends..."), kSaMuted);
     } else if (busy) {
         // ---- connecting / starting / loading, in the middle of the body
         float barH = 6 * s;
@@ -298,6 +311,12 @@ void RenderConnectMenu() {
         cy += rowH + 22 * s;
         if (g_tab == 1) {  // the host decides for the whole game; saved with the other settings when the server starts
             w::Checkbox("ff", cx, cy, TR("Урон по напарнику", "Friendly fire"), Cfg().friendlyFire);
+            // the places on the server, the host's own among them
+            int& places = Cfg().maxPlayers;
+            float sw = 300 * s;
+            int d = w::Selector("places", cx + cw - sw, cy - (rowH - lh * 0.8f) * 0.5f, sw, rowH,
+                                Format(TR("Игроков: до %d", "Players: up to %d"), places));
+            if (d) places = (places - 2 + d + 15) % 15 + 2;  // 2..16 round
             cy += lh * 0.8f + 22 * s;
         }
 

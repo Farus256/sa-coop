@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <map>
 
+#include "common/api/protocol/Protocol.h"
 #include "entities/vehicle/VehicleState.h"
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
@@ -24,9 +25,10 @@ struct VehicleLook {
     bool operator==(const VehicleLook& o) const;
 };
 
-// A vehicle known to both players under a network id.
+// A vehicle known to the players under a network id.
 //  * owner == my id  -> the local game simulates it and sends its state;
-//  * owner != my id  -> "mirror": the vehicle follows the received states.
+//  * owner != my id  -> "mirror": the vehicle follows the received states. A mirror exists in this game only while
+//    this game's player is near it or someone sits in it; otherwise it is a record (PendingVehicle) kept up to date.
 struct NetVehicle {
     uint64_t groundCheckMs = 0;  // mirror: whether this game has ground under its target (checked now and then)
     bool groundless = false;
@@ -50,6 +52,20 @@ struct NetVehicle {
     VehicleLook look;            // owned: last sent; mirror: wanted
     bool hasLook = false;
     uint64_t lookCheckMs = 0, lookSentMs = 0;
+    proto::PlayerMask lookTo = 0;  // owned: the players that have its current look
+    proto::PlayerMask syncTo = 0;  // owned: the players its state went to last time
+    uint64_t claimMs = 0;          // owned: taken over when its owner left (two players taking it: the lower number keeps it)
+    uint64_t orphanMs = 0;         // its owner left at: the nearest player takes it, or it goes after a while
+};
+
+// Another player's vehicle this game has no copy of now (far from this game's player, or its model still streaming).
+struct PendingVehicle {
+    VehicleSpawn sp;            // kept up to date by the owner's states
+    bool hasState = false;
+    VehicleState state;
+    uint64_t recvMs = 0;
+    VehicleLook look;
+    bool hasLook = false;
 };
 
 class Vehicles : public Module {
@@ -79,8 +95,10 @@ public:
     bool IsMirror(const NetVehicle& nv) const;
     // Applies a state received from the vehicle's driver (Players module, G_PLAYER_DRIVER).
     void ApplyDriverState(uint8_t from, uint16_t netId, const VehicleState& st);
-    // a partner (re)started its game: announce our vehicles again
-    void Reannounce();
+    // a player (re)started its game: announce our vehicles to it again
+    void Reannounce(uint8_t to);
+    // the players sitting in it (their states name it)
+    proto::PlayerMask Riders(uint16_t netId) const;
     // this game would drop the car, the other player is nearer: it goes to that player's game (false: not ours to give)
     bool QueueGiveAway(game::CVehicle* v, uint8_t to);
     // The host's mission cleared an area: the other players' empty cars there go from this game at once (their copies
@@ -88,15 +106,21 @@ public:
     std::vector<uint16_t> ClearMirrors(const game::CVector& at, float radius);
 
 private:
-    void Announce(const NetVehicle& nv);
-    bool CreateMirror(const VehicleSpawn& sp);
+    void Announce(const NetVehicle& nv, proto::PlayerMask to = proto::kAllPlayers);
+    bool CreateMirror(const PendingVehicle& pv);
+    // whether this game keeps a copy of another player's vehicle now (spawned: it has one, the farther limit holds)
+    bool WantMirror(uint16_t netId, const game::CVector& pos, bool spawned) const;
+    void Park(NetVehicle& nv);  // the copy goes, the record stays (pending)
+    void Claim(NetVehicle& nv);
+    bool ShouldAdopt(const NetVehicle& nv, uint8_t leaver) const;
+    proto::PlayerMask StateTargets(const NetVehicle& nv) const;
     void ScanTraffic();
     void HandleCreate(uint8_t from, Reader& r);
     void HandleRemove(uint8_t from, Reader& r);
     void HandleSync(uint8_t from, Reader& r);
     void HandleOwner(uint8_t from, Reader& r);
     void HandleStatus(uint8_t from, Reader& r);
-    void SendLook(NetVehicle& nv);
+    void SendLook(NetVehicle& nv, proto::PlayerMask to);
     void ApplyLook(NetVehicle& nv);
     void ApplyMirror(NetVehicle& nv, float dt);
     void SendState(NetVehicle& nv);
@@ -115,7 +139,8 @@ private:
 
     std::map<uint16_t, NetVehicle> m_byId;
     std::map<game::CVehicle*, uint16_t> m_byPtr;
-    std::map<uint16_t, VehicleSpawn> m_pending;  // announced mirrors waiting for their model to stream in
+    std::map<uint16_t, PendingVehicle> m_pending;  // other players' vehicles without a copy here
+    uint64_t m_lastPark = 0;
     std::map<game::CVehicle*, uint8_t> m_giveAway;  // to hand over after the population code (vehicle -> player)
     uint16_t m_nextId = 1;
     uint64_t m_lastScan = 0;

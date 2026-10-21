@@ -189,9 +189,11 @@ std::string g_missionName;
 int32_t g_moneyAtStart = 0;  // the partner gets what the host earned during the mission
 char g_cutsceneName[32] = {};  // last loaded cutscene, for partners joining during it
 
-// mission markers: the host's mission starts once the partner stands in the marker too
+// mission markers: the host's mission starts once the partners near it stand in the marker too
 uint64_t g_waitMs = 0;      // host: the last time a trigger was refused for that
 bool g_waitSent = false;
+std::vector<uint8_t> g_missing;  // host: whom the marker waits for
+uint64_t g_goUntil = 0;          // host: /go, the next start goes ahead without them
 bool g_hostWaits = false;   // partner
 Area g_waitArea{};
 
@@ -356,23 +358,32 @@ bool MarkerAt(const CVector& p, Area& out) {
     return false;
 }
 
-// host, in a trigger: the marker the host stands in holds every partner as well. Without a marker (a phone call,
-// a story event) the mission starts as usual.
+// host, in a trigger: the marker the host stands in holds the partners near it as well (within kGatherRadius, their game
+// answering); the others are far away and come along later. /go starts without
+// whoever is still missing. Without a marker (a phone call, a story event) the mission starts as usual.
+constexpr float kGatherRadius = 200.0f;
 bool PartnersAtMarker(CPed* host) {
     Area marker;
     if (!MarkerAt(host->GetPosition(), marker)) return true;
+    if (NowMs() < g_goUntil) return true;
+    CVector centre{(marker.x1 + marker.x2) * 0.5f, (marker.y1 + marker.y2) * 0.5f, marker.z};
+    std::vector<uint8_t> missing;
     for (auto& [id, peer] : Net().Peers()) {
         RemotePlayer* rp = Players::Instance().Get(id);
+        if (!rp || !rp->hasState) continue;  // never in the game this session: nobody to wait for
         // a partner whose game sends nothing for 5 s (in the pause menu, loading, hung) cannot come: the host was held
         // at the marker for good. Such a player is away in SA-MP and MTA too.
-        if (!rp || !rp->hasState || NowMs() - rp->stateRecvMs > 5000) continue;
-        if (!rp->ped || !InArea(marker, rp->ped->GetPosition(), 1.0f)) {  // two can not stand on one spot
-            g_waitMs = NowMs();
-            g_waitArea = marker;
-            return false;
-        }
+        uint64_t silent = NowMs() - rp->stateRecvMs;
+        bool near = rp->state.area == host->AreaCode() && (rp->state.pos - centre).Length2D() < kGatherRadius;
+        if (!near || silent > 5000) continue;
+        if (!rp->ped || !InArea(marker, rp->ped->GetPosition(), 1.0f))  // two can not stand on one spot
+            missing.push_back(id);
     }
-    return true;
+    if (missing.empty()) return true;
+    g_missing = std::move(missing);
+    g_waitMs = NowMs();
+    g_waitArea = marker;
+    return false;
 }
 
 using CanStartFn = bool(__fastcall*)(CPlayerPed*, void*);
@@ -808,8 +819,9 @@ void SendCutscene(uint8_t op, const char* name = "", int32_t area = 0) {
     w.I32(area);
     Net().Send(proto::CH_RELIABLE, w);
 }
-// the host's choice of the partner's spot for a shot, and when (the camera's clock) the shot begins
-void SendSpot(const scene::Spot& s, float at) {
+// the host's choice of a partner's spot for a shot, and when (the camera's clock) the shot begins: every game holds
+// that partner's character there
+void SendSpot(uint8_t id, const scene::Spot& s, float at) {
     Writer w(proto::G_CUTSCENE);
     w.U8(CS_SPOT);
     w.Str("", 32);
@@ -819,6 +831,7 @@ void SendSpot(const scene::Spot& s, float at) {
     w.F32(s.heading);
     w.U8(s.pose);
     w.U8(s.act);
+    w.U8(id);
     Net().Send(proto::CH_RELIABLE, w);
 }
 
@@ -905,12 +918,36 @@ void EnterCutsceneScene(const CVector& at, int32_t area) {
     Cmd(0x00A1).I(h).F(at.x).F(at.y).F(at.z).Run();  // SET_CHAR_COORDINATES
 }
 
-void StandNextToCutsceneCj() {
+// A partner's character with no place in this shot (more partners than places, or none chosen yet): out of the
+// picture, frozen by CJ's feet (the scene's collision may not be loaded)
+scene::Spot OutOfScene() {
+    CEntity* cj = CutsceneCj();
+    scene::Spot s;
+    s.ground = cj ? cj->GetPosition() - CVector{0, 0, 1.0f} : FindPlayerPed(0)->GetPosition();
+    s.pose = scene::POSE_HIDDEN;
+    return s;
+}
+
+// every partner's character in this game where the host's game put it (this game's player included), in the scene's
+// interior: before its cutscene starts there and after it ends its own game has it elsewhere, and a ped of another
+// area is not drawn
+void HoldPartners() {
+    CEntity* cj = CutsceneCj();
     scene::Spot spot;
-    if (!scene::CurrentSpot(spot)) return;
+    for (auto& [id, rp] : Players::Instance().All()) {
+        if (!rp.ped || id == Net().HostId()) continue;
+        if (cj) rp.ped->AreaCode() = cj->AreaCode();
+        scene::Hold(rp.ped, scene::CurrentSpot(id, spot) ? spot : OutOfScene());
+    }
+}
+
+void StandNextToCutsceneCj() {
+    if (!scene::HaveShot()) return;
     CPlayerPed* me = FindPlayerPed(0);
+    scene::Spot spot;
     if (CEntity* cj = CutsceneCj()) me->AreaCode() = cj->AreaCode();
-    scene::Hold(me, spot);
+    scene::Hold(me, scene::CurrentSpot(Net().MyId(), spot) ? spot : OutOfScene());
+    HoldPartners();
     if (const RemotePlayer* host = Players::Instance().Get(Net().HostId()); host && host->ped) {
         host->ped->Flags() &= ~0x80u;  // the cutscene CJ is the host
         Cmd(0x04D7).I(host->pedHandle).I(1).Run();  // FREEZE_CHAR_POSITION: no collision around it now
@@ -1117,7 +1154,8 @@ void HandleCutscene(uint8_t from, Reader& r) {
         s.heading = r.F32();
         s.pose = (scene::Pose)std::min<uint8_t>(r.U8(), scene::POSE_WALK);
         s.act = r.U8();
-        if (r.Ok()) scene::FollowSpot(s, at);
+        uint8_t id = r.U8();
+        if (r.Ok()) scene::FollowSpot(id, s, at);
     } else if (op == CS_END) {
         LOGI("Host cutscene ended (state %d, running %d)", g_csState, CutsceneRunning());
         if (g_csState == 2) PartnerEndCutscene();
@@ -1473,7 +1511,7 @@ void MissionsResync() {
         SendCutscene(CS_LOAD, g_cutsceneName);
         if (CutsceneRunning()) {
             SendCutscene(CS_START, "", CurrentArea());
-            if (scene::Spot s; scene::CurrentSpot(s)) SendSpot(s, 0);
+            scene::ForEachSpot([](uint8_t id, const scene::Spot& s) { SendSpot(id, s, 0); });
         }
     }
 }
@@ -1482,6 +1520,17 @@ class Missions : public Module {
 public:
     const char* Name() const override { return "Missions"; }
     void OnPeerResync(uint8_t) override { MissionsResync(); }
+    bool OnCommand(const std::string& cmd, const std::vector<std::string>&) override {
+        if (cmd != "go") return false;
+        if (!Net().Online() || !Net().IsHost()) {
+            ui::TheChat().AddError(TR("Начать миссию без остальных может только хост.", "Only the host can start a mission without the others."));
+            return true;
+        }
+        g_goUntil = NowMs() + 3000;  // the trigger asks every frame: the next ask goes ahead
+        ui::TheChat().AddSystem(g_waitSent ? TR("Миссия начинается без отставших.", "The mission starts without those missing.")
+                                           : TR("Встаньте в маркер миссии в течение 3 секунд.", "Step into the mission marker within 3 seconds."));
+        return true;
+    }
 
     void OnInstallHooks() override {
         mem::HookFn(0x469F00, &HookScriptProcess, &g_origScriptProcess, "CRunningScript::Process");
@@ -1689,18 +1738,15 @@ private:
             LOGI("Cutscene ended (replicated)");
         }
         g_hostCutscene = cs;
+        std::vector<uint8_t> cast;  // the partners in the host's world get places in the scene, in their order
+        for (auto& [id, rp] : Players::Instance().All())
+            if (rp.ped) cast.push_back(id);
+        scene::SetCast(cast);
         scene::Spot spot;
         float at;
-        if (scene::TakeDecision(spot, at)) SendSpot(spot, at);
-        if (cs && scene::CurrentSpot(spot)) {  // the partner joins the scene (and its game takes the same spot)
-            CEntity* cj = CutsceneCj();
-            for (auto& [id, rp] : Players::Instance().All())
-                if (rp.ped) {
-                    // the scene's interior, not the one its game reports: before its cutscene starts there and after
-                    // it ends it is elsewhere, and a ped of another area is not drawn (it vanished from the scene)
-                    if (cj) rp.ped->AreaCode() = cj->AreaCode();
-                    scene::Hold(rp.ped, spot);
-                }
+        for (uint8_t id; scene::TakeDecision(id, spot, at);) SendSpot(id, spot, at);
+        if (cs && scene::HaveShot()) {  // the partners join the scene (and their games take the same spots)
+            HoldPartners();
             g_sceneHeld = true;
         } else if (!cs && g_sceneHeld) {
             g_sceneHeld = false;
@@ -1834,7 +1880,14 @@ bool CutsceneSkipDecline() {
 
 std::string MissionWaitText() {
     if (!Net().Online()) return "";
-    if (Net().IsHost()) return g_waitSent ? TR("Ждём напарника", "Waiting for your partner") : "";
+    if (Net().IsHost()) {
+        if (!g_waitSent) return "";
+        std::string names;
+        for (uint8_t id : g_missing)
+            if (Net().Peer(id)) names += (names.empty() ? "" : ", ") + Net().PeerName(id);
+        if (names.empty()) return TR("Ждём напарников", "Waiting for your partners");
+        return Format(TR("Ждём: %s (/go — начать без них)", "Waiting for %s (/go: start without them)"), names.c_str());
+    }
     return g_hostWaits ? Format(TR("%s ждёт вас у маркера миссии", "%s is waiting for you at the mission marker"),
                                 Net().PeerName(Net().HostId()).c_str())
                        : "";

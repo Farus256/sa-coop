@@ -1,4 +1,4 @@
-// Objects of the host's mission (the bottles of "Nines and AKs", boxes, barriers) for the partner. The host's game
+// Objects of the host's mission (the bottles of "Nines and AKs", boxes, barriers) for the partners. The host's game
 // knows what its mission script created (CTheScripts::MissionCleanUp lists them, objects as type 3): it announces
 // those, sends their moves and their end, and applies the hits the partner's player lands on the copies. The copies
 // are frozen, and nothing in the partner's game damages them: a hit by its player goes to the host as
@@ -64,7 +64,7 @@ void Place(CObject* o, const CVector& pos, const Quat& rot) {
     Call<0x563220>(o);        // CWorld::Add
 }
 
-void SendCreate(const NetObject& no) {
+void SendCreate(const NetObject& no, proto::PlayerMask to = proto::kAllPlayers) {
     Writer w(proto::G_OBJ_CREATE);
     w.U16(no.netId);
     w.U16(no.model);
@@ -72,7 +72,7 @@ void SendCreate(const NetObject& no) {
     no.rot.Write(w);
     w.I8(no.area);
     w.U8(no.broken);
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
 }
 
 void SendRemove(uint16_t netId, uint8_t kind, uint8_t weapon) {
@@ -251,7 +251,7 @@ void __fastcall HookObjectDamage(CObject* o, void* edx, float damage, CVector* o
                 w.U16(no->netId);
                 w.F32(damage);
                 w.U8((uint8_t)weapon);
-                Net().Send(proto::CH_RELIABLE, w);
+                Net().SendTo(Net().HostId(), proto::CH_RELIABLE, w);
             }
             return;
         }
@@ -337,13 +337,13 @@ public:
     void OnPeerLeave(uint8_t id) override {
         if (id == Net().HostId() || Net().IsHost()) ClearCopies();
     }
-    void OnPeerResync(uint8_t id) override {
+    void OnPeerResync(uint8_t id) override {  // that game alone: the others would make their copies again
         if (!Net().IsHost()) {  // the host's game started over: the objects of its old world are gone
             if (id == Net().HostId()) ClearCopies();
             return;
         }
         for (auto& [netId, no] : g_owned)
-            if (Alive(no)) SendCreate(no);
+            if (Alive(no)) SendCreate(no, proto::Bit(id));
     }
     void OnGameStarted() override {  // a new world: the objects of the old one are gone
         g_owned.clear();

@@ -38,10 +38,13 @@ struct Reg {
     Reg() { core::RegisterModule(&Peds::Instance()); }
 } g_reg;
 
-// owned peds closer than "in" to the other player are announced and removed there beyond "out";
+// owned peds closer than "in" to a remote player are announced and removed there beyond "out" from all of them;
 // vehicle occupants use the vehicle ranges so traffic is never seen without its driver
 float SyncIn(CPed* p) { return p->InVehicle() ? 170.0f : 120.0f; }
 float SyncOut(CPed* p) { return p->InVehicle() ? 220.0f : 150.0f; }
+// Another game's ped on foot has a copy here while this game's player is near it (in a vehicle: while the vehicle has
+// one): the players' games far apart keep each other's people as records only
+constexpr float kMirrorIn = 135.0f, kMirrorOut = 180.0f;
 constexpr int kSpecialFirst = 290, kSpecialLast = 299;
 constexpr int kEmptyDecisionMaker = 65542;  // SET_CHAR_DECISION_MAKER template "Empty"
 constexpr int TASK_ENTER_CAR_AS_PASSENGER = 700, TASK_ENTER_CAR_AS_DRIVER = 701, TASK_LEAVE_CAR = 704;
@@ -289,8 +292,8 @@ void Peds::OnInstallHooks() {
         // its game started over: what it owned before is gone there
         Instance().DropMirrorsOf(from, false);
         Vehicles::Instance().ForgetOwnedBy(from);
-        Vehicles::Instance().Reannounce();  // vehicles first: peds inside them need the vehicle
-        Instance().Reannounce();
+        Vehicles::Instance().Reannounce(from);  // vehicles first: peds inside them need the vehicle
+        Instance().Reannounce(from);
         core::PeerResynced(from);
     });
 }
@@ -394,7 +397,7 @@ PedSyncState Peds::Capture(NetPed& np) {
     return s;
 }
 
-void Peds::Announce(NetPed& np) {
+void Peds::Announce(NetPed& np, proto::PlayerMask to) {
     PedSyncState s = Capture(np);
     Writer w(proto::G_PED_CREATE);
     w.U16(np.netId);
@@ -402,21 +405,32 @@ void Peds::Announce(NetPed& np) {
     w.U8(np.pedType);
     w.Str(np.special, 16);
     WriteState(w, s);
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
     np.lastSendMs = NowMs();
 }
 
-void Peds::Reannounce() {
+void Peds::Reannounce(uint8_t to) {
     for (auto& [id, np] : m_byId)
-        if (np.owner == Net().MyId() && IsAlive(np)) Announce(np);
+        if (np.owner == Net().MyId() && IsAlive(np)) Announce(np, proto::Bit(to));
+}
+
+// The players that have a copy of the ped or are about to: those near it, and in a vehicle those its copy is made for
+proto::PlayerMask Peds::StateTargets(NetPed& np) {
+    CPed* ped = np.ped;
+    proto::PlayerMask mask = PlayersNear(ped->GetPosition(), AreaOf(ped), SyncOut(ped) + 40.0f, false);
+    if (CVehicle* v = ped->VehicleIfIn())
+        if (NetVehicle* nv = Vehicles::Instance().Find(v)) mask |= Vehicles::Instance().Riders(nv->netId);
+    return mask;
 }
 
 void Peds::SendState(NetPed& np) {
+    proto::PlayerMask to = StateTargets(np);
+    np.lastSendMs = NowMs();
+    if (!to) return;
     Writer w(proto::G_PED_SYNC);
     w.U16(np.netId);
     WriteState(w, Capture(np));
-    Net().Send(proto::CH_STATE, w);
-    np.lastSendMs = NowMs();
+    Net().SendTo(to, proto::CH_STATE, w);
 }
 
 void Peds::RespawnCopiesOf(int model) {
@@ -475,7 +489,7 @@ void Peds::ScanOwned() {
             if (CVehicle* v = ped->VehicleIfIn(); v && !IsSyncableVehicle(v)) continue;
             uint16_t id;
             do {
-                id = (uint16_t)(((myId + 1) << 12) | (m_nextId++ & 0x0FFF));
+                id = proto::EntityId(myId, m_nextId++);
             } while (m_byId.count(id));
             NetPed& n = m_byId[id];
             n.netId = id;
@@ -559,7 +573,7 @@ void Peds::HandleCreate(uint8_t from, Reader& r) {
     np.state = st;
     np.hasState = true;
     np.recvMs = NowMs();
-    SpawnMirror(np);  // may fail for now: retried from ApplyMirror
+    if (WantMirror(np)) SpawnMirror(np);  // may fail for now: retried from ApplyMirror
 }
 
 void Peds::HandleRemove(uint8_t from, Reader& r) {
@@ -634,11 +648,37 @@ void Peds::HandleSync(uint8_t from, Reader& r) {
     np.recvMs = NowMs();
 }
 
+bool Peds::WantMirror(const NetPed& np) const {
+    const PedSyncState& st = np.state;
+    if (st.flags & PedSyncState::F_IN_VEHICLE) {  // with its vehicle's copy
+        NetVehicle* nv = Vehicles::Instance().Find(st.vehNetId);
+        return nv && nv->veh;
+    }
+    CPlayerPed* me = FindPlayerPed(0);
+    return me && (st.pos - me->GetPosition()).Length() < (np.ped ? kMirrorOut : kMirrorIn);
+}
+
+// far from this game's player: the copy goes, the record stays (the owner's states keep it up to date)
+void Peds::Unspawn(NetPed& np) {
+    if (IsAlive(np)) Cmd(0x009B).I(np.handle).Run();  // DELETE_CHAR
+    m_byPtr.erase(np.ped);
+    NetPed fresh;  // the mirror side starts over when it is made again
+    fresh.netId = np.netId;
+    fresh.owner = np.owner;
+    fresh.model = np.model;
+    fresh.pedType = np.pedType;
+    fresh.special = np.special;
+    fresh.hasState = np.hasState;
+    fresh.state = np.state;
+    fresh.recvMs = np.recvMs;
+    np = fresh;
+}
+
 void Peds::ApplyMirror(NetPed& np) {
     const PedSyncState& st = np.state;
     uint64_t now = NowMs();
     if (!np.ped) {
-        if (now - np.lastTaskMs >= 100) {
+        if (now - np.lastTaskMs >= 100 && WantMirror(np)) {
             np.lastTaskMs = now;
             SpawnMirror(np);
         }
@@ -648,6 +688,10 @@ void Peds::ApplyMirror(NetPed& np) {
     if (!IsAlive(np)) {  // deleted by the game (should not happen to mission peds): spawn again
         m_byPtr.erase(ped);
         np.ped = nullptr;
+        return;
+    }
+    if (!WantMirror(np)) {
+        Unspawn(np);
         return;
     }
     ped->AreaCode() = st.area;
@@ -894,7 +938,7 @@ void Peds::OnPreProcess() {
         if (np.owner == Net().MyId()) continue;
         ApplyMirror(np);
         CPed* ped = np.ped;
-        if (!IsAlive(np) || !ped->RwObject() || ped->InVehicle() || IsPedDead(ped) || HasLastingBodyAnim(ped)) continue;
+        if (!ped || !IsAlive(np) || !ped->RwObject() || ped->InVehicle() || IsPedDead(ped) || HasLastingBodyAnim(ped)) continue;
         // its stance comes back, as the game would give it (see HasLastingBodyAnim)
         Call<0x4D4610, void*>(ped->RwObject(), Field<int32_t>(ped, 0x4D4), 3 /* ANIM_ID_IDLE */, 4.0f);  // CAnimManager::BlendAnimation
         np.baseBlock = kNoAnim;

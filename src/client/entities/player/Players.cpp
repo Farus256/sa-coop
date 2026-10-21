@@ -12,6 +12,7 @@
 #include "entities/mission/Mission.h"
 #include "entities/session/Flow.h"
 #include "entities/vehicle/Vehicles.h"
+#include "entities/world-share/WorldShare.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Script.h"
@@ -58,6 +59,68 @@ constexpr uintptr_t kCrossHair = 0xC8A838;
 constexpr uintptr_t kVision = 0xC402B8;
 // its sniper shots shake the camera (CamShakeNoPos: TheCamera +0x12C force, +0x5C start) and every gun the pads
 constexpr uintptr_t kCamShake = addr::TheCamera + 0x12C, kCamShakeStart = addr::TheCamera + 0x5C;
+
+// ------------------------------------------------------------------ the remote players' player data
+// Every remote player is a CPlayerPed of player slot 1 (CREATE_PLAYER 1). The game keeps a player's wanted level,
+// clothes, movement, look pitch, gun spin... in the CPlayerPedData its ped points to (CPed +0x480): the slot's own
+// (CPlayerInfo +0x04). Each remote player gets a copy of its own, so that several of them keep apart; the slot's stays
+// for the engine's code that reaches it through the slot while a remote player is processed (FindPlayerWanted).
+constexpr size_t kPlayerDataSize = 0xAC;
+constexpr int kPlayerDataOffset = 0x04;  // CPlayerInfo::m_PlayerData
+constexpr int kGroupField = 0x38;        // CPlayerPedData::m_nPlayerGroup
+// the entity pointers in it that the game registers (CEntity::RegisterReference: nulled when the entity goes):
+// m_pArrestingCop, m_pDangerCar, m_pCurrentProstitutePed, m_pLastProstituteShagged
+constexpr int kDataRefs[] = {0x08, 0x30, 0xA4, 0xA8};
+constexpr int kHsMissileTarget = 0x98;   // m_LastHSMissileTarget: compared only, not registered
+constexpr uintptr_t kActiveGroups = 0xC098E0, kGroups = 0xC09920;  // CPedGroups::ms_activeGroups, ms_groups
+constexpr size_t kGroupSize = 0x2D4, kGroupCount = 8;
+
+void* SlotData() { return (uint8_t*)PlayerInfo(kRemoteSlot) + kPlayerDataOffset; }
+int32_t& GroupOf(void* playerData) { return Field<int32_t>(playerData, kGroupField); }
+int32_t LocalGroup() { return GroupOf((uint8_t*)PlayerInfo(0) + kPlayerDataOffset); }
+
+// CREATE_PLAYER makes the new player a ped group of its own (its constructor: CPedGroups::AddGroup) and the remote
+// player leaves it at once (SpawnRemote): 8 groups for the whole game, and gang members walking together take them.
+// With none free the constructor would write before the array: the spawn waits for one. -1: none.
+int FreePedGroup() {
+    for (size_t i = 0; i < kGroupCount; ++i)
+        if (!Ref<uint8_t>(kActiveGroups + i)) return (int)i;
+    return -1;
+}
+
+// The remote players count as members of this game's player's group (they have none of their own). The group's "keep
+// up" call (CPlayerPed::ProcessControl, every 128 frames when the group lags behind its leader) would come from each of
+// them in CJ's voice, and the members would climb into a remote player's car: off while one is processed.
+uint8_t* LocalGroupFollowFlag() {
+    int32_t g = LocalGroup();
+    if (g < 0 || g >= (int32_t)kGroupCount || !Ref<uint8_t>(kActiveGroups + g)) return nullptr;
+    return (uint8_t*)(kGroups + (uintptr_t)g * kGroupSize + 4);  // CPedGroup::m_bMembersEnterLeadersVehicle
+}
+
+void ReleaseOwnData(RemotePlayer& rp) {
+    if (!rp.hasData) return;
+    for (int off : kDataRefs)
+        if (CEntity*& e = Field<CEntity*>(rp.data, off)) {
+            CallMethod<0x571A00>(e, &e);  // CEntity::CleanUpOldReference: this memory is no longer a reference
+            e = nullptr;
+        }
+    CallMethod<0x56F890>((void*)rp.data);  // CPlayerPedData::DeAllocateData: its wanted level and clothes
+    rp.hasData = false;
+}
+
+// the ped's own copy of the player data its constructor set up in the slot
+void TakeOwnData(RemotePlayer& rp, CPlayerPed* ped) {
+    ReleaseOwnData(rp);
+    memcpy(rp.data, SlotData(), kPlayerDataSize);
+    Field<void*>(rp.data, 0x00) = nullptr;  // m_pWanted
+    Field<void*>(rp.data, 0x04) = nullptr;  // m_pPedClothesDesc
+    for (int off : kDataRefs) Field<void*>(rp.data, off) = nullptr;  // registered at the slot's address, not here
+    Field<void*>(rp.data, kHsMissileTarget) = nullptr;
+    CallMethod<0x571880>((void*)rp.data);  // CPlayerPedData::AllocateData: a wanted level and clothes of its own
+    GroupOf(rp.data) = LocalGroup();
+    ped->PlayerData() = rp.data;
+    rp.hasData = true;
+}
 
 struct LocalContext {
     uint8_t stats[kStatsKeptSize];
@@ -139,6 +202,8 @@ void ApplyRemote(RemotePlayer& rp) {
     memset(&p0->bApplyBrakes, 0, 8);
     PlayerInFocus() = (int8_t)kRemoteSlot;
     PlayerInfo(kRemoteSlot)->ped = rp.ped;
+    GroupOf(SlotData()) = LocalGroup();  // this game's player's group (a reload gives it another)
+    if (rp.hasData) GroupOf(rp.data) = LocalGroup();
     const CameraState& c = rp.state.cam;
     cam::Mode() = c.mode;
     cam::WeaponMode() = c.weaponMode;
@@ -261,10 +326,14 @@ void __fastcall HookPlayerProcessControl(CPlayerPed* self, void* edx) {
     LocalContext saved;
     SaveLocal(saved);
     ApplyRemote(*rp);
+    uint8_t* follow = LocalGroupFollowFlag();
+    uint8_t followSaved = follow ? *follow : 0;
+    if (follow) *follow = 0;
     g_inRemoteContext = true;
     g_origProcessControl(self, edx);
     DriveBy(self);  // still under its pad and camera
     g_inRemoteContext = false;
+    if (follow) *follow = followSaved;
     RestoreLocal(saved);
     Field<bool*>(self, 0x500) = nullptr;  // CPed::m_pGogglesState: taking its goggles off must not switch ours off
 }
@@ -467,7 +536,15 @@ uint8_t WantedLevel(CPlayerPed* me) {
     return wanted ? (uint8_t)std::clamp(Field<int32_t>(wanted, 0x2C), 0, 6) : 0;  // CWanted::m_nWantedLevel
 }
 
+// what its game makes for the players near it (the only flags a vehicle state carries)
+uint16_t MakesFlags() {
+    return (Share().population ? OnFootState::F_POPULATION : 0) | (Share().trains ? OnFootState::F_TRAINS : 0);
+}
+constexpr uint16_t kMakesFlags = OnFootState::F_POPULATION | OnFootState::F_TRAINS;
+constexpr int kMakesShift = 7;  // they go in a byte of their own: F_POPULATION is 1 there, F_TRAINS 2
+
 void FillCommon(OnFootState& st, CPlayerPed* me) {
+    st.flags = MakesFlags();
     st.health = ClampByte(me->Health());
     st.wanted = WantedLevel(me);
     st.armour = ClampByte(me->Armour());
@@ -505,6 +582,7 @@ void WriteCommon(Writer& w, const OnFootState& st) {
     w.U16(st.ammo);
     w.I8(st.area);
     w.U8(st.wanted);
+    w.U8((uint8_t)((st.flags & kMakesFlags) >> kMakesShift));
 }
 
 void ReadCommon(Reader& r, OnFootState& st) {
@@ -516,6 +594,7 @@ void ReadCommon(Reader& r, OnFootState& st) {
     st.ammo = r.U16();
     st.area = r.I8();
     st.wanted = r.U8();
+    st.flags = (uint16_t)(r.U8() << kMakesShift) & kMakesFlags;
 }
 }  // namespace
 
@@ -571,6 +650,19 @@ float RemoteDistance(const CVector& p, int8_t area, uint8_t* who) {
             if (who) *who = id;
         }
     return best;
+}
+
+proto::PlayerMask PlayersNear(const CVector& p, int8_t area, float radius, bool unknownToo) {
+    proto::PlayerMask mask = 0;
+    const auto& remote = Players::Instance().All();
+    for (auto& [id, peer] : Net().Peers()) {
+        auto it = remote.find(id);
+        // one that has not been heard from for a while is loading or in the menu: where it appears is unknown
+        bool known = it != remote.end() && it->second.hasState && NowMs() - it->second.stateRecvMs < 3000;
+        if (known ? it->second.state.area == area && (it->second.state.pos - p).Length() < radius : unknownToo)
+            mask |= proto::Bit(id);
+    }
+    return mask;
 }
 
 // ------------------------------------------------------------------ module
@@ -662,6 +754,7 @@ void Players::OnGameStarted() {
         rp.ped = nullptr;
         rp.pedHandle = -1;
         rp.blip = 0;
+        ReleaseOwnData(rp);
     }
     // a reload of the host's world after its progress: back where the partner stood, as it was
     if (flow::SavedSpot s; Net().Online() && !Net().IsHost() && flow::TakeSavedSpot(s)) {
@@ -727,6 +820,17 @@ void Players::SpawnRemote(RemotePlayer& rp) {
     CPlayerInfo* slot = PlayerInfo(kRemoteSlot);
     if (slot->ped) return;  // slot busy (should not happen)
     if (!HasRoom(PedPool(), 2, "ped")) return;  // the other player above everything else, still not into the last slots
+    int freeGroup = FreePedGroup();
+    if (freeGroup < 0) {
+        if (NowMs() - rp.groupWaitLogMs > 10000) {
+            rp.groupWaitLogMs = NowMs();
+            LOGW("Remote player %d waits for a free ped group to be made", rp.id);
+        }
+        return;
+    }
+    // should its constructor set the player up as the leader of the group the slot names before it makes one
+    // (SetInitialState), that is the one it makes next
+    GroupOf(SlotData()) = freeGroup;
     const CVector p = rp.state.pos;
     int playerIndex = -1, handle = -1;
     // made high above its place: CREATE_PLAYER clears the space around itself of this game's random peds and cars
@@ -734,6 +838,11 @@ void Players::SpawnRemote(RemotePlayer& rp) {
     Cmd(0x0053).I(kRemoteSlot).F(p.x).F(p.y).F(p.z + 300.0f).Out(&playerIndex).Run();  // CREATE_PLAYER
     Cmd(0x01F5).I(kRemoteSlot).Out(&handle).Run();                            // GET_PLAYER_CHAR
     Cmd(0x0501).I(kRemoteSlot).I(1).Run();  // SET_PLAYER_CAN_DO_DRIVE_BY: its drive-bys show here (CPlayerInfo +0x153)
+    // no group of its own: the one its constructor made goes at once, and it counts as one of this game's player's
+    // (whatever asks a player for its group finds one that exists; its recruiting, ProcessGroupBehaviour, is off)
+    int32_t made = GroupOf(SlotData()), local = LocalGroup();
+    if (made >= 0 && made < (int32_t)kGroupCount && made != local) Call<0x5FB870>(made);  // CPedGroups::RemoveGroup
+    GroupOf(SlotData()) = local;
     auto* ped = (CPlayerPed*)GetPed(handle);
     if (!ped) {
         LOGE("Failed to create the remote player ped");
@@ -742,6 +851,7 @@ void Players::SpawnRemote(RemotePlayer& rp) {
     }
     // registered in CWorld::Players[1] only while processed (see HookPlayerProcessControl)
     slot->ped = nullptr;
+    TakeOwnData(rp, ped);
     Cmd(0x00A1).I(handle).F(p.x).F(p.y).F(p.z - 1.0f).Run();  // SET_CHAR_COORDINATES (feet)
     ped->PedType() = PED_TYPE_PLAYER1;  // enemies hostile to the player attack the partner too
     ped->SetProofs(true, true, true, true, true);  // damage is decided by its owner
@@ -758,6 +868,7 @@ void Players::SpawnRemote(RemotePlayer& rp) {
     Cmd(0x0187).I(handle).Out(&blip).Run();  // ADD_BLIP_FOR_CHAR
     if (blip) {
         Cmd(0x07E0).I(blip).I(1).Run();       // SET_BLIP_AS_FRIENDLY
+        Cmd(0x0165).I(blip).I((int)ui::ArgbToRgba(PlayerColor(rp.id))).Run();  // CHANGE_BLIP_COLOUR: an RGBA is drawn as is
         Cmd(0x0168).I(blip).I(2).Run();       // CHANGE_BLIP_SCALE
         Cmd(0x018B).I(blip).I(2).Run();       // CHANGE_BLIP_DISPLAY: radar only, no 3D arrow
         rp.blip = blip;
@@ -785,6 +896,7 @@ void Players::DestroyRemote(RemotePlayer& rp) {
     }
     rp.ped = nullptr;
     rp.pedHandle = -1;
+    ReleaseOwnData(rp);  // after the ped: its destructor may still read it
 }
 
 void Players::HandleOnFoot(uint8_t from, Reader& r) {
@@ -994,10 +1106,8 @@ void Players::ApplyState(RemotePlayer& rp) {
         ApplyVehicleSeat(rp);
         return;
     }
-    if (st.flags & OnFootState::F_IN_TRAIN) {
-        RideTrain(rp);
-        return;
-    }
+    // in its cab here; a train this game has no copy of (far away): it goes along as on foot, for its blip
+    if ((st.flags & OnFootState::F_IN_TRAIN) && RideTrain(rp)) return;
     // on foot but still sitting in a vehicle here: the exit animation gets a few seconds, then warp out
     if (ped->InVehicle()) {
         if (NowMs() - rp.exitTaskMs > kEnterGraceMs) {
@@ -1045,24 +1155,24 @@ void Players::ApplyState(RemotePlayer& rp) {
     }
 }
 
-// Trains are not networked (Trains.cpp shows the host's in the other games): the player riding one sits in the cab of
-// the train here nearest to its place.
-void Players::RideTrain(RemotePlayer& rp) {
+// Trains are not networked as vehicles (Trains.cpp copies them): the player riding one sits in the cab of the train
+// here nearest to its place. False: no train here near its place.
+bool Players::RideTrain(RemotePlayer& rp) {
     CVehicle* train = Call<0x6F7090, CVehicle*>(rp.state.pos, true);  // CTrain::FindNearestTrain(position, an engine)
     CPlayerPed* ped = rp.ped;
-    if (!train || (train->GetPosition() - rp.state.pos).Length() > 25.0f || (ped->InVehicle() && ped->Vehicle() == train) ||
-        NowMs() - rp.enterTaskMs < 1500)
-        return;
+    if (!train || (train->GetPosition() - rp.state.pos).Length() > 25.0f) return false;
+    if ((ped->InVehicle() && ped->Vehicle() == train) || NowMs() - rp.enterTaskMs < 1500) return true;
     rp.enterTaskMs = NowMs();
     CVector p = ped->GetPosition();
     if (ped->InVehicle()) {
         Cmd(0x0362).I(rp.pedHandle).F(p.x).F(p.y).F(p.z).Run();  // WARP_CHAR_FROM_CAR_TO_COORD
-        return;
+        return true;
     }
-    if (CPed* d = train->Driver(); d && d->IsPlayer()) return;          // taken here
+    if (CPed* d = train->Driver(); d && d->IsPlayer()) return true;      // taken here
     else if (d) Cmd(0x009B).I(GetPedRef(d)).Run();                       // DELETE_CHAR: the copy's own driver
     Field<uint8_t>(train, 0x42A) |= 2;  // bHasBeenOwnedByPlayer: a player warped in reports a car theft (0x64BBBA) on ours
     Cmd(0x036A).I(rp.pedHandle).I(GetVehicleRef(train)).Run();          // WARP_CHAR_INTO_CAR
+    return true;
 }
 
 void Players::ApplyVehicleSeat(RemotePlayer& rp) {
@@ -1164,6 +1274,20 @@ void Players::DetectCarTasks() {
     }
 }
 
+// The players near this one get its state at the full rate, the others twice a second: enough for their radar, and
+// players spread over the map do not flood each other (the server relays each state to every player it goes to).
+constexpr float kFullRateDist = 350.0f;
+constexpr uint64_t kFarStateMs = 500;
+
+proto::PlayerMask Players::StateTargets(const CVector& pos, int8_t area) {
+    uint64_t now = NowMs();
+    if (now - m_lastFarSend >= kFarStateMs) {
+        m_lastFarSend = now;
+        return Net().PeersMask();
+    }
+    return PlayersNear(pos, area, kFullRateDist);
+}
+
 void Players::SendVehicleState(CVehicle* v) {
     CPlayerPed* me = FindPlayerPed(0);
     NetVehicle* nv = Vehicles::Instance().EnsureNetworked(v);
@@ -1186,7 +1310,7 @@ void Players::SendVehicleState(CVehicle* v) {
         w.U16(nv->netId);
         vs.Write(w);
         WriteCommon(w, common);
-        Net().Send(proto::CH_STATE, w);
+        Net().SendTo(StateTargets(v->GetPosition(), me->AreaCode()), proto::CH_STATE, w);
     } else {
         int seat = PassengerSeatOf(v, me);
         Writer w(proto::G_PLAYER_PASSENGER);
@@ -1196,7 +1320,7 @@ void Players::SendVehicleState(CVehicle* v) {
         CVector p = v->GetPosition();
         w.Vec({p.x, p.y, p.z});
         WriteCommon(w, common);
-        Net().Send(proto::CH_STATE, w);
+        Net().SendTo(StateTargets(p, me->AreaCode()), proto::CH_STATE, w);
     }
 }
 
@@ -1253,7 +1377,7 @@ void Players::SendLocalState() {
                (HasJetpack(me) ? OnFootState::F_JETPACK : 0) |
                (me->Health() <= 0.0f ? OnFootState::F_DEAD : 0) |
                (me->InVehicle() && me->Vehicle() && me->Vehicle()->IsTrain() ? OnFootState::F_IN_TRAIN : 0) |
-               (Field<int32_t>(me, 0x740) == kCellphone ? OnFootState::F_PHONE : 0);  // CPed::m_nWeaponModelId
+               (Field<int32_t>(me, 0x740) == kCellphone ? OnFootState::F_PHONE : 0) | MakesFlags();  // CPed::m_nWeaponModelId
     st.area = me->AreaCode();
     st.moveState = (uint8_t)me->MoveState();
     st.wanted = WantedLevel(me);
@@ -1281,7 +1405,7 @@ void Players::SendLocalState() {
     m_lastSentPad = st.pad;
     Writer wr(proto::G_PLAYER_ONFOOT);
     st.Write(wr);
-    Net().Send(proto::CH_STATE, wr);
+    Net().SendTo(StateTargets(st.pos, st.area), proto::CH_STATE, wr);
 }
 
 void Players::OnPostProcess() {
@@ -1379,9 +1503,9 @@ void Players::DrawNameTag(RemotePlayer& rp) {
     auto& g = ui::Gfx();
     float s = g.Scale();
     std::string name = Net().PeerName(rp.id);
-    if (NowMs() - rp.heardMs < 300) name = "{FFDC50}((•)){FFFFFF} " + name;  // talking right now
-    bool host = rp.id == Net().HostId();
-    uint32_t nameColor = host ? 0xFF64B4FF : 0xFF78DC78;
+    uint32_t nameColor = PlayerColor(rp.id);
+    if (NowMs() - rp.heardMs < 300)  // talking right now
+        name = Format("{FFDC50}((•)){%06X} ", (unsigned)(nameColor & 0xFFFFFF)) + name;
     float lh = g.LineHeight(ui::FONT_SMALL);
     g.Text(ui::FONT_SMALL, sx, sy - lh - 8 * s, name, ui::WithAlpha(nameColor, alpha), ui::TEXT_CENTER | ui::TEXT_OUTLINE);
     float bw = 64 * s, bh = 6 * s;
@@ -1407,33 +1531,78 @@ void Players::OnRender() {
 bool Players::OnCommand(const std::string& cmd, const std::vector<std::string>& args) {
     if (cmd != "tp" && cmd != "tphere") return false;
     if (!core::IsPlayerReady()) return true;
-    RemotePlayer* target = nullptr;
-    for (auto& [id, rp] : m_remote)
-        if (rp.hasState) target = &rp;
-    if (!target) {
-        ui::TheChat().AddError(TR("Напарник ещё не в игре.", "Your partner is not in the game yet."));
+    auto& chat = ui::TheChat();
+    std::vector<RemotePlayer*> targets;
+    std::string who = args.empty() ? "" : args[0];
+    auto inGame = [&] {
+        std::string names;
+        for (auto& [id, rp] : m_remote)
+            if (rp.hasState) names += (names.empty() ? "" : ", ") + Net().PeerName(id);
+        return names;
+    };
+    if (who.empty()) {  // the only other player in the game
+        for (auto& [id, rp] : m_remote)
+            if (rp.hasState) targets.push_back(&rp);
+        if (targets.size() > 1) {
+            chat.AddError(Format(TR("Укажите, кого: /%s <ник>. В игре: %s.", "Say whom: /%s <nick>. In the game: %s."),
+                                 cmd.c_str(), inGame().c_str()));
+            return true;
+        }
+    } else if (cmd == "tphere" && (ToLower(who) == "all" || who == "*")) {
+        if (!Net().IsHost()) {
+            chat.AddError(TR("Собрать всех к себе может только хост.", "Only the host can bring everyone over."));
+            return true;
+        }
+        for (auto& [id, rp] : m_remote)
+            if (rp.hasState) targets.push_back(&rp);
+    } else {
+        uint8_t id = Net().FindPeer(who);
+        if (id == 255) {
+            chat.AddError(Format(TR("Нет игрока «%s» (или под этот ник подходят несколько).",
+                                    "There is no player \"%s\" (or several fit the name)."), who.c_str()));
+            return true;
+        }
+        RemotePlayer* rp = Get(id);
+        if (!rp || !rp->hasState) {
+            chat.AddError(Format(TR("%s ещё не в игре.", "%s is not in the game yet."), Net().PeerName(id).c_str()));
+            return true;
+        }
+        targets.push_back(rp);
+    }
+    if (targets.empty()) {
+        chat.AddError(TR("Других игроков в игре пока нет.", "No other player is in the game yet."));
         return true;
     }
     CPlayerPed* me = FindPlayerPed(0);
     if (cmd == "tp") {
+        RemotePlayer* target = targets[0];
         CVector p = target->state.pos + CVector{1.0f, 0, 0};
         int handle = GetPedRef(me);
-        Cmd(0x04BB).I(target->state.area).Run();
-        Cmd(0x0860).I(handle).I(target->state.area).Run();
-        Cmd(0x00A1).I(handle).F(p.x).F(p.y).F(p.z - 1.0f).Run();
+        Cmd(0x04BB).I(target->state.area).Run();            // SET_AREA_VISIBLE
+        Cmd(0x0860).I(handle).I(target->state.area).Run();  // SET_CHAR_AREA_VISIBLE
+        Cmd(0x00A1).I(handle).F(p.x).F(p.y).F(p.z - 1.0f).Run();  // SET_CHAR_COORDINATES
         LightArea(target->state.area, p);
-        ui::TheChat().AddSystem(Format(TR("Вы переместились к %s.", "You went over to %s."), Net().PeerName(target->id).c_str()));
-    } else {
-        CVector p = me->GetPosition() + CVector{1.0f, 0, 0};
+        chat.AddSystem(Format(TR("Вы переместились к %s.", "You went over to %s."), Net().PeerName(target->id).c_str()));
+        return true;
+    }
+    // around this player, a step apart from each other
+    CVector c = me->GetPosition();
+    float n = (float)targets.size(), radius = targets.size() > 1 ? 1.5f + 0.2f * n : 1.0f;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        float a = me->CurrentRotation() + 6.2831853f * (float)i / n;
+        CVector p = c + CVector{std::cos(a) * radius, std::sin(a) * radius, 0};
         Writer w(proto::G_TELEPORT);
-        w.U8(target->id);
+        w.U8(targets[i]->id);
         w.F32(p.x);
         w.F32(p.y);
         w.F32(p.z - 1.0f);
         w.I8(me->AreaCode());
-        Net().Send(proto::CH_RELIABLE, w);
-        ui::TheChat().AddSystem(Format(TR("%s перемещён к вам.", "%s was brought over to you."), Net().PeerName(target->id).c_str()));
+        Net().SendTo(targets[i]->id, proto::CH_RELIABLE, w);
     }
+    if (targets.size() == 1)
+        chat.AddSystem(Format(TR("%s перемещён к вам.", "%s was brought over to you."), Net().PeerName(targets[0]->id).c_str()));
+    else
+        chat.AddSystem(Format(TR("Игроки перемещены к вам: %d.", "Players brought over to you: %d."), (int)targets.size()));
     return true;
 }
 

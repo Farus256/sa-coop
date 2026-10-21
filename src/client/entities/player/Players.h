@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "common/api/protocol/Protocol.h"
 #include "entities/player/PlayerState.h"
 #include "entities/vehicle/VehicleState.h"
 #include "shared/game/Game.h"
@@ -40,6 +41,13 @@ struct RemotePlayer {
     uint64_t heardMs = 0;       // its last voice frame was played (set by the voice feature)
     bool lookStale = false;     // a script here took its special character's slot: it went back to CJ, the look again
     uint64_t duckOffMs = 0;     // since when the copy's crouch differs from its owner's (a lost crouch press)
+    bool muted = false;         // its voice is not played here (/mute)
+
+    // Its ped's own CPlayerPedData (wanted level, clothes, look pitch, gun spin...): every remote player is a ped of
+    // player slot 1, and without a copy of their own they would all share the slot's.
+    alignas(4) uint8_t data[0xAC] = {};
+    bool hasData = false;
+    uint64_t groupWaitLogMs = 0;
 };
 
 class Players : public Module {
@@ -86,12 +94,14 @@ private:
     void ApplyVehicleSeat(RemotePlayer& rp);
     void DrawNameTag(RemotePlayer& rp);
     void KeepApart(game::CPed* other);
-    void RideTrain(RemotePlayer& rp);
+    bool RideTrain(RemotePlayer& rp);
     bool TagAnchor(RemotePlayer& rp, float& sx, float& sy, float& alpha);
     RemotePlayer& Touch(uint8_t from);
+    // the players this game's player state goes to now: the near ones at its rate, everyone twice a second
+    proto::PlayerMask StateTargets(const game::CVector& pos, int8_t area);
 
     std::map<uint8_t, RemotePlayer> m_remote;
-    uint64_t m_lastSend = 0;
+    uint64_t m_lastSend = 0, m_lastFarSend = 0;
     PadState m_lastSentPad;
     game::CVehicle* m_enterReported = nullptr;
     bool m_exitReported = false;
@@ -113,5 +123,8 @@ int SeatOfTargetDoor(int door);
 int SeatOrAny(game::CVehicle* v, int seat);
 // distance to the nearest remote player in the same interior (huge when there is none), and who it is
 float RemoteDistance(const game::CVector& p, int8_t area, uint8_t* who = nullptr);
+// the players (bit mask) whose last known place is within `radius` of p in the same interior; unknownToo: and those
+// whose place is not known now (loading, in the menu)
+proto::PlayerMask PlayersNear(const game::CVector& p, int8_t area, float radius, bool unknownToo = true);
 
 }  // namespace coop

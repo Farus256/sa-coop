@@ -103,4 +103,8 @@ private:
 
 Session& Net();
 
+// A player's colour (ARGB) for its name in the chat, over its head, in the player list and its radar blip: by its
+// number, the same on every screen.
+uint32_t PlayerColor(uint8_t id);
+
 }  // namespace coop

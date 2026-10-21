@@ -31,8 +31,14 @@ struct Reg {
 
 constexpr uint8_t STATUS_PHYSICS = 3, STATUS_WRECKED = 5;
 constexpr uint8_t VEHICLE_CREATED_RANDOM = 1, VEHICLE_CREATED_MISSION = 2, VEHICLE_CREATED_PARKED = 3;
-constexpr float kTrafficIn = 170.0f;   // owned vehicles closer than this to the partner are announced (> car spawn range)
-constexpr float kTrafficOut = 220.0f;  // and dropped from the network beyond this
+constexpr float kTrafficIn = 170.0f;   // owned vehicles closer than this to a remote player are announced (> car spawn range)
+constexpr float kTrafficOut = 220.0f;  // and dropped from the network beyond this from all of them
+// Another player's vehicle has a copy in this game while this game's player is near it (or someone sits in it): with
+// up to 16 players apart, each other's traffic would fill the vehicle pool (110) otherwise. Beyond that it is a record.
+constexpr float kMirrorIn = 190.0f, kMirrorOut = 250.0f;
+constexpr float kSyncRange = 300.0f;  // the owner sends an empty vehicle's state to the players this near (> kMirrorOut)
+constexpr uint8_t kOrphan = 0xFE;     // its owner left: the nearest player that has it takes it
+constexpr uint64_t kOrphanMs = 3000;  // ... or it goes from the games after this
 
 void SetVehicleCreatedBy(CVehicle* v, uint8_t by) { CallMethod<0x6D5D70>(v, (int)by); }  // keeps CCarCtrl counters right
 
@@ -173,8 +179,8 @@ NetVehicle* Vehicles::EnsureNetworked(CVehicle* v) {
     if (!Net().Online()) return nullptr;
     uint16_t id;
     do {
-        id = (uint16_t)(((Net().MyId() + 1) << 12) | (m_nextId++ & 0x0FFF));
-    } while (m_byId.count(id));
+        id = proto::EntityId(Net().MyId(), m_nextId++);
+    } while (m_byId.count(id) || m_pending.count(id));
     NetVehicle& nv = m_byId[id];
     nv.netId = id;
     nv.veh = v;
@@ -188,7 +194,7 @@ NetVehicle* Vehicles::EnsureNetworked(CVehicle* v) {
     return &nv;
 }
 
-void Vehicles::Announce(const NetVehicle& nv) {
+void Vehicles::Announce(const NetVehicle& nv, proto::PlayerMask to) {
     CVehicle* v = nv.veh;
     VehicleSpawn sp;
     sp.netId = nv.netId;
@@ -203,20 +209,39 @@ void Vehicles::Announce(const NetVehicle& nv) {
     sp.script = nv.createdByUs ? nv.script : v->CreatedBy() == VEHICLE_CREATED_MISSION;
     Writer w(proto::G_VEH_CREATE);
     sp.Write(w);
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
 }
 
-void Vehicles::Reannounce() {
+void Vehicles::Reannounce(uint8_t to) {
     for (auto& [id, nv] : m_byId)
         if (!IsMirror(nv) && IsVehicleValid(nv.veh)) {
-            Announce(nv);
-            SendLook(nv);
+            Announce(nv, proto::Bit(to));
+            nv.lookTo &= ~proto::Bit(to);
+            nv.syncTo &= ~proto::Bit(to);
+            SendLook(nv, proto::Bit(to));
         }
 }
 
-void Vehicles::SendLook(NetVehicle& nv) {
-    nv.look = CaptureLook(nv.veh);
+proto::PlayerMask Vehicles::Riders(uint16_t netId) const {
+    proto::PlayerMask mask = 0;
+    for (auto& [id, rp] : Players::Instance().All())
+        if (rp.hasState && rp.mode != RemotePlayer::Mode::OnFoot && rp.vehNetId == netId) mask |= proto::Bit(id);
+    return mask;
+}
+
+// the players an owned vehicle's state and look go to: those near enough to have a copy of it, and its riders
+proto::PlayerMask Vehicles::StateTargets(const NetVehicle& nv) const {
+    return PlayersNear(nv.veh->GetPosition(), nv.veh->AreaCode(), kSyncRange, false) | Riders(nv.netId);
+}
+
+void Vehicles::SendLook(NetVehicle& nv, proto::PlayerMask to) {
+    VehicleLook now = CaptureLook(nv.veh);
+    if (!nv.hasLook || !(now == nv.look)) nv.lookTo = 0;  // changed: everyone needs it again
+    nv.look = now;
     nv.hasLook = true;
+    to &= Net().PeersMask() & ~nv.lookTo;
+    if (!to) return;
+    nv.lookTo |= to;
     Writer w(proto::G_VEH_STATUS);
     w.U16(nv.netId);
     w.Raw(nv.look.colors, 4);
@@ -225,7 +250,7 @@ void Vehicles::SendLook(NetVehicle& nv) {
     w.Raw(nv.look.damage, sizeof(nv.look.damage));
     w.Raw(nv.look.bikeTyres, 2);
     w.U8(nv.look.lock);
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
 }
 
 void Vehicles::HandleStatus(uint8_t from, Reader& r) {
@@ -237,8 +262,14 @@ void Vehicles::HandleStatus(uint8_t from, Reader& r) {
     r.Raw(l.damage, sizeof(l.damage));
     r.Raw(l.bikeTyres, 2);
     l.lock = r.U8();
+    if (!r.Ok()) return;
+    if (auto it = m_pending.find(id); it != m_pending.end() && it->second.sp.owner == from) {  // for when it is made
+        it->second.look = l;
+        it->second.hasLook = true;
+        return;
+    }
     NetVehicle* nv = Find(id);
-    if (!r.Ok() || !nv || nv->owner != from) return;
+    if (!nv || nv->owner != from) return;
     nv->look = l;
     nv->hasLook = true;
 }
@@ -276,6 +307,8 @@ void Vehicles::TakeOwnership(NetVehicle& nv) {
     nv.owner = Net().MyId();
     nv.hasState = false;
     nv.lastChangeMs = NowMs();
+    nv.hasLook = false;  // this game's look of it goes to the players near it
+    nv.lookTo = nv.syncTo = 0;
     Release(nv);
     Writer w(proto::G_VEH_OWNER);
     w.U16(nv.netId);
@@ -345,11 +378,20 @@ void Vehicles::HandleCreate(uint8_t from, Reader& r) {
         LOGW("Vehicle %04X has an unknown model %d", sp.netId, sp.model);
         return;
     }
-    if (CreateMirror(sp)) m_pending.erase(sp.netId);
-    else m_pending[sp.netId] = sp;
+    PendingVehicle& pv = m_pending[sp.netId];  // an announcement again keeps the look and state it has
+    pv.sp = sp;
+    if (WantMirror(sp.netId, sp.pos, false) && CreateMirror(pv)) m_pending.erase(sp.netId);
 }
 
-bool Vehicles::CreateMirror(const VehicleSpawn& sp) {
+bool Vehicles::WantMirror(uint16_t netId, const CVector& pos, bool spawned) const {
+    CPlayerPed* me = FindPlayerPed(0);
+    if (!me) return false;
+    if (Riders(netId)) return true;  // a player's car follows it anywhere (its ped sits in it, its blip with it)
+    return (pos - me->GetPosition()).Length() < (spawned ? kMirrorOut : kMirrorIn);
+}
+
+bool Vehicles::CreateMirror(const PendingVehicle& pv) {
+    const VehicleSpawn& sp = pv.sp;
     if (Find(sp.netId)) return true;  // announced again meanwhile and made already
     bool adopted = false;
     CVehicle* v = FindAdoptable(sp.model, sp.pos);
@@ -371,9 +413,54 @@ bool Vehicles::CreateMirror(const VehicleSpawn& sp) {
     nv.createdByUs = !adopted;
     nv.script = sp.script;
     if (adopted) Protect(nv);
+    if (pv.hasState) {  // where the owner has it now, at once
+        nv.state = pv.state;
+        nv.hasState = true;
+        nv.lastTime = pv.state.time;
+        nv.recvMs = pv.recvMs;
+    }
+    if (pv.hasLook) {
+        nv.look = pv.look;
+        nv.hasLook = true;
+    }
     m_byPtr[v] = sp.netId;
     LOGI("Vehicle %04X (model %d) %s for player %d", sp.netId, sp.model, adopted ? "adopted" : "created", sp.owner);
     return true;
+}
+
+// Far from this game's player: the copy goes (one this game had before is its own again) and the record waits, kept up
+// to date by the owner's states for when the player comes near again.
+void Vehicles::Park(NetVehicle& nv) {
+    PendingVehicle pv;
+    VehicleSpawn& sp = pv.sp;
+    sp.netId = nv.netId;
+    sp.model = nv.model;
+    sp.owner = nv.owner;
+    sp.script = nv.script;
+    if (IsVehicleValid(nv.veh)) {
+        CVehicle* v = nv.veh;
+        sp.pos = v->GetPosition();
+        if (CMatrix* m = v->Matrix()) sp.rot = Quat::FromMatrix(*m);
+        memcpy(sp.colors, v->Colors(), 4);
+        sp.health = v->Health();
+        sp.area = v->AreaCode();
+        sp.lockState = (uint8_t)v->DoorLock();
+    }
+    if (nv.hasState) {
+        pv.hasState = true;
+        pv.state = nv.state;
+        pv.recvMs = nv.recvMs;
+        sp.pos = nv.state.pos;
+        sp.rot = nv.state.rot;
+    }
+    pv.look = nv.look;
+    pv.hasLook = nv.hasLook;
+    uint16_t id = nv.netId;
+    bool gone = nv.createdByUs;
+    if (!gone) Release(nv);
+    LOGD("Vehicle %04X (model %d) is far: %s, the record stays", id, nv.model, gone ? "its copy goes" : "this game's again");
+    Forget(id, gone);
+    m_pending[id] = pv;
 }
 
 void Vehicles::Forget(uint16_t netId, bool deleteVehicle) {
@@ -461,7 +548,7 @@ void Vehicles::ForgetOwnedBy(uint8_t owner) {
     std::vector<uint16_t> ids;
     for (auto& [vid, nv] : m_byId)
         if (nv.owner == owner) ids.push_back(vid);
-    for (auto it = m_pending.begin(); it != m_pending.end();) it = it->second.owner == owner ? m_pending.erase(it) : std::next(it);
+    for (auto it = m_pending.begin(); it != m_pending.end();) it = it->second.sp.owner == owner ? m_pending.erase(it) : std::next(it);
     for (uint16_t vid : ids) Drop(vid);
 }
 
@@ -506,7 +593,11 @@ void Vehicles::GiveAway(NetVehicle& nv, uint8_t to) {
     w.U8(to);
     Net().Send(proto::CH_RELIABLE, w);
     LOGI("Vehicle %04X (model %d) handed over to player %d", nv.netId, nv.model, to);
-    Forget(nv.netId, true);
+    // this game's one goes; the record stays, the new owner's car, for when this game's player comes back
+    nv.owner = to;
+    nv.createdByUs = true;
+    nv.hasState = false;
+    Park(nv);
 }
 
 bool Vehicles::QueueGiveAway(CVehicle* v, uint8_t to) {
@@ -520,23 +611,45 @@ void Vehicles::HandleHandover(uint8_t from, Reader& r) {
     uint16_t id = r.U16();
     uint8_t to = r.U8();
     if (!r.Ok()) return;
-    m_pending.erase(id);
+    if (auto it = m_pending.find(id); it != m_pending.end()) {  // no copy of it here
+        if (it->second.sp.owner != from) return;
+        if (to != Net().MyId()) {
+            it->second.sp.owner = to;  // the new owner's car from now on
+            return;
+        }
+        // given to this game, which has no copy to take over (its model was still streaming): it is gone for all
+        m_pending.erase(it);
+        Writer w(proto::G_VEH_REMOVE);
+        w.U16(id);
+        Net().Send(proto::CH_RELIABLE, w);
+        return;
+    }
     NetVehicle* nv = Find(id);
     if (!nv) return;
     if (nv->owner != from) {  // this game took it just before: the giver deleted its own, it gets this one back
         if (nv->owner == Net().MyId() && IsVehicleValid(nv->veh)) Announce(*nv);
         return;
     }
-    if (to != Net().MyId() || !IsVehicleValid(nv->veh)) return Forget(id, true);
+    if (to != Net().MyId()) {  // a third player's game takes it over: this copy follows that one now
+        nv->owner = to;
+        nv->hasState = false;
+        return;
+    }
+    if (!IsVehicleValid(nv->veh)) return Forget(id, true);
     CVehicle* v = nv->veh;
     int h = nv->handle;
+    nv->owner = Net().MyId();
+    nv->hasState = false;
+    nv->lastChangeMs = NowMs();
+    nv->lookTo = nv->syncTo = 0;
+    nv->script = false;
+    Release(*nv);
     if (!ScriptHolds(v)) SetVehicleCreatedBy(v, VEHICLE_CREATED_RANDOM);  // this game's traffic now
     if (CPed* driver = v->Driver(); driver && !driver->IsPlayer() && !Players::Instance().FindByPed(driver)) {
         Cmd(0x00A8).I(h).Run();           // CAR_WANDER_RANDOMLY
         Cmd(0x00AD).I(h).F(12.0f).Run();  // SET_CAR_CRUISE_SPEED
         Cmd(0x00AE).I(h).I(0).Run();      // SET_CAR_DRIVING_STYLE: stops for cars and lights
     }
-    Forget(id, false);
     LOGI("Vehicle %04X (model %d) taken over from player %d", id, (int)v->ModelIndex(), from);
 }
 
@@ -549,7 +662,20 @@ void Vehicles::HandleSync(uint8_t from, Reader& r) {
 
 void Vehicles::ApplyDriverState(uint8_t from, uint16_t netId, const VehicleState& st) {
     NetVehicle* nv = Find(netId);
-    if (!nv || nv->owner != from) return;
+    if (!nv) {  // a record without a copy here: where it is, for when it is made
+        auto it = m_pending.find(netId);
+        if (it == m_pending.end() || it->second.sp.owner != from) return;
+        PendingVehicle& pv = it->second;
+        if (pv.hasState && (int32_t)(st.time - pv.state.time) < 0) return;
+        pv.state = st;
+        pv.hasState = true;
+        pv.recvMs = NowMs();
+        pv.sp.pos = st.pos;
+        pv.sp.rot = st.rot;
+        pv.sp.health = st.health;
+        return;
+    }
+    if (nv->owner != from) return;
     if (nv->hasState && (int32_t)(st.time - nv->lastTime) < 0) return;
     if ((st.flags ^ (nv->hasState ? nv->state.flags : 0)) & VehicleState::F_HORN)
         LOGD("Vehicle %04X: horn %s", netId, (st.flags & VehicleState::F_HORN) ? "on" : "off");
@@ -565,10 +691,24 @@ void Vehicles::HandleOwner(uint8_t from, Reader& r) {
     uint16_t id = r.U16();
     uint8_t owner = r.U8();
     if (!r.Ok()) return;
+    if (auto it = m_pending.find(id); it != m_pending.end()) {
+        it->second.sp.owner = owner;
+        it->second.hasState = false;
+        return;
+    }
     NetVehicle* nv = Find(id);
     if (!nv) return;
     CPlayerPed* me = FindPlayerPed(0);
     bool iDrive = me && nv->veh && me->InVehicle() && me->Vehicle() == nv->veh && nv->veh->Driver() == me;
+    // two games took over the car of a player that left: the lower number keeps it
+    bool keepClaim = nv->owner == Net().MyId() && NowMs() - nv->claimMs < kOrphanMs && owner == from && from > Net().MyId();
+    if (keepClaim && !iDrive) {
+        Writer w(proto::G_VEH_OWNER);
+        w.U16(id);
+        w.U8(Net().MyId());
+        Net().Send(proto::CH_RELIABLE, w);
+        return;
+    }
     if (iDrive && owner != Net().MyId()) {
         if (owner > Net().MyId() || from != owner) {
             // we are driving it right now: keep ownership, tell the others again
@@ -745,8 +885,36 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
 
 void Vehicles::OnPreProcess() {
     if (!Net().Online() || !core::IsPlayerReady()) return;
-    for (auto it = m_pending.begin(); it != m_pending.end();)
-        it = CreateMirror(it->second) ? m_pending.erase(it) : std::next(it);
+    uint64_t now = NowMs();
+    for (auto it = m_pending.begin(); it != m_pending.end();) {
+        PendingVehicle& pv = it->second;
+        if (pv.sp.owner == kOrphan) {  // a record of a car whose owner left: nobody here can take it
+            it = m_pending.erase(it);
+            continue;
+        }
+        it = WantMirror(pv.sp.netId, pv.sp.pos, false) && CreateMirror(pv) ? m_pending.erase(it) : std::next(it);
+    }
+    // copies far from this game's player go (twice a second is enough)
+    if (now - m_lastPark >= 500) {
+        m_lastPark = now;
+        CPlayerPed* me = FindPlayerPed(0);
+        std::vector<uint16_t> far, unclaimed;
+        for (auto& [id, nv] : m_byId) {
+            if (!IsMirror(nv) || !IsVehicleValid(nv.veh)) continue;
+            if (nv.owner == kOrphan) {
+                if (now - nv.orphanMs > kOrphanMs) unclaimed.push_back(id);
+                continue;
+            }
+            bool mine = me->InVehicle() && me->Vehicle() == nv.veh;
+            if (!mine && !WantMirror(id, nv.veh->GetPosition(), true)) far.push_back(id);
+        }
+        for (uint16_t id : far)
+            if (NetVehicle* nv = Find(id)) Park(*nv);
+        for (uint16_t id : unclaimed) {
+            LOGI("Vehicle %04X: nobody took it after its owner left, it goes", id);
+            Drop(id);
+        }
+    }
     float dt = TimeStep() / 50.0f;
     std::vector<uint16_t> dead;
     for (auto& [id, nv] : m_byId) {
@@ -779,7 +947,7 @@ void Vehicles::SendState(NetVehicle& nv) {
     Writer w(proto::G_VEH_SYNC);
     w.U16(nv.netId);
     st.Write(w);
-    Net().Send(proto::CH_STATE, w);
+    Net().SendTo(nv.syncTo, proto::CH_STATE, w);
 }
 
 void Vehicles::ScanTraffic() {
@@ -870,13 +1038,10 @@ void Vehicles::OnPostProcess() {
             }
             continue;
         }
-        // owned: mod shop changes; repeated every 10 s for mirrors that were still streaming their model
+        // owned: mod shop changes, to the players near it (and to each one that comes near: it is made there then)
         if (now - nv.lookCheckMs >= 1000) {
             nv.lookCheckMs = now;
-            if (!nv.hasLook || !(CaptureLook(nv.veh) == nv.look) || now - nv.lookSentMs > 10000) {
-                SendLook(nv);
-                nv.lookSentMs = now;
-            }
+            SendLook(nv, StateTargets(nv));
         }
         // owned: the local driver's state goes in G_PLAYER_DRIVER (Players); here only unoccupied vehicles
         if (me && nv.veh->Driver() == me) {
@@ -903,8 +1068,11 @@ void Vehicles::OnPostProcess() {
         bool active = now - nv.lastChangeMs < 3000;
         bool towed = Field<CVehicle*>(nv.veh, 0x4C4) != nullptr;  // CVehicle::m_pTowingVehicle
         uint64_t interval = towed ? 50 : active ? 100 : 2000;
-        if (now - nv.lastSendMs >= interval) {
+        proto::PlayerMask targets = StateTargets(nv);
+        bool newcomer = (targets & ~nv.syncTo) != 0;  // came near: where it stands now, at once
+        if (now - nv.lastSendMs >= interval || newcomer) {
             nv.lastSendMs = now;
+            nv.syncTo = targets;
             SendState(nv);
         }
     }
@@ -925,22 +1093,52 @@ void Vehicles::OnSessionEnd() {
 
 void Vehicles::OnPeerLeave(uint8_t id) {
     for (auto it = m_pending.begin(); it != m_pending.end();)
-        it = it->second.owner == id ? m_pending.erase(it) : std::next(it);
-    // The vehicles of the leaving player stay in the world and become ours (its scripts are gone with it). They are
-    // networked again under our own ids: its ids, kept, came again from its game when it rejoined (it counts from 1).
-    std::vector<uint16_t> ids;
-    for (auto& [vid, nv] : m_byId)
-        if (nv.owner == id) {
-            nv.owner = Net().MyId();
-            nv.script = false;
-            Release(nv);
-            ids.push_back(vid);
-        }
-    for (uint16_t vid : ids) Forget(vid, false);
+        it = it->second.sp.owner == id ? m_pending.erase(it) : std::next(it);
+    // the vehicles of the leaving player stay in the world (its scripts are gone with it): the player nearest to each
+    // takes it over, the others' copies follow that one; whoever sits in it first
+    for (auto& [vid, nv] : m_byId) {
+        if (nv.owner != id) continue;
+        nv.owner = kOrphan;
+        nv.hasState = false;
+        nv.script = false;
+        nv.orphanMs = NowMs();
+        if (IsVehicleValid(nv.veh) && ShouldAdopt(nv, id)) Claim(nv);
+    }
+}
+
+bool Vehicles::ShouldAdopt(const NetVehicle& nv, uint8_t leaver) const {
+    CPlayerPed* me = FindPlayerPed(0);
+    if (!me) return false;
+    if (me->InVehicle() && me->Vehicle() == nv.veh) return true;
+    CVector p = nv.veh->GetPosition();
+    float mine = (p - me->GetPosition()).Length();
+    for (auto& [pid, rp] : Players::Instance().All()) {
+        if (pid == leaver || !rp.hasState || !Net().Peer(pid)) continue;
+        if (rp.mode != RemotePlayer::Mode::OnFoot && rp.vehNetId == nv.netId) return false;  // it sits in it
+        float d = (p - rp.state.pos).Length();
+        if (d < mine || (d == mine && pid < Net().MyId())) return false;
+    }
+    return true;
+}
+
+void Vehicles::Claim(NetVehicle& nv) {
+    nv.owner = Net().MyId();
+    nv.claimMs = NowMs();
+    nv.lastChangeMs = NowMs();
+    nv.hasLook = false;
+    nv.lookTo = nv.syncTo = 0;
+    Release(nv);
+    Writer w(proto::G_VEH_OWNER);
+    w.U16(nv.netId);
+    w.U8(nv.owner);
+    Net().Send(proto::CH_RELIABLE, w);
+    LOGI("Vehicle %04X (model %d): its owner left, this game took it", nv.netId, nv.model);
 }
 
 void Vehicles::OnSessionStart() {
-    m_nextId = (uint16_t)NowMs();  // another start than the last process's: the other game may still know its ids
+    // another start than the last process's: the others may still know its ids, and the cars of a player that left
+    // keep theirs (with its number in them) when it comes back
+    m_nextId = (uint16_t)NowMs();
 }
 
 void Vehicles::OnGameStarted() {
