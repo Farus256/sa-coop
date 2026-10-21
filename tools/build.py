@@ -22,12 +22,15 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TC = ROOT / "toolchain" / "llvm-mingw" / "bin"
+# the toolchain: toolchain/llvm-mingw (get-toolchain.ps1) or any llvm-mingw named by LLVM_MINGW. On Linux and macOS
+# the same release ships native binaries without ".exe", so the mod builds there too (CI, WSL, a Linux desktop).
+TC = Path(os.environ.get("LLVM_MINGW") or ROOT / "toolchain" / "llvm-mingw") / "bin"
 BUILD = ROOT / "build"
+EXE = ".exe" if os.name == "nt" else ""
 
-CC = TC / "i686-w64-mingw32-clang.exe"
-CXX = TC / "i686-w64-mingw32-clang++.exe"
-WINDRES = TC / "i686-w64-mingw32-windres.exe"
+CC = TC / f"i686-w64-mingw32-clang{EXE}"
+CXX = TC / f"i686-w64-mingw32-clang++{EXE}"
+WINDRES = TC / f"i686-w64-mingw32-windres{EXE}"
 
 COMMON_DEFS = ["-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX", "-D_WIN32_WINNT=0x0601", "-D_CRT_SECURE_NO_WARNINGS"]
 WARN = ["-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-missing-field-initializers",
