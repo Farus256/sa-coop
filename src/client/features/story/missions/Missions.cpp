@@ -211,6 +211,10 @@ uint64_t g_partnerMissionEndedAt = 0;
 int g_csState = 0;  // 0 none, 1 loading, 2 running, 3 ending
 int32_t g_csArea = 0;  // interior the host's cutscene plays in
 bool g_csStartRequested = false;
+std::string g_csPending;            // partner: the host's cutscene, not loaded here yet (TryLoadPendingCutscene)
+uint64_t g_csPendingSince = 0;
+bool g_csPendingFromScene = false;  // it came while our player was in the previous one (just put back from it)
+bool g_csPendingLogged = false;
 
 bool Replicating() { return Net().Online() && Net().IsHost() && !Net().Peers().empty() && (g_active || HostOnMission()); }
 
@@ -1106,6 +1110,58 @@ void HandleSkip(uint8_t from, uint8_t op, Reader& r) {
     g_skipNoMs = !open && no != 0xFF ? NowMs() : 0;  // a vote closes with the name of who wants to watch on
 }
 
+// ---- the host's cutscene in this game. Its loading takes our player out of a vehicle and puts him back afterwards where
+// he was (CCutsceneMgr::LoadCutsceneData_preload), so a player in an aircraft or a boat, or in the air on foot, is not
+// taken into it right away: in mid-air or on the water he came back there with the vehicle gone on. The cutscene waits
+// for him instead (it was dropped for good). The standing flag was the test of "in the air", and a player put back by
+// the previous scene of the same mission (SET_CHAR_COORDINATES clears it until the next physics step) or held frozen in
+// it never had it: the second and later cutscenes of a mission did not play on the partner's screen.
+void LoadHostCutscene(const std::string& name) {
+    LOGI("Host cutscene %s: loading here", name.c_str());
+    // the loading sets us out of a vehicle (CCutsceneMgr::LoadCutsceneData_preload): we get back in afterwards
+    if (CPlayerPed* me = FindPlayerPed(0); me->InVehicle() && me->Vehicle() && g_csCar < 0) {
+        g_csCar = GetVehicleRef(me->Vehicle());
+        g_csSeat = me->Vehicle()->Driver() == me ? -1 : PassengerSeatOf(me->Vehicle(), me);
+    }
+    scene::Prepare();  // before the cutscene's own streaming requests
+    if (const RemotePlayer* host = Players::Instance().Get(Net().HostId()); host && host->ped) {
+        DressCutsceneCj(host->ped);  // the story's CJ is the host
+        g_cutsceneCj = host->ped;
+    }
+    g_origLoadCutscene(name.c_str());
+    g_cutsceneCj = nullptr;
+    g_csState = 1;
+}
+
+void TryLoadPendingCutscene() {
+    if (g_csPending.empty()) return;
+    uint64_t waited = NowMs() - g_csPendingSince;
+    if (waited > 180000 || !Net().Online() || Net().IsHost()) {  // no end came (the host's game hung): forget it
+        g_csPending.clear();
+        return;
+    }
+    if (!core::IsPlayerReady() || !flow::InHostWorld()) return;
+    CPlayerPed* me = FindPlayerPed(0);
+    if (!me || me->Health() <= 0.0f) return;  // dying: after the respawn
+    int type = me->InVehicle() && me->Vehicle() ? me->Vehicle()->VehicleSubClass() : -1;
+    bool flying = type == VEHICLE_TYPE_HELI || type == VEHICLE_TYPE_PLANE || type == VEHICLE_TYPE_BOAT ||
+                  type == VEHICLE_TYPE_FHELI || type == VEHICLE_TYPE_FPLANE;
+    // on foot: standing, or put back by the previous scene, or not falling any more (swimming, a ledge) after a moment
+    bool airborne = type < 0 && !(me->PedFlags() & 1) && !g_csPendingFromScene &&
+                    !(waited > 1500 && std::fabs(me->MoveSpeed().z) < 0.02f);
+    if (flying || airborne) {
+        if (!g_csPendingLogged) {
+            g_csPendingLogged = true;
+            LOGI("Host cutscene %s: waits until our player is %s", g_csPending.c_str(), flying ? "out of the aircraft or boat" : "on the ground");
+        }
+        return;
+    }
+    std::string name = std::move(g_csPending);
+    g_csPending.clear();
+    if (waited > 1000) LOGI("Host cutscene %s: our player can watch it now, %.1f s late", name.c_str(), waited / 1000.0f);
+    LoadHostCutscene(name);
+}
+
 void HandleCutscene(uint8_t from, Reader& r) {
     uint8_t op = r.U8();
     std::string name = r.Str(32);
@@ -1115,34 +1171,16 @@ void HandleCutscene(uint8_t from, Reader& r) {
     if (op == CS_LOAD) {
         // the previous one is cleared first, even when its end came in the same frame: otherwise our ped stays
         // where the previous scene put it (an interior's exit marker fires and takes the camera)
+        bool fromScene = g_csState != 0 || g_inScene;
         if (g_csState == 2) PartnerEndCutscene();
         if (g_csState != 0) PartnerClearCutscene();
-        // A partner in an aircraft or a boat, or in the air on foot (a parachute, a jetpack), stays out of the scene: its
-        // loading sets the player out of the vehicle (CCutsceneMgr::LoadCutsceneData_preload), and after it the player
-        // came back where it had been, in mid-air or in the water, with the aircraft gone on.
-        CPlayerPed* me = FindPlayerPed(0);
-        int type = me->InVehicle() && me->Vehicle() ? me->Vehicle()->VehicleSubClass() : -1;
-        bool flying = type == VEHICLE_TYPE_HELI || type == VEHICLE_TYPE_PLANE || type == VEHICLE_TYPE_BOAT ||
-                      type == VEHICLE_TYPE_FHELI || type == VEHICLE_TYPE_FPLANE || (type < 0 && !(me->PedFlags() & 1));  // bIsStanding
-        if (flying) {
-            LOGI("Host cutscene %s: not here, our player is in the air or on the water", name.c_str());
-            return;
-        }
-        LOGI("Host cutscene %s: loading here", name.c_str());
-        // the loading sets us out of a vehicle (CCutsceneMgr::LoadCutsceneData_preload): we get back in afterwards
-        if (CPlayerPed* me = FindPlayerPed(0); me->InVehicle() && me->Vehicle() && g_csCar < 0) {
-            g_csCar = GetVehicleRef(me->Vehicle());
-            g_csSeat = me->Vehicle()->Driver() == me ? -1 : PassengerSeatOf(me->Vehicle(), me);
-        }
-        scene::Prepare();  // before the cutscene's own streaming requests
-        if (const RemotePlayer* host = Players::Instance().Get(Net().HostId()); host && host->ped) {
-            DressCutsceneCj(host->ped);  // the story's CJ is the host
-            g_cutsceneCj = host->ped;
-        }
-        g_origLoadCutscene(name.c_str());
-        g_cutsceneCj = nullptr;
-        g_csState = 1;
+        // it is loaded here once our player can be taken into it (TryLoadPendingCutscene, every frame from now on)
+        g_csPending = name;
+        g_csPendingSince = NowMs();
+        g_csPendingFromScene = fromScene;
+        g_csPendingLogged = false;
         g_csStartRequested = false;
+        TryLoadPendingCutscene();
     } else if (op == CS_START) {
         g_csStartRequested = true;
         g_csArea = area;
@@ -1157,13 +1195,18 @@ void HandleCutscene(uint8_t from, Reader& r) {
         uint8_t id = r.U8();
         if (r.Ok()) scene::FollowSpot(id, s, at);
     } else if (op == CS_END) {
-        LOGI("Host cutscene ended (state %d, running %d)", g_csState, CutsceneRunning());
+        LOGI("Host cutscene ended (state %d, running %d%s)", g_csState, CutsceneRunning(), g_csPending.empty() ? "" : ", never loaded here");
+        if (!g_csPending.empty()) {
+            g_csPending.clear();
+            g_csStartRequested = false;
+        }
         if (g_csState == 2) PartnerEndCutscene();
         else if (g_csState == 1) g_csState = 3;
     }
 }
 
 void UpdatePartnerCutscene() {
+    TryLoadPendingCutscene();
     if (g_csState == 1 && g_csStartRequested && Ref<int32_t>(kCutsceneLoadStatus) == 2) {
         CVector o = Ref<CVector>(kCutsceneOffset);
         Cmd(0x01B4).I(0).I(0).Run();                   // SET_PLAYER_CONTROL off
@@ -1458,6 +1501,7 @@ void PartnerMissionCleanup() {
     g_partnerAreas.clear();
     ClearPartnerMarked();
     ClearPartnerOnscreen();
+    g_csPending.clear();  // one that waited for our player and never started (the mission failed meanwhile)
     // a cutscene loaded and never started (the mission failed in between) hid the player and took its controls too
     if (g_csState == 2) PartnerEndCutscene();
     if (g_csState != 0) PartnerClearCutscene();
@@ -1643,6 +1687,8 @@ private:
         g_waitSent = g_hostWaits = false;
         g_waitMs = 0;
         g_csState = 0;
+        g_csPending.clear();
+        g_csStartRequested = false;
         g_inScene = false;
         g_csCar = g_csSeat = -1;
         g_skipOpen = false;

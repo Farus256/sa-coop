@@ -12,6 +12,8 @@ struct Quat {
     static Quat FromMatrix(const game::CMatrix& m);
     void ToMatrix(game::CMatrix& m) const;  // writes right/forward/up, keeps pos
     static Quat Slerp(const Quat& a, const Quat& b, float t);
+    // turned on by a world-space angular velocity (rad/s) for t seconds
+    Quat Advanced(const game::CVector& turn, float t) const;
     void Write(Writer& w) const;
     void Read(Reader& r);
 };

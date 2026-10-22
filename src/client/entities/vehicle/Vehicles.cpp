@@ -836,6 +836,11 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
 
     float age = std::min(0.3f, (float)(NowMs() - nv.recvMs) / 1000.0f);
     CVector target = st.pos + st.vel * age;
+    // The turn goes on too. The rotation was pulled to where the owner's car faced when the state left, while the physics
+    // turned it on by its turn speed: between states a turning car lagged behind and jumped ahead with each new one. The
+    // follow camera hid it, but a passenger aiming out of the window (the aim camera sits on the passenger, MODE_
+    // AIMWEAPON_FROMCAR) saw the picture shake 10-30 times a second.
+    Quat targetRot = st.rot.Advanced(st.turn, age);
     CVector cur = v->GetPosition();
     CVector err = target - cur;
     float dist = err.Length();
@@ -849,11 +854,11 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
         nv.groundless = !found;
     }
     if (nv.groundless) {
-        SetVehicleMatrix(v, target, st.rot);
+        SetVehicleMatrix(v, target, targetRot);
         v->MoveSpeed() = CVector{};
         v->TurnSpeed() = CVector{};
     } else if (dist > 10.0f) {
-        SetVehicleMatrix(v, target, st.rot);
+        SetVehicleMatrix(v, target, targetRot);
         v->MoveSpeed() = st.vel * (1.0f / 50.0f);
         v->TurnSpeed() = st.turn * (1.0f / 50.0f);
     } else if (!resting) {
@@ -861,7 +866,8 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
         v->MoveSpeed() = cmd * (1.0f / 50.0f);
         v->TurnSpeed() = st.turn * (1.0f / 50.0f);
         if (CMatrix* m = v->Matrix()) {
-            Quat q = Quat::Slerp(Quat::FromMatrix(*m), st.rot, std::min(1.0f, dt * 12.0f));
+            // the physics step turns it on by the turn speed after this, as far as the next frame's target moves on
+            Quat q = Quat::Slerp(Quat::FromMatrix(*m), targetRot, std::min(1.0f, dt * 12.0f));
             q.ToMatrix(*m);
             CallMethod<0x446F90>(v);
         }

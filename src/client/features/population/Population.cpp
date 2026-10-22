@@ -147,9 +147,9 @@ void __cdecl HookPossiblyRemoveVehicle(CVehicle* v) {
     g_origPossiblyRemove(v);
 }
 
-// The people of an interior (the entrance's: a police station's officers, a shop's customers; a furnished house's) come
-// in the game of the player who is there first, and the other player sees that game's (Peds): each game had its own,
-// and none of the other's.
+// The people of an entrance's interior (CEntryExit::GenerateAmbientPeds: a police station's officers, a bar's
+// customers) come in the game of the player who is there first, and the other player sees that game's (Peds): each game
+// had its own, and none of the other's.
 // `at`: where in the interior (one area holds several interiors far apart)
 bool OtherPlayerInside(const CVector& at) {
     int area = Ref<int32_t>(0xB72914);  // CGame::currArea: the interior this game's player is in (or just came into)
@@ -169,11 +169,20 @@ void __cdecl HookPopulateInterior(int count, CVector at) {  // CEntryExit::Gener
     g_origPopulateInterior(count, at);
 }
 
+// The furnished interiors (InteriorGroup_c: the shops' cashiers and customers, the houses' residents, the offices'
+// workers) are each game's own. They live off their interior's own logic (the cashier who puts his hands up and pays out
+// at gunpoint, the residents who wake up at a burglar), and the copy of another game's cashier reacted to nothing: the
+// player who came in second could not rob the shop, nor deal with anyone in it. Every game makes its own and none is
+// announced (Peds::KeepLocal).
+constexpr int kGroupNumPeds = 0x36, kGroupPeds = 0x38, kGroupMaxPeds = 16;  // InteriorGroup_c::m_numPeds, m_peds[16]
 using SetupPedsFn = void(__fastcall*)(void*, void*);
 SetupPedsFn g_origSetupInteriorPeds = nullptr;
 void __fastcall HookSetupInteriorPeds(void* group, void* edx) {  // InteriorGroup_c::Update asks again every frame
-    CPlayerPed* me = FindPlayerPed(0);
-    if (!me || !OtherPlayerInside(me->GetPosition())) g_origSetupInteriorPeds(group, edx);
+    g_origSetupInteriorPeds(group, edx);
+    if (!group) return;
+    int n = std::clamp<int>(Field<int8_t>(group, kGroupNumPeds), 0, kGroupMaxPeds);
+    for (int i = 0; i < n; ++i)
+        if (CPed* p = Field<CPed*>(group, kGroupPeds + i * 4)) Peds::Instance().KeepLocal(p);
 }
 
 class Population : public Module {

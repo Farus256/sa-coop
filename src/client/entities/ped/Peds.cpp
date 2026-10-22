@@ -236,7 +236,41 @@ bool HasLastingBodyAnim(CPed* ped) {
         if (!(anim::Flags(a) & anim::F_PARTIAL) && anim::BlendDelta(a) >= 0.0f) return true;
     return false;
 }
+
+// CTheScripts::MissionCleanUp: 75 x {uint8 type, int32 handle}; what the running mission made (2: a ped)
+constexpr uintptr_t kMissionCleanUp = 0xA90850;
+constexpr int kCleanUpSlots = 75, kCleanUpPed = 2;
+constexpr uint8_t PED_MISSION = 2;
+
+// A script that is no mission made it: the streamed scripts of shops, restaurants, barbers, tattoo parlours, Ammu-Nation
+// and the gyms, and main.scm's own threads, run in every player's game and make the same people there. Announced, each
+// player had the other game's copy standing in his own shopkeeper: the two shoved each other off their places behind
+// the counter, the player aimed at, hit or talked to the copy (which reacts to nothing) and the shop's script waited on.
+// A mission's people are in its clean-up list (LOAD_AND_LAUNCH_MISSION scripts are the only ones that use it); with the
+// list full nothing tells them apart, and they are taken for the mission's.
+bool MadeByAmbientScript(CPed* ped) {
+    if (ped->CreatedBy() != PED_MISSION) return false;
+    int handle = GetPedRef(ped);
+    int used = 0;
+    for (int i = 0; i < kCleanUpSlots; ++i) {
+        uintptr_t e = kMissionCleanUp + (uintptr_t)i * 8;
+        uint8_t type = Ref<uint8_t>(e);
+        used += type != 0;
+        if (type == kCleanUpPed && Ref<int32_t>(e + 4) == handle) return false;
+    }
+    return used < kCleanUpSlots;
+}
 }  // namespace
+
+void Peds::KeepLocal(CPed* ped) {
+    if (ped && IsPedValid(ped)) m_localOnly.insert(GetPedRef(ped));
+}
+
+bool Peds::IsLocalOnly(CPed* ped) {
+    if (!ped) return false;
+    if (MadeByAmbientScript(ped)) return true;
+    return !m_localOnly.empty() && m_localOnly.count(GetPedRef(ped)) != 0;
+}
 
 // The people an interior brings (InteriorGroup_c::SetupPeds: a police station's officers, a shop's customers) keep
 // area 0 inside: they count as in the interior of a player near them, ours or the other one's (the owner who walked
@@ -465,10 +499,17 @@ void Peds::ScanOwned() {
         if (NetPed* np = IsPedValid(ped) ? Find(ped) : nullptr; np && np->owner == myId && IsAlive(*np)) GiveAway(np->netId, to);
     m_giveAway.clear();
 
-    // owned peds that vanished or went out of the partner's range
+    // the interiors' people this game made for itself that are gone (their handles may come back as other peds)
+    for (auto it = m_localOnly.begin(); it != m_localOnly.end();)
+        it = GetPed(*it) ? std::next(it) : m_localOnly.erase(it);
+
+    // owned peds that vanished or went out of the partner's range (or an interior's that came out as this game's own).
+    // A mission's ped stays announced when its mission lets it stay on in the world (DONT_REMOVE_CHAR keeps it a script
+    // ped out of the clean-up list): only peds not announced yet are judged by their script.
     std::vector<uint16_t> gone;
     for (auto& [id, np] : m_byId)
-        if (np.owner == myId && (!IsAlive(np) || RemoteDistance(np.ped->GetPosition(), AreaOf(np.ped)) > SyncOut(np.ped)))
+        if (np.owner == myId && (!IsAlive(np) || RemoteDistance(np.ped->GetPosition(), AreaOf(np.ped)) > SyncOut(np.ped) ||
+                                 m_localOnly.count(np.handle)))
             gone.push_back(id);
     for (uint16_t id : gone) {
         Writer w(proto::G_PED_REMOVE);
@@ -487,6 +528,7 @@ void Peds::ScanOwned() {
         if (!np) {
             if (d > SyncIn(ped)) continue;
             if (CVehicle* v = ped->VehicleIfIn(); v && !IsSyncableVehicle(v)) continue;
+            if (IsLocalOnly(ped)) continue;
             uint16_t id;
             do {
                 id = proto::EntityId(myId, m_nextId++);

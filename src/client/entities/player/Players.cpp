@@ -1298,7 +1298,10 @@ void Players::SendVehicleState(CVehicle* v) {
     // a button goes at once; a stick that moves (a gamepad's never rests) sent every frame: 33 ms at most, as SA-MP's rates
     bool padChanged = common.pad.buttons != m_lastSentPad.buttons || (!(common.pad == m_lastSentPad) && now - m_lastSend >= 33);
     bool driver = v->Driver() == me;
-    uint64_t interval = driver ? 33 : 100;
+    // a passenger leaning out with a gun aims with the camera, which goes in this state: at the driver's rate then (10 a
+    // second turned the copy's gun in steps, and its shots went where it had aimed a moment before)
+    bool aiming = (common.pad.buttons & PadState::B_RS1) != 0;
+    uint64_t interval = driver || aiming ? 33 : 100;
     if (!padChanged && now - m_lastSend < interval) return;
     m_lastSend = now;
     m_lastSentPad = common.pad;

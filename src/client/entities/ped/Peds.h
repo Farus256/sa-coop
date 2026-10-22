@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 
 #include "common/api/protocol/Protocol.h"
@@ -108,6 +109,12 @@ public:
     bool QueueGiveAway(game::CPed* ped, uint8_t to);
     // a kind of ped the other game can take over (a mirror is a civilian there: no cops, medics or firemen)
     static bool CanGiveAwayType(const NetPed& np);
+    // A ped every player's game makes for itself (an interior's shopkeeper, customers and residents): it stays this
+    // game's own and is never announced, so that each player deals with a ped of his own game.
+    void KeepLocal(game::CPed* ped);
+    // such a ped, or one a script of this game made outside a mission (a shop's, a restaurant's, a barber's staff:
+    // those scripts run in every game)
+    bool IsLocalOnly(game::CPed* ped);
 
 private:
     void ScanOwned();
@@ -132,6 +139,7 @@ private:
     uint16_t m_nextId = 1;
     std::map<int, std::string> m_specialNames;
     std::map<game::CPed*, uint8_t> m_giveAway;  // to hand over after the population code (ped -> player)
+    std::set<int> m_localOnly;                  // handles of KeepLocal's peds
     uint64_t m_lastScan = 0, m_lastStatsMs = 0;
     bool m_wasReady = false;
     int m_mirrorShots = 0;  // diagnostics: shots fired by mirrors since the last stats line

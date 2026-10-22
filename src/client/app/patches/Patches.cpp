@@ -96,8 +96,28 @@ struct RwVideoMode {
 };
 constexpr int rwVIDEOMODEEXCLUSIVE = 1;
 
+// The monitor the window is on (the primary one before there is a window)
+RECT MonitorRect(HWND hwnd) {
+    MONITORINFO mi{};
+    mi.cbSize = sizeof mi;
+    HMONITOR mon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY) : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    if (mon && GetMonitorInfoW(mon, &mi)) return mi.rcMonitor;
+    return RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+}
+
+bool g_borderlessSet = false;
+
 void AdjustWindow(HWND hwnd, int w, int h) {
     auto& cfg = Cfg();
+    if (g_borderlessSet) {
+        // the whole monitor, no frame: a window of the screen's size with a caption did not fit, and the game was
+        // squeezed into the work area (1920x1080 on a 1920x1080 screen came out smaller)
+        RECT mon = MonitorRect(hwnd);
+        SetWindowLongW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowLongW(hwnd, GWL_EXSTYLE, 0);
+        SetWindowPos(hwnd, HWND_NOTOPMOST, mon.left, mon.top, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        return;
+    }
     LONG style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
     SetWindowLongW(hwnd, GWL_STYLE, style);
     SetWindowLongW(hwnd, GWL_EXSTYLE, 0);
@@ -131,6 +151,37 @@ void FitToWorkArea(int& w, int& h) {
 }
 
 bool g_windowedActive = false;
+
+// GetVideoModeList (0x745AF0) offers only the modes that pass two checks of 2005: an aspect of 4:3, 5:4, 5:3, 16:10 or
+// 16:9, and the video memory DirectDraw reports minus the mode's frame buffer staying over 45 MB. DirectDraw reports
+// nonsense on today's cards (a few MB, or a count over 2 GB that wraps negative), and 1920x1080 and other modes were
+// missing from the menu; a mode forced in coop.ini (width, height) fell back to 800x600 because psSelectDevice also
+// asks this list. Every exclusive mode of 32 bits from 640x480 up is offered. The strings are allocated as the game
+// does (CMemoryMgr::Malloc), so FreeVideoModeList frees them as its own.
+using GetVideoModeListFn = char**(__cdecl*)();
+GetVideoModeListFn g_origGetVideoModeList = nullptr;
+char** __cdecl HookGetVideoModeList() {
+    char** list = g_origGetVideoModeList();
+    if (!list) return list;
+    int n = game::Call<0x7F2CC0, int>();  // RwEngineGetNumVideoModes
+    static int logged = 0;
+    for (int i = 1; i < n; ++i) {
+        if (list[i]) continue;
+        RwVideoMode vm{};
+        game::Call<0x7F2CF0, void*>(&vm, i);  // RwEngineGetVideoModeInfo
+        if (!(vm.flags & rwVIDEOMODEEXCLUSIVE) || vm.width < 640 || vm.height < 480 || vm.depth != 32) continue;
+        auto* text = game::Call<0x72F420, char*>(100u);  // CMemoryMgr::Malloc
+        if (!text) break;
+        memset(text, 0, 100);
+        snprintf(text, 100, "%d X %d X %d", vm.width, vm.height, vm.depth);
+        list[i] = text;
+        if (logged < 64) {
+            ++logged;
+            LOGI("Video mode #%d %dx%d offered (the game's own checks left it out)", i, vm.width, vm.height);
+        }
+    }
+    return list;
+}
 
 // SetVideoMode (0x745C70) is called by CMenuManager::Initialise with the resolution saved in
 // gta_sa.set and by the resolution option; it would switch RW back to an exclusive mode.
@@ -227,9 +278,17 @@ IDirect3D9* WINAPI HookDirect3DCreate9(UINT sdk) {
 
 void InstallWindowedMode() {
     auto& cfg = Cfg();
+    RECT mon = MonitorRect(nullptr);
+    int monW = mon.right - mon.left, monH = mon.bottom - mon.top;
     g_winW = cfg.width > 0 ? cfg.width : 1280;
     g_winH = cfg.height > 0 ? cfg.height : 720;
-    FitToWorkArea(g_winW, g_winH);
+    // borderless = 1, or a size as large as the screen (width = 1920, height = 1080 on a 1920x1080 monitor): the window
+    // covers the monitor without a frame, at its full resolution
+    if (cfg.borderless || (g_winW >= monW && g_winH >= monH)) {
+        g_borderlessSet = monW > 0 && monH > 0;
+        if (g_borderlessSet) g_winW = monW, g_winH = monH;
+    }
+    if (!g_borderlessSet) FitToWorkArea(g_winW, g_winH);
     HMODULE d3d9 = GetModuleHandleW(L"d3d9.dll");
     if (!d3d9) d3d9 = LoadLibraryW(L"d3d9.dll");
     void* fn = d3d9 ? (void*)GetProcAddress(d3d9, "Direct3DCreate9") : nullptr;
@@ -238,7 +297,7 @@ void InstallWindowedMode() {
         return;
     }
     mem::Hook((uintptr_t)fn, (void*)&HookDirect3DCreate9, (void**)&g_origD3DCreate, "Direct3DCreate9");
-    LOGI("Windowed mode requested: %dx%d", g_winW, g_winH);
+    LOGI("Windowed mode requested: %dx%d%s", g_winW, g_winH, g_borderlessSet ? " (borderless, the whole monitor)" : "");
 }
 
 // ---------------------------------------------------------------- user files directory
@@ -572,7 +631,8 @@ void ApplyWindowPlacement() {
             TerminateProcess(GetCurrentProcess(), 3);
         }
     }
-    if (rc.right == g_winW && rc.bottom == g_winH && (style & WS_CAPTION) == WS_CAPTION) return;
+    bool styleOk = g_borderlessSet ? (style & WS_CAPTION) == 0 : (style & WS_CAPTION) == WS_CAPTION;
+    if (rc.right == g_winW && rc.bottom == g_winH && styleOk) return;
     static int attempts = 0;
     if (++attempts > 5) return;  // something keeps resizing the window: stop fighting it
     LOGI("Window placement: client %ldx%ld style %08lX -> %dx%d", rc.right, rc.bottom, style, g_winW, g_winH);
@@ -607,6 +667,7 @@ void Apply() {
     mem::RedirectCallFn(0x576C55, &HookMenuStopRadio, &g_origMenuStopRadio);  // CMenuManager::CheckForMenuClosing
     mem::RedirectCallFn(0x5737A5, &HookMenuStopRadio, &g_origMenuStopRadio);  // CMenuManager::SwitchToNewScreen
     mem::HookFn(0x746190, &HookSelectDevice, &g_origSelectDevice, "psSelectDevice");
+    mem::HookFn(0x745AF0, &HookGetVideoModeList, &g_origGetVideoModeList, "GetVideoModeList");
     mem::HookFn(0x710310, &HookStencilForObject, &g_origStencilForObject, "CStencilShadows::RenderForObject");
     mem::HookFn(0x431F80, &HookCreateCarForScript, &g_origCreateCarForScript, "CCarCtrl::CreateCarForScript");
     mem::HookFn(0x486B00, &HookClearSpace, &g_origClearSpace, "CTheScripts::ClearSpaceForMissionEntity");

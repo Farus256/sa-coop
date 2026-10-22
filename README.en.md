@@ -30,7 +30,10 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
 - a mission marker only waits for players within 200 m, and `/go` starts without the rest
 - up to three partners stand next to CJ in cutscenes
 - every player has a colour in the chat, over the head and on the radar
-- new commands `/tp`, `/tphere`, `/go`, `/mute`, `/unmute`
+- new commands `/tp`, `/tphere`, `/go`, `/mute`, `/unmute`, `/draw`
+- every screen resolution in the menu, 1920x1080 included, and borderless windowed full screen
+  (`borderless = 1` in `coop\coop.ini`)
+- a longer draw distance than the game's (`draw_distance` and `lod_distance` in `coop\coop.ini`, `/draw` in the game)
 - Linux and macOS builds, server tests
 
 Not compatible with the original 0.2.x versions, everyone has to update. Playing with three or more people has
@@ -191,6 +194,7 @@ Chat commands:
 | `/tphere [nick]` | bring a player over; `/tphere all` brings everyone (host only) |
 | `/go` | host: start the mission without waiting for the missing ones |
 | `/mute <nick>`, `/unmute <nick>` | stop / start hearing a player's voice (for you only) |
+| `/draw [0.5-4] [detail]` | draw distance (2 by default, 1 is the game's own) |
 | `/pm <nick> <text>` | private message |
 | `/kick <nick> [reason]` | host: kick a player |
 

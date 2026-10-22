@@ -49,11 +49,16 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     maxPlayers = std::clamp(ini.GetInt("connect", "max_players", maxPlayers), 2, 16);
 
     windowed = ini.GetBool("game", "windowed", windowed);
+    borderless = ini.GetBool("game", "borderless", borderless);
+    if (borderless) windowed = true;
     windowedStrict = ini.GetBool("game", "windowed_strict", windowedStrict);
     windowX = ini.GetInt("game", "window_x", windowX);
     windowY = ini.GetInt("game", "window_y", windowY);
     width = ini.GetInt("game", "width", 0);
     height = ini.GetInt("game", "height", 0);
+    drawDistance = std::clamp(ini.GetFloat("game", "draw_distance", drawDistance), 0.5f, 4.0f);
+    lodDistance = std::clamp(ini.GetFloat("game", "lod_distance", lodDistance), 0.5f, 3.0f);
+    streamingMemoryMb = std::clamp(ini.GetInt("game", "streaming_memory", streamingMemoryMb), 0, 1024);
     multiInstance = ini.GetBool("game", "multi_instance", multiInstance);
     runInBackground = ini.GetBool("game", "run_in_background", runInBackground);
     noPauseMenu = ini.GetBool("game", "no_pause_menu", noPauseMenu);

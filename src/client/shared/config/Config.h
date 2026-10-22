@@ -21,9 +21,13 @@ struct ClientConfig {
 
     // [game]
     bool windowed = false;
+    bool borderless = false;          // windowed without a frame over the whole monitor (implies windowed)
     bool windowedStrict = false;      // test setups: quit at once if windowed mode could not be applied
     int windowX = -1, windowY = -1;   // -1 = centre
     int width = 0, height = 0;        // 0 = use the game's video mode
+    float drawDistance = 2.0f;        // the far clip and fog of the time cycle times this (1 = the game's own)
+    float lodDistance = 1.5f;         // the menu's draw distance (models' detail range) times this
+    int streamingMemoryMb = 256;      // CStreaming::ms_memoryAvailable at least this (the game's 50 MB fill fast)
     bool multiInstance = false;       // allow several game copies (testing)
     bool runInBackground = true;      // keep simulating when the window is not focused
     bool noPauseMenu = true;          // the world keeps running while the pause menu is open

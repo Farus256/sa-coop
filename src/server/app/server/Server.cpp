@@ -407,9 +407,10 @@ void Server::HandleCommand(Player* p, const std::string& text) {
                                 "/tphere all (собрать всех к себе)",
                   "For the host: /kick <nickname or number> [reason], /say <text>, /go (start the mission without waiting for all), "
                   "/tphere all (bring everyone over)");
-        reply(kColorServer, "В игре: /tp [ник] (к игроку), /tphere [ник] (игрока к себе), /mute <ник> (не слышать его голос)",
+        reply(kColorServer, "В игре: /tp [ник] (к игроку), /tphere [ник] (игрока к себе), /mute <ник> (не слышать его голос), "
+                            "/draw <0.5–4> (дальность прорисовки)",
               "In the game: /tp [nickname] (go to a player), /tphere [nickname] (bring a player over), /mute <nickname> "
-              "(stop hearing their voice)");
+              "(stop hearing their voice), /draw <0.5-4> (draw distance)");
     } else if (cmd == "players" || cmd == "status") {
         reply(kColorInfo, Format("Игроков: %d из %d", JoinedCount(), m_cfg.maxPlayers),
               Format("Players: %d of %d", JoinedCount(), m_cfg.maxPlayers));
@@ -451,7 +452,7 @@ void Server::HandleCommand(Player* p, const std::string& text) {
     } else if (cmd == "quit" && !p) {
         Stop();
     } else if (cmd == "tp" || cmd == "tphere" || cmd == "voice" || cmd == "save" || cmd == "skin" || cmd == "mute" ||
-               cmd == "unmute" || cmd == "go") {
+               cmd == "unmute" || cmd == "go" || cmd == "draw") {
         // handled by the game client locally; nothing to do on the server
     } else {
         reply(kColorError, "Такой команды нет. Чтобы увидеть список команд, напишите /help.",

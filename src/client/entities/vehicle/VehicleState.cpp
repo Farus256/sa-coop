@@ -89,6 +89,30 @@ Quat Quat::Slerp(const Quat& a, const Quat& bIn, float t) {
     return r;
 }
 
+Quat Quat::Advanced(const CVector& turn, float t) const {
+    float angle = turn.Length() * t;
+    if (angle < 1e-5f) return *this;
+    angle = std::min(angle, 3.0f);  // a car spinning that fast for that long is a glitch, not a place to aim for
+    float s = std::sin(angle * 0.5f) / turn.Length();
+    Quat d;  // the rotation in world space comes first: d * q
+    d.x = turn.x * s;
+    d.y = turn.y * s;
+    d.z = turn.z * s;
+    d.w = std::cos(angle * 0.5f);
+    Quat r;
+    r.w = d.w * w - d.x * x - d.y * y - d.z * z;
+    r.x = d.w * x + w * d.x + (d.y * z - d.z * y);
+    r.y = d.w * y + w * d.y + (d.z * x - d.x * z);
+    r.z = d.w * z + w * d.z + (d.x * y - d.y * x);
+    float n = std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w);
+    if (n < 1e-6f) return *this;
+    r.x /= n;
+    r.y /= n;
+    r.z /= n;
+    r.w /= n;
+    return r;
+}
+
 void Quat::Write(Writer& out) const {
     out.I16(Writer::Quant(x, 1.0f));
     out.I16(Writer::Quant(y, 1.0f));
