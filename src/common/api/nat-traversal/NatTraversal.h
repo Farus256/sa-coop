@@ -1,13 +1,8 @@
 #pragma once
-// Internet play without VPN:
+// Playing over the internet by IP address:
 //  * UPnP IGD port mapping (SSDP discovery + SOAP), no external libraries;
-//  * STUN (RFC 5389) helpers to learn the public address of an ENet socket;
-//  * invite codes ("XXXX-XXXX-XXXX") carrying the host's public endpoint;
-//  * a tiny HTTP pub/sub signalling channel (ntfy-compatible) used for UDP hole punching
-//    when the router has no UPnP.
-#include <atomic>
+//  * STUN (RFC 5389) helpers to learn the public address of an ENet socket (shown to the host to give to friends).
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -47,49 +42,9 @@ void BuildStunRequest(uint8_t out[20], uint8_t txid[12]);
 bool ParseStunResponse(const uint8_t* data, size_t len, const uint8_t txid[12], Endpoint& mapped);
 bool IsStunPacket(const uint8_t* data, size_t len);
 
-// ---------------------------------------------------------------- invite code
-// Crockford base32. Version 2 (this fork): 16 characters, 4 bits version, 32 bits IPv4, 16 bits port and a 28-bit key
-// the server asks for, so the code is the ticket into the game ("XXXX-XXXX-XXXX-XXXX"). Version 1 (the original
-// two-player mod): 12 characters with an 8-bit key nobody checked; it still parses, with key 0.
-constexpr uint32_t kInviteKeyMask = 0x0FFFFFFF;
-std::string MakeInviteCode(const Endpoint& ep, uint32_t key);
-bool ParseInviteCode(const std::string& code, Endpoint& ep, uint32_t& key);
-uint32_t NewInviteKey();  // random, never 0
-std::string SignalTopic(const std::string& code);  // channel name derived from the code
-
-// ---------------------------------------------------------------- HTTP / signalling
-struct HttpResponse {
-    int status = 0;
-    std::string body;
-};
-// Plain HTTP(S) request through WinHTTP. `url` = http(s)://host[:port]/path
-HttpResponse HttpRequest(const std::string& method, const std::string& url, const std::string& body = "",
-                         const std::string& headers = "", int timeoutMs = 5000);
-
-// Subscribes to `baseUrl/topic` (ntfy JSON stream) on a background thread and calls `onMessage`
-// for every published message text. Stop() ends the subscription.
-class SignalSubscriber {
-public:
-    ~SignalSubscriber() { Stop(); }
-    void Start(const std::string& baseUrl, const std::string& topic, std::function<void(const std::string&)> onMessage);
-    void Stop();
-
-private:
-    void* m_thread = nullptr;
-    std::atomic<bool> m_quit{false};
-    std::atomic<void*> m_request{nullptr};  // the open stream, closed by Stop() to end a blocking read
-    std::string m_url;
-    std::function<void(const std::string&)> m_cb;
-    static unsigned long __stdcall ThreadProc(void* self);
-};
-
-bool SignalPublish(const std::string& baseUrl, const std::string& topic, const std::string& message);
-
-constexpr const char* kDefaultSignalUrl = "https://ntfy.sh";
-constexpr const char kPunchMagic[] = "SACOOP-PUNCH";
-// LAN discovery for a joiner behind the same public address as the host (same flat, same carrier NAT):
-// broadcast kDiscoverMagic to the server port, the server answers kHereMagic + "<port>"
-constexpr const char kDiscoverMagic[] = "SACOOP-DISCOVER";
-constexpr const char kHereMagic[] = "SACOOP-HERE ";
+// A packet a client sends to the server port before connecting, and the server's answer: tells "nothing listens there"
+// from "the server is there" when the connection fails
+constexpr const char kPingMagic[] = "SACOOP-PING";
+constexpr const char kPongMagic[] = "SACOOP-PONG";
 
 }  // namespace coop::nat

@@ -69,7 +69,7 @@ def targets(extra=()):
         "includes": COMMON_INC + ["src/client", "third_party/minhook/include"],
         "defines": ["-DCOOP_CLIENT"], "cflags": [],
         "deps": [common, ENET, MINHOOK],
-        "libs": ["-lws2_32", "-lwinmm", "-lgdi32", "-luser32", "-lkernel32", "-lole32", "-lshell32", "-luuid", "-ldbghelp", "-lwinhttp"],
+        "libs": ["-lws2_32", "-lwinmm", "-lgdi32", "-luser32", "-lkernel32", "-lole32", "-lshell32", "-luuid", "-ldbghelp"],
     }
     server = {
         "name": "server", "kind": "exe", "out": "coop-server.exe",
@@ -78,7 +78,7 @@ def targets(extra=()):
         "includes": COMMON_INC + ["src/server"],
         "defines": ["-DCOOP_SERVER"], "cflags": [],
         "deps": [common, ENET],
-        "libs": ["-lws2_32", "-lwinmm", "-lwinhttp", "-lbcrypt"],
+        "libs": ["-lws2_32", "-lwinmm"],
         "ldflags": ["-municode"],
     }
     # vorbisFile.dll: ASI loader for a game that has none (installed by "install.bat" of the package)
@@ -96,7 +96,7 @@ def targets(extra=()):
         "sources": glob("tools/test", "*.cpp"),
         "includes": COMMON_INC, "defines": [], "cflags": [],
         "deps": [common, ENET],
-        "libs": ["-lws2_32", "-lwinmm", "-lwinhttp"],
+        "libs": ["-lws2_32", "-lwinmm"],
         "ldflags": ["-municode"],
     }
     return {"client": client, "server": server, "loader": loader, "servertest": servertest}

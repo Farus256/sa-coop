@@ -124,7 +124,7 @@ void __cdecl HookDebugTextMenu() {
 }
 
 // The overlay is drawn from the game's last 2D call (Idle -> CDebug::DebugDisplayTextBuffer). A plugin that took that
-// call without passing it on left a player with no chat, no F9 window and no invite code to give: after 30 frames
+// call without passing it on left a player with no chat, no F9 window and no address to give: after 30 frames
 // without it (in the menu or in the game, not on a loading screen) it is drawn at IDirect3DDevice9::Present instead.
 using PresentFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
 PresentFn g_origPresent = nullptr;
@@ -273,7 +273,7 @@ void WriteDefaultConfig(const std::wstring& path) {
         "auto_connect = 0\r\n"
         "; Режим: join (подключиться к другу) или host (создать свой сервер)\r\n"
         "mode = join\r\n"
-        "; Адрес друга (IP или имя компьютера) или код приглашения вида XXXX-XXXX-XXXX\r\n"
+        "; IP-адрес хоста или имя компьютера, можно с портом: 85.12.34.56:7788\r\n"
         "host = 127.0.0.1\r\n"
         "port = 7788\r\n"
         "password =\r\n"
@@ -574,11 +574,19 @@ void Init(void* hModule) {
     net.onWorldNewGame = [] { flow::OnNewGameFromHost(); };
     net.onWorldWait = [] { flow::OnHostInPrologue(); };
     net.onWorldNone = [] { flow::OnWorldNone(); };
-    net.onInvite = [](const std::string& code) {
-        if (Net().IsHost())
-            ui::TheChat().AddSystem(Format(TR("Код для друга: %s. Скопировать его можно в окне F9.",
-                                              "Code for your friend: %s. You can copy it in the F9 window."),
-                                           code.c_str()));
+    net.onAddress = [](const Session::Address& a) {
+        if (!Net().IsHost() || !a.done) return;
+        if (!a.external.empty())
+            ui::TheChat().AddSystem(Format(TR("Адрес для друзей: %s. Скопировать его можно в окне F9.",
+                                              "Address for your friends: %s. You can copy it in the F9 window."),
+                                           a.external.c_str()));
+        if (a.cgnat)
+            ui::TheChat().AddError(TR("Ваш роутер за NAT провайдера (CGNAT): из интернета к вам не подключиться. Нужен белый IP или VPN.",
+                                      "Your router is behind the provider's NAT (CGNAT): nobody can connect from the internet. You need a public IP or a VPN."));
+        else if (!a.upnp)
+            ui::TheChat().AddError(Format(TR("UPnP не сработал: откройте UDP-порт %u на роутере вручную, иначе друзья из интернета не подключатся.",
+                                             "UPnP did not work: open UDP port %u on your router by hand, or friends from the internet cannot connect."),
+                                          (unsigned)Cfg().port));
     };
 
     // auto-connect (launcher / test setups) is performed on the first main-menu frame:

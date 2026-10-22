@@ -38,20 +38,13 @@ static void WriteDefaultConfig(const std::wstring& path) {
         "password =\r\n"
         "; Сколько игроков вместе с хостом: от 2 до 16. Сюжет удобнее всего проходить вчетвером.\r\n"
         "max_players = 4\r\n"
-        "; Поставьте 1, чтобы входить можно было только по коду приглашения (или с паролем).\r\n"
-        "; Сервер, который запускает игра хоста, так делает всегда.\r\n"
-        "require_invite = 0\r\n"
         "; Ник игрока, который всегда будет хостом. Если пусто, хостом становится тот, кто зашёл первым.\r\n"
         "host =\r\n"
         "motd = Добро пожаловать! Чтобы увидеть список команд, напишите /help.\r\n"
         "; Поставьте 1, чтобы игроки могли ранить и убивать друг друга.\r\n"
         "friendly_fire = 0\r\n"
-        "; Игра через интернет (UPnP, код приглашения, пробивка NAT). Если поставить 0, останется только локальная сеть.\r\n"
-        "internet = 1\r\n"
-        "; Ретранслятор на случай, если друг не может подключиться по коду.\r\n"
-        "; С бесплатным аккаунтом metered.ca:   turn = metered:<имя приложения>:<API-ключ>\r\n"
-        "; С любым TURN-сервером:               turn = turn:<адрес>:<порт>:<логин>:<пароль>\r\n"
-        "turn =\r\n";
+        "; 1: открыть порт на роутере через UPnP и узнать внешний IP для друзей. 0: только локальная сеть.\r\n"
+        "internet = 1\r\n";
     WriteFileBytes(path, text, strlen(text));
 }
 
@@ -82,12 +75,10 @@ int wmain(int argc, wchar_t** argv) {
     cfg.port = (uint16_t)ini.GetInt("server", "port", kDefaultPort);
     cfg.password = ini.Get("server", "password", "");
     cfg.maxPlayers = ini.GetInt("server", "max_players", proto::kDefaultMaxPlayers);
-    cfg.requireKey = ini.GetBool("server", "require_invite", false);
     cfg.hostName = ini.Get("server", "host", "");
     cfg.motd = ini.Get("server", "motd", cfg.motd);
     cfg.friendlyFire = ini.GetBool("server", "friendly_fire", false);
     cfg.internet = ini.GetBool("server", "internet", true);
-    cfg.turn = Trim(ini.Get("server", "turn", ""));
     cfg.dataDir = dataDir;
 
     for (int i = 1; i < argc; ++i) {
@@ -98,7 +89,6 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--password") cfg.password = next();
         else if (a == L"--host") cfg.hostName = next();
         else if (a == L"--max") cfg.maxPlayers = atoi(next().c_str());
-        else if (a == L"--key") cfg.inviteKey = (uint32_t)strtoul(next().c_str(), nullptr, 16);
         else if (a == L"--world" && i + 1 < argc) cfg.worldFile = argv[++i];
         else if (a == L"--new-game") cfg.newGame = true;
         else if (a == L"--friendly-fire") cfg.friendlyFire = next() == "1";

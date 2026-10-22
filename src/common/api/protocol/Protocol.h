@@ -71,7 +71,7 @@ enum MsgId : uint8_t {
     S_PINGS = 31,            // u8 count, {u8 id, u16 ping}
     S_KICKED = 32,           // str reason, str reasonEn
     S_WORLD_WANTED = 33,     // to the host: a partner needs the world, please upload a fresh snapshot
-    S_INVITE = 34,           // str invite code for internet play (when the server learned its public address)
+    S_ADDRESS = 34,          // where friends connect to: str external ip:port, str lan ip:port, u8 ADDRESS_*, str UPnP error
     S_WORLD_NEWGAME = 35,    // to a partner: start a new game and join the host where the prologue left it
     S_WORLD_WAIT = 36,       // to a partner: the host plays a new game's prologue, keep waiting
 
@@ -173,6 +173,17 @@ enum ClientStatus : uint8_t {
 
 enum LeaveReason : uint8_t { LEAVE_QUIT = 0, LEAVE_TIMEOUT = 1, LEAVE_KICKED = 2 };
 
+enum AddressFlags : uint8_t { ADDRESS_DONE = 1, ADDRESS_UPNP = 2, ADDRESS_CGNAT = 4 };
+
+// The data of an ENet disconnect, so the other side knows why the connection ended (0: it timed out)
+enum DisconnectCode : uint32_t {
+    DISCONNECT_TIMEOUT = 0,
+    DISCONNECT_QUIT = 1,         // the client left
+    DISCONNECT_SERVER_STOP = 2,  // the server shut down (the host closed the game or the server)
+    DISCONNECT_KICKED = 3,
+    DISCONNECT_REJECTED = 4,     // refused at the handshake (S_REJECT says why)
+};
+
 struct Hello {
     uint32_t protocol = 0;
     std::string version;
@@ -180,7 +191,6 @@ struct Hello {
     std::string password;
     bool wantsHost = false;
     uint32_t exeSize = 0;
-    uint32_t inviteKey = 0;  // the key of the invite code the player came with (0: joined by address)
 
     void Write(Writer& w) const {
         w.U32(protocol);
@@ -189,7 +199,6 @@ struct Hello {
         w.Str(password, 64);
         w.Bool(wantsHost);
         w.U32(exeSize);
-        w.U32(inviteKey);
     }
     bool Read(Reader& r) {
         protocol = r.U32();
@@ -198,8 +207,6 @@ struct Hello {
         password = r.Str(64);
         wantsHost = r.Bool();
         exeSize = r.U32();
-        // a client of the original two-player mod sends no key: it still reads, and the server tells it the versions
-        inviteKey = r.Remaining() >= 4 ? r.U32() : 0;
         return r.Ok();
     }
 };

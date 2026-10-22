@@ -25,13 +25,7 @@ struct Config {
     std::wstring worldFile;  // optional initial world save (passed by the launcher)
     bool newGame = false;    // the host starts a new game: the stored world belongs to an older one
     std::string hostName;    // nickname that gets the host role (empty = first player)
-    bool internet = true;    // UPnP + STUN + invite code + hole punching
-    std::string turn;        // optional TURN relay for friends behind any NAT (see TurnRelay)
-    // The key the invite code carries. A server the game starts for its host gets one (--key) and lets in only those
-    // who bring it (the code) or the password: a code shared in a chat no longer lets in whoever finds the address.
-    // A dedicated server makes its own for the code and asks for it only with require_invite = 1.
-    uint32_t inviteKey = 0;
-    bool requireKey = false;
+    bool internet = true;    // UPnP port mapping and the external address (STUN)
 };
 
 struct Player {
@@ -86,8 +80,8 @@ private:
     // [id][payload] goes to the players of the mask (but the sender) as [id][sender][payload]
     void Relay(Player& from, uint8_t channel, const uint8_t* data, size_t size, uint32_t flags,
                proto::PlayerMask mask = proto::kAllPlayers);
-    bool KeyFailedTooOften(uint32_t ip);  // answers with a refusal for a while after wrong keys or passwords
-    void KeyFailed(uint32_t ip);
+    bool PasswordFailedTooOften(uint32_t ip);  // answers with a refusal for a while after wrong passwords
+    void PasswordFailed(uint32_t ip);
     // to == nullptr: everyone. The server's own texts come in both languages (en empty: the same in English).
     void SendChat(Player* to, uint8_t fromId, uint32_t rgba, const std::string& text, const std::string& en = {});
     void Broadcast(uint8_t channel, const Writer& w, int exceptId = -1);
@@ -105,7 +99,7 @@ private:
     std::wstring WorldPath() const { return m_cfg.dataDir + L"world\\world.b"; }
     bool LoadWorld(const std::wstring& path, const std::string& label);
 
-    void SendInvite(Player* to);  // to == nullptr: everyone
+    void SendAddress(Player* to);  // where friends connect to; to == nullptr: everyone
 
     Config m_cfg;
     ENetHost* m_host = nullptr;
@@ -118,9 +112,6 @@ private:
     std::vector<uint8_t> m_worldWaiters;   // player ids waiting for the world save
     uint64_t m_worldWantedTime = 0;        // when the host was asked for a fresh snapshot (0 = not asked)
     bool m_prologue = false;               // the host plays a new game's prologue: partners wait for its end
-    uint32_t m_key = 0;                    // the invite code's key
-    bool m_keyRequired = false;            // and it is asked for
-    std::string m_lanCode;                 // the code of a server without internet play (internet = 0)
 
     std::mutex m_cmdMutex;
     std::vector<std::string> m_cmdQueue;
@@ -129,7 +120,7 @@ private:
         int count = 0;
         uint64_t lastMs = 0;
     };
-    std::map<uint32_t, Failures> m_failures;  // by address: wrong keys and passwords
+    std::map<uint32_t, Failures> m_failures;  // by address: wrong passwords
 };
 
 }  // namespace coop::server

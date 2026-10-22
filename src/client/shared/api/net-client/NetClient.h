@@ -8,6 +8,8 @@
 
 #include "common/lib/buffer/Buffer.h"
 
+struct _ENetHost;
+
 namespace coop {
 
 // ENet client running in its own thread. The game thread enqueues outgoing packets and polls
@@ -38,9 +40,12 @@ public:
     bool TakeConnectEvent() { return m_connectEvent.exchange(false); }
     uint64_t BytesIn() const { return m_bytesIn.load(); }
     uint64_t BytesOut() const { return m_bytesOut.load(); }
+    // why the last connection failed or ended, in the player's language ("" while it works)
+    std::string FailReason();
 
 private:
     void ThreadMain(std::string host, uint16_t port);
+    void Fail(::_ENetHost* client, const std::string& why);
 
     std::thread m_thread;
     std::atomic<bool> m_quit{false};
@@ -54,6 +59,8 @@ private:
     std::vector<Packet> m_out;
     std::mutex m_inMutex;
     std::vector<Packet> m_in;
+    std::mutex m_reasonMutex;
+    std::string m_failReason;
 };
 
 }  // namespace coop

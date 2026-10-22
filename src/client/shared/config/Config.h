@@ -48,7 +48,6 @@ struct ClientConfig {
     // [debug]
     bool debugOverlay = false;
     bool verboseLog = false;
-    bool forceRelay = false;          // invite codes: skip the direct attempt (relay tests)
     std::string serverData = "server-data";  // the hosted server's folder in coop\ (test setups keep theirs apart)
 
     std::wstring coopDir;             // directory with coop.dll (…\coop\)

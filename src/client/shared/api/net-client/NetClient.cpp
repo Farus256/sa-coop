@@ -6,98 +6,128 @@
 #include "common/api/net/Net.h"
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
+#include "common/lib/util/Util.h"
 #include "shared/config/Config.h"
 
 namespace coop {
 
 namespace {
-// joining by invite code: STUN answers and the host's punch packets come to our ENet socket
-uint8_t g_stunTx[12];
-nat::Endpoint g_mapped;
-std::atomic<bool> g_stunWaiting{false};
-ENetAddress g_lanServer{};  // answer to the LAN discovery
+// What answers on the server's port, asked with a packet of our own after ENet gave up connecting. A closed UDP port
+// answers with ICMP "port unreachable", which Windows reports to a connected socket as WSAECONNRESET (ENet swallows it).
+enum class Probe { Answered, Refused, Silent, NoRoute };
 
-int ENET_CALLBACK Intercept(ENetHost* h, ENetEvent*) {
-    const uint8_t* d = h->receivedData;
-    size_t n = h->receivedDataLength;
-    if (n >= sizeof(nat::kPunchMagic) - 1 && !memcmp(d, nat::kPunchMagic, sizeof(nat::kPunchMagic) - 1)) return 1;
-    size_t hereLen = sizeof(nat::kHereMagic) - 1;
-    if (n > hereLen && n < hereLen + 6 && !memcmp(d, nat::kHereMagic, hereLen)) {
-        g_lanServer.host = h->receivedAddress.host;
-        g_lanServer.port = (enet_uint16)atoi(std::string((const char*)d + hereLen, n - hereLen).c_str());
-        return 1;
+Probe ProbeServer(const ENetAddress& to) {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return Probe::Silent;
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = to.host;
+    sa.sin_port = htons(to.port);
+    Probe result = Probe::Silent;
+    if (connect(s, (sockaddr*)&sa, sizeof(sa)) != 0) {
+        closesocket(s);
+        return Probe::NoRoute;
     }
-    if (!nat::IsStunPacket(d, n)) return 0;
-    nat::Endpoint ep;
-    if (g_stunWaiting && nat::ParseStunResponse(d, n, g_stunTx, ep)) {
-        g_mapped = ep;
-        g_stunWaiting = false;
+    for (int i = 0; i < 3 && result == Probe::Silent; ++i) {
+        if (send(s, nat::kPingMagic, sizeof(nat::kPingMagic) - 1, 0) < 0) {
+            int e = WSAGetLastError();
+            if (e == WSAENETUNREACH || e == WSAEHOSTUNREACH || e == WSAENETDOWN) result = Probe::NoRoute;
+            else if (e == WSAECONNRESET) result = Probe::Refused;
+            break;
+        }
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(s, &rd);
+        timeval tv{0, 500000};
+        if (select(0, &rd, nullptr, nullptr, &tv) <= 0) continue;
+        char buf[64];
+        int n = recv(s, buf, sizeof(buf), 0);
+        if (n == (int)sizeof(nat::kPongMagic) - 1 && !memcmp(buf, nat::kPongMagic, n)) result = Probe::Answered;
+        else if (n < 0 && WSAGetLastError() == WSAECONNRESET) result = Probe::Refused;
+        else if (n < 0 && (WSAGetLastError() == WSAENETUNREACH || WSAGetLastError() == WSAEHOSTUNREACH)) result = Probe::NoRoute;
     }
-    return 1;
+    closesocket(s);
+    return result;
 }
 
-// Tells the host (through the signalling channel) where our socket is seen from the internet, so it can
-// open its NAT for us, and opens ours towards it. A host with UPnP is reachable without this.
-// The host's TURN relay (if it runs one) is announced on the same channel: "RELAY ip:port".
-ENetAddress FindRelay(const std::string& code) {
-    ENetAddress relay{};
-    nat::HttpResponse r =
-        nat::HttpRequest("GET", std::string(nat::kDefaultSignalUrl) + "/" + nat::SignalTopic(code) + "/json?poll=1&since=all");
-    for (size_t at = 0; r.status == 200 && (at = r.body.find("\"message\":\"RELAY ", at)) != std::string::npos; ++at) {
-        size_t start = at + 17, end = r.body.find('"', start);
-        nat::Endpoint ep;
-        if (end != std::string::npos && nat::Endpoint::Parse(r.body.substr(start, end - start), ep)) relay = {ep.ip, ep.port};
+bool SameNetwork(uint32_t a, uint32_t b) { return (ntohl(a) >> 8) == (ntohl(b) >> 8); }  // a /24, as home networks are
+
+// why the connection to `shown` (as the player typed it) at `to` could not be made
+std::string ConnectFailure(const std::string& shown, const ENetAddress& to) {
+    std::string ip = nat::IpToString(to.host);
+    std::string where = ip + ":" + std::to_string(to.port);
+    std::string named = shown == ip ? where : shown + " (" + where + ")";
+    Probe probe = ProbeServer(to);
+    uint32_t ipHost = ntohl(to.host);
+    bool loopback = (ipHost >> 24) == 127;
+    LOGI("Проверка порта %s: %s", where.c_str(),
+         probe == Probe::Answered ? "сервер отвечает" : probe == Probe::Refused ? "порт закрыт" : probe == Probe::NoRoute ? "нет маршрута" : "тишина");
+    switch (probe) {
+        case Probe::Answered:
+            return Format(TR("Сервер %s отвечает, но соединение не устанавливается. Попробуйте ещё раз; если повторяется, "
+                             "разрешите gta_sa.exe в брандмауэре или антивирусе.",
+                             "The server %s answers, but the connection does not open. Try again; if it keeps happening, allow "
+                             "gta_sa.exe in your firewall or antivirus."),
+                          named.c_str());
+        case Probe::Refused:
+            if (loopback)
+                return Format(TR("На этом компьютере сервер на порту %u не запущен.", "No server is running on port %u on this computer."), to.port);
+            return Format(TR("На %s порт %u закрыт: сервер там не запущен. Проверьте, что хост создал сервер и что порт "
+                             "совпадает с портом хоста.",
+                             "On %s port %u is closed: no server runs there. Check that the host has started the server and "
+                             "that the port matches the host's."),
+                          ip.c_str(), to.port);
+        case Probe::NoRoute:
+            return Format(TR("До адреса %s нет маршрута: проверьте подключение к интернету или к сети на этом компьютере.",
+                             "There is no route to %s: check this computer's internet or network connection."),
+                          ip.c_str());
+        case Probe::Silent:
+            break;
     }
-    return relay;
+    if ((ipHost >> 22) == ((100 << 2) | 1))  // 100.64/10
+        return Format(TR("%s - адрес из сети провайдера (CGNAT), из интернета к нему подключиться нельзя. Хосту нужен белый IP "
+                         "у провайдера или VPN (Radmin VPN, ZeroTier).",
+                         "%s is an address inside the provider's network (CGNAT), it cannot be reached from the internet. The "
+                         "host needs a public IP from the provider or a VPN (Radmin VPN, ZeroTier)."),
+                      ip.c_str());
+    if (nat::IsPrivateIp(to.host) && !loopback) {
+        uint32_t mine = nat::LocalIp();
+        if (mine && !SameNetwork(mine, to.host))
+            return Format(TR("%s - локальный адрес чужой сети, через интернет он недоступен. Нужен внешний IP хоста: "
+                             "он показан у хоста в окне F9.",
+                             "%s is a local address of another network, it cannot be reached over the internet. You need the "
+                             "host's external IP: the host sees it in the F9 window."),
+                          ip.c_str());
+        return Format(TR("Компьютер %s в вашей сети не отвечает на порту %u. Проверьте, что на нём запущен сервер и что "
+                         "брандмауэр Windows на нём пропускает coop-server.exe.",
+                         "The computer %s in your network does not answer on port %u. Check that the server runs on it and "
+                         "that its Windows firewall lets coop-server.exe through."),
+                      ip.c_str(), to.port);
+    }
+    return Format(TR("Сервер %s не отвечает. Скорее всего, у хоста закрыт UDP-порт %u на роутере (окно F9 у хоста "
+                     "показывает, сработал ли UPnP). Ещё проверьте адрес и что сервер запущен.",
+                     "The server %s does not answer. Most likely UDP port %u is closed on the host's router (the host's F9 "
+                     "window shows whether UPnP worked). Also check the address and that the server is running."),
+                  named.c_str(), to.port);
 }
 
-void PrepareNat(ENetHost* client, ENetAddress& server, ENetAddress& relay, const std::string& code) {
-    client->intercept = &Intercept;
-    g_mapped = {};
-    for (const std::string& s : nat::StunServers()) {
-        size_t colon = s.rfind(':');
-        ENetAddress stun{};
-        if (enet_address_set_host(&stun, s.substr(0, colon).c_str()) != 0) continue;
-        stun.port = (enet_uint16)atoi(s.c_str() + colon + 1);
-        uint8_t req[20];
-        nat::BuildStunRequest(req, g_stunTx);
-        g_stunWaiting = true;
-        ENetBuffer buf{sizeof(req), req};
-        enet_socket_send(client->socket, &stun, &buf, 1);
-        ENetEvent ev;
-        for (int i = 0; i < 30 && g_stunWaiting; ++i) enet_host_service(client, &ev, 50);
-        if (g_mapped.Valid()) break;
+// why a working connection ended
+std::string LostReason(uint32_t code, uint32_t silentMs) {
+    switch (code) {
+        case proto::DISCONNECT_SERVER_STOP:
+            return TR("Хост закрыл сервер.", "The host closed the server.");
+        case proto::DISCONNECT_KICKED:
+            return TR("Вас выгнали с сервера.", "You were kicked from the server.");
+        case proto::DISCONNECT_REJECTED:
+            return TR("Сервер отказал во входе.", "The server refused to let you in.");
+        default:
+            break;
     }
-    g_stunWaiting = false;
-    if (g_mapped.Valid()) {
-        bool ok = nat::SignalPublish(nat::kDefaultSignalUrl, nat::SignalTopic(code), "PUNCH " + g_mapped.ToString());
-        LOGI("Наш внешний адрес: %s. Хост %s", g_mapped.ToString().c_str(), ok ? "оповещён" : "не оповещён (нет связи с ntfy)");
-        if (ok) relay = FindRelay(code);  // the host allows our address on its relay when it gets the message
-        if (relay.host) LOGI("У хоста есть ретранслятор: %s", nat::Endpoint{relay.host, relay.port}.ToString().c_str());
-    } else {
-        LOGW("Внешний адрес не определён (STUN недоступен). Подключаемся напрямую");
-    }
-    if (g_mapped.Valid() && g_mapped.ip == server.host) {
-        // the same public address as the host: most NATs cannot loop back, look for it in our network
-        g_lanServer = {};
-        enet_socket_set_option(client->socket, ENET_SOCKOPT_BROADCAST, 1);
-        ENetBuffer disc{sizeof(nat::kDiscoverMagic) - 1, (void*)nat::kDiscoverMagic};
-        for (enet_uint16 port : {(enet_uint16)7788, server.port}) {
-            ENetAddress bc{ENET_HOST_BROADCAST, port};
-            enet_socket_send(client->socket, &bc, &disc, 1);
-        }
-        ENetEvent ev;
-        for (int i = 0; i < 20 && !g_lanServer.host; ++i) enet_host_service(client, &ev, 50);
-        if (g_lanServer.host) {
-            char ip[64];
-            enet_address_get_host_ip(&g_lanServer, ip, sizeof(ip));
-            LOGI("Хост найден в локальной сети: %s:%u", ip, g_lanServer.port);
-            server = g_lanServer;
-            return;
-        }
-    }
-    ENetBuffer punch{sizeof(nat::kPunchMagic) - 1, (void*)nat::kPunchMagic};
-    for (int i = 0; i < 3; ++i) enet_socket_send(client->socket, &server, &punch, 1);
+    return Format(TR("Связь с сервером пропала: он не отвечал %u с. У хоста пропал интернет, его игра закрылась или "
+                     "зависла, либо пропал интернет у вас.",
+                     "Lost the connection: the server did not answer for %u s. The host lost the internet, the host's game "
+                     "closed or hung, or your internet dropped."),
+                  (silentMs + 500) / 1000);
 }
 }  // namespace
 
@@ -147,40 +177,53 @@ void NetClient::Poll(std::vector<Packet>& out) {
     }
 }
 
+std::string NetClient::FailReason() {
+    std::lock_guard<std::mutex> lock(m_reasonMutex);
+    return m_failReason;
+}
+
+void NetClient::Fail(ENetHost* client, const std::string& why) {
+    LOGW("%s", why.c_str());
+    {
+        std::lock_guard<std::mutex> lock(m_reasonMutex);
+        m_failReason = why;
+    }
+    if (client) enet_host_destroy(client);
+    m_state = State::Disconnected;
+    m_disconnectEvent = true;
+}
+
 void NetClient::ThreadMain(std::string host, uint16_t port) {
+    {
+        std::lock_guard<std::mutex> lock(m_reasonMutex);
+        m_failReason.clear();
+    }
     ENetHost* client = enet_host_create(nullptr, 1, proto::CH_COUNT, 0, 0);
     if (!client) {
-        LOGE("enet_host_create failed");
-        m_state = State::Disconnected;
-        m_disconnectEvent = true;
+        Fail(nullptr, TR("Не удалось открыть сетевой сокет: Windows не дала создать UDP-сокет (антивирус или нехватка "
+                         "ресурсов).",
+                         "Could not open a network socket: Windows refused a UDP socket (an antivirus, or out of resources)."));
         return;
     }
     enet_host_compress_with_range_coder(client);
     client->mtu = net::kMtu;
-    ENetAddress addr{}, relay{};
-    nat::Endpoint codeEp;
-    uint32_t key = 0;
-    if (nat::ParseInviteCode(host, codeEp, key)) {
-        addr.host = codeEp.ip;
-        addr.port = codeEp.port;
-        LOGI("Код приглашения: хост %s", codeEp.ToString().c_str());
-        PrepareNat(client, addr, relay, host);
-    } else if (enet_address_set_host(&addr, host.c_str()) != 0) {
-        LOGE("Не удалось определить адрес сервера \"%s\"", host.c_str());
-        enet_host_destroy(client);
-        m_state = State::Disconnected;
-        m_disconnectEvent = true;
+    ENetAddress addr{};
+    if (host.empty()) {
+        Fail(client, TR("Не указан адрес сервера.", "No server address given."));
         return;
     }
-    if (!codeEp.Valid()) addr.port = port;
-    // direct (or punched) first; the relay when that does not answer within 4 s
-    bool useRelay = relay.host && Cfg().forceRelay;
-    uint64_t relayAt = relay.host && !useRelay ? GetTickCount64() + 4000 : 0;
-    ENetPeer* peer = enet_host_connect(client, useRelay ? &relay : &addr, proto::CH_COUNT, 0);
+    if (enet_address_set_host(&addr, host.c_str()) != 0) {
+        Fail(client, Format(TR("Адрес «%s» не найден. Проверьте, что он написан правильно, например 85.12.34.56 или "
+                               "85.12.34.56:7788.",
+                               "The address \"%s\" was not found. Check that it is spelled right, for example 85.12.34.56 "
+                               "or 85.12.34.56:7788."),
+                            host.c_str()));
+        return;
+    }
+    addr.port = port;
+    ENetPeer* peer = enet_host_connect(client, &addr, proto::CH_COUNT, 0);
     if (!peer) {
-        enet_host_destroy(client);
-        m_state = State::Disconnected;
-        m_disconnectEvent = true;
+        Fail(client, TR("Не удалось начать подключение (ENet).", "Could not start connecting (ENet)."));
         return;
     }
     enet_peer_timeout(peer, 0, 10000, 20000);
@@ -205,15 +248,6 @@ void NetClient::ThreadMain(std::string host, uint16_t port) {
         }
         outLocal.clear();
 
-        if (!connected && relayAt && (GetTickCount64() >= relayAt || peer->state == ENET_PEER_STATE_DISCONNECTED)) {
-            LOGI("Напрямую сервер не отвечает. Подключаемся через ретранслятор");
-            enet_peer_reset(peer);
-            peer = enet_host_connect(client, &relay, proto::CH_COUNT, 0);
-            relayAt = 0;
-            if (!peer) break;
-            enet_peer_timeout(peer, 0, 10000, 20000);
-        }
-
         ENetEvent ev;
         int rc = enet_host_service(client, &ev, 2);
         while (rc > 0) {
@@ -224,21 +258,27 @@ void NetClient::ThreadMain(std::string host, uint16_t port) {
                     m_connectEvent = true;
                     LOGI("Соединение с сервером установлено");
                     break;
-                case ENET_EVENT_TYPE_DISCONNECT:
-                    if (!connected && relayAt) {
-                        relayAt = 1;  // the direct attempt gave up: switch to the relay above
-                        break;
-                    }
+                case ENET_EVENT_TYPE_DISCONNECT: {
                     LOGW("Соединение с сервером %s", connected ? "потеряно" : "не установлено");
-                    if (connected)
+                    std::string why;
+                    if (connected) {
                         LOGI("Перед разрывом: пинг %u мс, потери %.1f%%, без подтверждения %u байт, сервер молчал %u мс, код %u",
                              m_rtt.load(), lastLoss * 100.0 / (double)ENET_PEER_PACKET_LOSS_SCALE, lastInTransit,
                              enet_time_get() - lastHeard, ev.data);
+                        why = LostReason(ev.data, enet_time_get() - lastHeard);
+                    } else {
+                        why = ev.data ? LostReason(ev.data, 0) : ConnectFailure(host, addr);
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(m_reasonMutex);
+                        m_failReason = why;
+                    }
                     connected = false;
                     m_state = State::Disconnected;
                     m_disconnectEvent = true;
                     m_quit = true;
                     break;
+                }
                 case ENET_EVENT_TYPE_RECEIVE: {
                     m_bytesIn += ev.packet->dataLength;
                     Packet p{ev.channelID, std::vector<uint8_t>(ev.packet->data, ev.packet->data + ev.packet->dataLength)};
@@ -276,8 +316,8 @@ void NetClient::ThreadMain(std::string host, uint16_t port) {
             if (enet_peer_send(peer, p.channel, pkt) != 0) enet_packet_destroy(pkt);
         }
         outLocal.clear();
-        // graceful quit: data = 1 tells the server it was not a timeout
-        enet_peer_disconnect_later(peer, 1);
+        // graceful quit: the code tells the server it was not a timeout
+        enet_peer_disconnect_later(peer, proto::DISCONNECT_QUIT);
         ENetEvent ev;
         uint64_t deadline = GetTickCount64() + 1000;
         while (GetTickCount64() < deadline && enet_host_service(client, &ev, 50) >= 0) {

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstdlib>
 
-#include "common/api/nat-traversal/NatTraversal.h"
 #include "common/config/version/Version.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
@@ -31,23 +30,20 @@ uint32_t PlayerColor(uint8_t id) {
 }
 
 void Session::Connect(const std::string& host, uint16_t port, const std::string& nick, const std::string& password,
-                      bool wantsHost, uint32_t inviteKey) {
+                      bool wantsHost) {
     Disconnect();
     m_nick = nick;
     m_password = password;
     m_wantsHost = wantsHost;
-    nat::Endpoint ep;
-    uint32_t codeKey = 0;
-    m_inviteKey = inviteKey ? inviteKey : nat::ParseInviteCode(host, ep, codeKey) ? codeKey : 0;
     m_failReason.clear();
     m_peers.clear();
-    m_inviteCode.clear();
+    m_address = {};
     m_worldRetries = 0;
     m_myId = m_hostId = 255;
     m_state = State::Connecting;
     if (!m_net.Start(host, port)) {
         m_state = State::Failed;
-        m_failReason = TR("Не удалось запустить сеть.", "Could not start the network.");
+        m_failReason = TR("Не удалось запустить сеть: не инициализировался Winsock.", "Could not start the network: Winsock did not initialise.");
     }
 }
 
@@ -122,7 +118,6 @@ void Session::Update() {
         h.password = m_password;
         h.wantsHost = m_wantsHost;
         h.exeSize = kSupportedExeSize;
-        h.inviteKey = m_inviteKey;
         Writer w(C_HELLO);
         h.Write(w);
         m_net.Send(CH_RELIABLE, w);
@@ -151,11 +146,12 @@ void Session::Update() {
         bool wasOnline = m_state == State::Online;
         if (m_state == State::Connecting) {
             m_state = State::Failed;
+            if (m_failReason.empty()) m_failReason = m_net.FailReason();
             if (m_failReason.empty())
-                m_failReason = TR("Сервер не отвечает. Проверьте адрес, порт и брандмауэр.",
-                                  "The server does not answer. Check the address, the port and the firewall.");
+                m_failReason = TR("Не удалось подключиться к серверу.", "Could not connect to the server.");
         } else if (m_state == State::Online) {
             m_state = State::Failed;
+            if (m_failReason.empty()) m_failReason = m_net.FailReason();
             if (m_failReason.empty()) m_failReason = TR("Соединение с сервером потеряно.", "Lost connection to the server.");
         }
         m_net.Stop();
@@ -300,12 +296,18 @@ void Session::HandleService(uint8_t id, Reader& r) {
         case S_WORLD_WAIT:
             if (onWorldWait) onWorldWait();
             break;
-        case S_INVITE: {
-            std::string code = r.Str(32);
-            if (r.Ok() && code != m_inviteCode) {
-                m_inviteCode = code;
-                if (onInvite) onInvite(code);
-            }
+        case S_ADDRESS: {
+            Address a;
+            a.external = r.Str(32);
+            a.lan = r.Str(32);
+            uint8_t flags = r.U8();
+            a.upnpError = r.Str(128);
+            if (!r.Ok()) break;
+            a.done = flags & ADDRESS_DONE;
+            a.upnp = flags & ADDRESS_UPNP;
+            a.cgnat = flags & ADDRESS_CGNAT;
+            m_address = a;
+            if (onAddress) onAddress(a);
             break;
         }
         case S_WORLD_WANTED:

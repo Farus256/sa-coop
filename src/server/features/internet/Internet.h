@@ -6,53 +6,50 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 #include "common/api/nat-traversal/NatTraversal.h"
-#include "shared/api/turn-relay/TurnRelay.h"
 
 namespace coop::server {
 
-// Internet play without VPN: UPnP port mapping, the public endpoint learned with STUN through the ENet
-// socket itself, an invite code, and UDP hole punching towards joiners who announce their endpoint on
-// the signalling channel. One instance per process (ENet's intercept callback has no user data).
+// What the host tells its friends to connect to, and whether that can work.
+struct AddressInfo {
+    std::string external;   // "1.2.3.4:7788", the address the internet sees; empty when unknown
+    std::string lan;        // "192.168.1.5:7788", for players in the same network
+    bool done = false;      // the checks are over
+    bool upnp = false;      // the router forwards the port (UPnP)
+    std::string upnpError;  // why it does not
+    bool cgnat = false;     // the router itself sits behind the provider's NAT: not reachable from the internet
+};
+
+// Internet play by IP: UPnP port mapping and the public address learned with STUN through the ENet socket itself.
+// It also answers the clients' pings (kPingMagic) on the game port. One instance per process (ENet's intercept callback
+// has no user data).
 class Internet {
 public:
     ~Internet() { Stop(); }
-    // returns at once, the work runs on a thread; turnSpec: optional relay (see TurnRelay); key: the invite code's
-    void Start(ENetHost* host, uint16_t port, const std::string& turnSpec, uint32_t key);
+    // returns at once; the UPnP and STUN work runs on a thread when `internet` is set
+    void Start(ENetHost* host, uint16_t port, bool internet);
     void Stop();
-    void Service();                              // network thread: punch packets
-    std::string Code();                          // empty until known
-    bool TakeNewCode(std::string& code);         // the code became known since the last call
+    bool TakeNewInfo(AddressInfo& out);  // the info changed since the last call
+    AddressInfo Info();
 
 private:
     void Worker();
-    void QueuePunch(const std::string& message);
+    void Publish(const AddressInfo& info);
     static int ENET_CALLBACK Intercept(ENetHost* host, ENetEvent* event);
 
     ENetHost* m_host = nullptr;
     uint16_t m_port = 0;
-    uint32_t m_key = 0;
     std::thread m_thread;
     std::atomic<bool> m_quit{false};
     nat::UpnpResult m_upnp;
-    nat::SignalSubscriber m_signal;
-    TurnRelay m_turn;
-    bool m_turnEnabled = false;
 
     std::mutex m_mutex;
-    std::string m_code;
-    bool m_codeNew = false;
+    AddressInfo m_info;
+    bool m_infoNew = false;
     uint8_t m_txid[12] = {};
     bool m_stunWaiting = false;
     nat::Endpoint m_mapped;
-    struct Punch {
-        ENetAddress addr;
-        int left;
-        uint64_t nextMs;
-    };
-    std::vector<Punch> m_punches;
 };
 
 }  // namespace coop::server

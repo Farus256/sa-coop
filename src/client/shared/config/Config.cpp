@@ -75,7 +75,6 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
 
     debugOverlay = ini.GetBool("debug", "overlay", debugOverlay);
     verboseLog = ini.GetBool("debug", "verbose_log", verboseLog);
-    forceRelay = ini.GetBool("debug", "force_relay", forceRelay);
     serverData = ini.Get("debug", "server_data", serverData);
     while (!serverData.empty() && (serverData.back() == '\\' || serverData.back() == '/')) serverData.pop_back();
     if (serverData.empty()) serverData = "server-data";  // a trailing backslash would escape the quote around it

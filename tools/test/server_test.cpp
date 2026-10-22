@@ -1,5 +1,5 @@
-// coop-server-test.exe — checks coop-server.exe from the outside, as a few game clients would see it: places, the invite
-// key, relaying to everyone and to some players (C_RELAY_TO), the host's role, chat commands, profile files.
+// coop-server-test.exe — checks coop-server.exe from the outside, as a few game clients would see it: places, the
+// password, the ping before connecting, relaying to everyone and to some players (C_RELAY_TO), the host's role, profile files.
 //
 //   python tools/build.py servertest
 //   build/release/bin/coop-server-test.exe [path to coop-server.exe]   (runs on Windows, and under Wine)
@@ -121,7 +121,7 @@ struct World {
     }
 };
 
-Bot& Join(World& w, uint16_t port, const std::string& name, uint32_t key = 0, const std::string& password = "",
+Bot& Join(World& w, uint16_t port, const std::string& name, const std::string& password = "",
           bool wantsHost = false) {
     auto b = std::make_unique<Bot>();
     b->name = name;
@@ -142,7 +142,6 @@ Bot& Join(World& w, uint16_t port, const std::string& name, uint32_t key = 0, co
     h.password = password;
     h.wantsHost = wantsHost;
     h.exeSize = kSupportedExeSize;
-    h.inviteKey = key;
     Writer hw(C_HELLO);
     h.Write(hw);
     bot.Send(CH_RELIABLE, hw);
@@ -161,7 +160,7 @@ struct ServerProcess {
         GetTempPathW(MAX_PATH, tmp);
         data = std::wstring(tmp) + L"coop-server-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(p) + L"\\";
         EnsureDirectory(data);
-        std::wstring ini = data + L"server.ini";  // no internet: no UPnP, STUN or ntfy.sh while testing
+        std::wstring ini = data + L"server.ini";  // no internet: no UPnP or STUN while testing
         std::string text = "[server]\r\ninternet = 0\r\n";
         WriteFileBytes(ini, text.data(), text.size());
         // no backslash before a closing quote: it would escape the quote and take the next arguments along
@@ -217,36 +216,6 @@ void EntityIds() {
     CHECK(owners, "an id did not carry its owner");
     CHECK(EntityId(3, 0) != EntityId(3, 1) && EntityId(3, 4094) != EntityId(3, 4095) - 0, "serials repeat too early");
     CHECK(Bit(15) == 0x8000 && Bit(16) == 0 && Bit(255) == 0, "player bits");
-}
-
-void InviteCodes() {
-    printf("invite codes\n");
-    nat::Endpoint ep, back;
-    nat::Endpoint::Parse("93.184.216.34:7788", ep);
-    uint32_t key = 0x0ABCDEF1 & nat::kInviteKeyMask, k2 = 0;
-    std::string code = nat::MakeInviteCode(ep, key);
-    CHECK(code.size() == 19 && code[4] == '-' && code[9] == '-' && code[14] == '-', "code %s", code.c_str());
-    CHECK(nat::ParseInviteCode(code, back, k2), "parse %s", code.c_str());
-    CHECK(back.ip == ep.ip && back.port == ep.port && k2 == key, "%s -> %s key %08X", code.c_str(), back.ToString().c_str(), k2);
-    std::string lower = code;
-    for (char& c : lower) c = (char)tolower((unsigned char)c);
-    CHECK(nat::ParseInviteCode(lower, back, k2) && k2 == key, "lower case %s", lower.c_str());
-    // a code of the original mod: 12 characters, version 1
-    uint64_t v = 1;
-    const uint8_t* b = (const uint8_t*)&ep.ip;
-    for (int i = 0; i < 4; ++i) v = (v << 8) | b[i];
-    v = (v << 16) | ep.port;
-    v = (v << 8) | 0x5A;
-    static const char kAlphabet[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    std::string old;
-    for (int i = 11; i >= 0; --i) old += kAlphabet[(v >> (i * 5)) & 31];
-    CHECK(nat::ParseInviteCode(old, back, k2) && back.ip == ep.ip && back.port == ep.port && k2 == 0, "version 1 code %s", old.c_str());
-    CHECK(!nat::ParseInviteCode("ABCD-EFGH-JKMN-PQR", back, k2), "15 characters");
-    CHECK(!nat::ParseInviteCode("not a code", back, k2), "text");
-    for (int i = 0; i < 200; ++i) {
-        uint32_t nk = nat::NewInviteKey();
-        CHECK(nk && !(nk & ~nat::kInviteKeyMask), "new key %08X", nk);
-    }
 }
 
 void Places(const std::wstring& exe) {
@@ -350,29 +319,63 @@ void Sixteen(const std::wstring& exe) {
     CHECK(w.bots.back()->Count(G_PLAYER_ONFOOT) == 0, "states reached a player in the menu");
 }
 
-void Keys(const std::wstring& exe) {
-    printf("invite key (--key)\n");
+void Password(const std::wstring& exe) {
+    printf("password\n");
     ServerProcess s;
-    if (!s.Start(exe, 7813, L"--key 0123ABC --password secret")) return ++g_failed, void();
+    if (!s.Start(exe, 7813, L"--password secret")) return ++g_failed, void();
     World w;
-    Bot& host = Join(w, s.port, "host", 0x0123ABC, "", true);
-    CHECK(host.welcomed, "the host with the key (%s)", host.rejectReason.c_str());
-    Bot& byPass = Join(w, s.port, "lan", 0, "secret");
-    CHECK(byPass.welcomed, "by address with the password (%s)", byPass.rejectReason.c_str());
-    Bot& wrong = Join(w, s.port, "wrong", 0x0123ABD);
-    CHECK(!wrong.welcomed && wrong.rejected, "a wrong key (%s)", wrong.rejectReason.c_str());
+    Bot& ok = Join(w, s.port, "friend", "secret");
+    CHECK(ok.welcomed, "the right password (%s)", ok.rejectReason.c_str());
     Bot& none = Join(w, s.port, "none");
-    CHECK(!none.welcomed && none.rejected, "no key, no password (%s)", none.rejectReason.c_str());
-    for (int i = 0; i < 8; ++i) Join(w, s.port, "guess" + std::to_string(i), 0x1000 + i);
-    Bot& late = Join(w, s.port, "late", 0x0123ABC);
-    CHECK(!late.welcomed, "the right key after 8 wrong ones from the address (%s)", late.rejectReason.c_str());
+    CHECK(!none.welcomed && none.rejectReason.find("password") != std::string::npos, "no password (%s)", none.rejectReason.c_str());
+    Bot& wrong = Join(w, s.port, "wrong", "guess");
+    CHECK(!wrong.welcomed && wrong.rejectReason.find("wrong password") != std::string::npos, "a wrong one (%s)", wrong.rejectReason.c_str());
+    for (int i = 0; i < 8; ++i) Join(w, s.port, "guess" + std::to_string(i), "guess" + std::to_string(i));
+    Bot& late = Join(w, s.port, "late", "secret");
+    CHECK(!late.welcomed, "the right password after 8 wrong ones from the address (%s)", late.rejectReason.c_str());
 
-    printf("no key asked (dedicated server without require_invite)\n");
+    printf("no password\n");
     ServerProcess open;
     if (!open.Start(exe, 7814, L"")) return ++g_failed, void();
     World w2;
     Bot& any = Join(w2, open.port, "anyone");
     CHECK(any.welcomed, "joins by address (%s)", any.rejectReason.c_str());
+}
+
+// what the game sends to the server port when a connection fails: the server answers, a closed port answers with ICMP
+void Ping(const std::wstring& exe) {
+    printf("ping before connecting\n");
+    ServerProcess s;
+    if (!s.Start(exe, 7816, L"")) return ++g_failed, void();
+    auto ask = [](uint16_t port, std::string& answer) {
+        SOCKET so = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        sockaddr_in sa{};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(port);
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        connect(so, (sockaddr*)&sa, sizeof sa);
+        send(so, nat::kPingMagic, sizeof(nat::kPingMagic) - 1, 0);
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(so, &rd);
+        timeval tv{1, 0};
+        int err = 0;
+        if (select(0, &rd, nullptr, nullptr, &tv) > 0) {
+            char buf[64];
+            int n = recv(so, buf, sizeof buf, 0);
+            if (n > 0) answer.assign(buf, n);
+            else err = WSAGetLastError();
+        }
+        closesocket(so);
+        return err;
+    };
+    std::string answer;
+    ask(s.port, answer);
+    CHECK(answer == nat::kPongMagic, "the server answers the ping (%s)", answer.c_str());
+    answer.clear();
+    int err = ask(7899, answer);  // nothing listens there
+    CHECK(answer.empty(), "no answer from a closed port (%s)", answer.c_str());
+    if (err != WSAECONNRESET) printf("  note: a closed port gave error %d here, not WSAECONNRESET (Wine?)\n", err);
 }
 
 void OldClient(const std::wstring& exe) {
@@ -390,7 +393,7 @@ void OldClient(const std::wstring& exe) {
     Bot& bot = *b;
     w.bots.push_back(std::move(b));
     w.Until([&] { return bot.connected; }, 5000);
-    Writer hw(C_HELLO);  // protocol 17's hello: no key at its end
+    Writer hw(C_HELLO);  // protocol 17's hello
     hw.U32(17);
     hw.Str("0.2.6", 32);
     hw.Str("oldie", 64);
@@ -453,10 +456,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     net::Init();
     EntityIds();
-    InviteCodes();
     Places(exe);
     Sixteen(exe);
-    Keys(exe);
+    Password(exe);
+    Ping(exe);
     OldClient(exe);
     HostChange(exe);
     Profiles(exe);

@@ -8,7 +8,6 @@
 #include <cstring>
 #include <filesystem>
 
-#include "common/api/nat-traversal/NatTraversal.h"
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/ini/Ini.h"
 #include "common/lib/log/Log.h"
@@ -35,7 +34,6 @@ int g_hostSlot = 0;          // slot chosen for hosting (0 = current game)
 uint16_t g_port = 7788;
 std::string g_password, g_hostAddr;
 bool g_isHosting = false;
-uint32_t g_inviteKey = 0;    // host: the key its server asks for (in the invite code), new for every server
 uint64_t g_phaseTime = 0;
 int g_connectAttempts = 0;
 
@@ -105,9 +103,6 @@ bool StartServerProcess(const std::wstring& worldPath, bool newGame) {
     if (newGame) cmd += L" --new-game";
     cmd += cfg.friendlyFire ? L" --friendly-fire 1" : L" --friendly-fire 0";  // the checkbox wins over server.ini
     cmd += L" --max " + std::to_wstring(std::clamp(cfg.maxPlayers, 2, (int)kMaxPlayers));  // and so does the window's count
-    wchar_t key[16];
-    swprintf(key, 16, L"%08X", (unsigned)g_inviteKey);
-    cmd += L" --key " + std::wstring(key);  // only the code (or the password) lets in
 
     if (!g_serverJob) {
         g_serverJob = CreateJobObjectW(nullptr, nullptr);
@@ -228,9 +223,6 @@ std::string StatusText() {
             return TR("Запускаем сервер...", "Starting the server...");
         case Phase::Connecting: {
             if (g_isHosting) return TR("Запускаем сервер...", "Starting the server...");
-            nat::Endpoint ep;
-            uint32_t key = 0;
-            if (nat::ParseInviteCode(g_hostAddr, ep, key)) return TR("Подключаемся по коду...", "Connecting by code...");
             return Format(TR("Подключаемся к %s:%u...", "Connecting to %s:%u..."), g_hostAddr.c_str(), g_port);
         }
         case Phase::WaitingWorld: {
@@ -304,7 +296,6 @@ void Host(int slot, uint16_t port, const std::string& password) {
         if (core::SaveWorldSnapshot(snap)) world = Cfg().coopDir + L"world\\host_snapshot.b";
     }
     StopServerProcess();
-    g_inviteKey = nat::NewInviteKey();
     if (!StartServerProcess(world, slot < 0)) return;
     SetPhase(Phase::StartingServer);
     g_connectAttempts = 0;
@@ -312,20 +303,27 @@ void Host(int slot, uint16_t port, const std::string& password) {
 
 void Join(const std::string& hostArg, uint16_t port, const std::string& password) {
     auto& cfg = Cfg();
-    // "file:<path>": the invite code written by a server (dedicated servers, test setups)
-    std::string host = hostArg;
-    if (host.rfind("file:", 0) == 0) {
-        std::vector<uint8_t> data;
-        std::wstring path = Utf8ToWide(host.substr(5));
-        if (path.size() < 2 || path[1] != L':') path = cfg.coopDir + path;
-        if (ReadFileBytes(path, data)) host = Trim(std::string(data.begin(), data.end()));
+    // "1.2.3.4:7788": the port typed with the address wins over the port field
+    std::string host = Trim(hostArg);
+    if (size_t colon = host.rfind(':'); colon != std::string::npos && host.find(':') == colon) {
+        std::string p = host.substr(colon + 1);
+        int value = atoi(p.c_str());
+        if (!p.empty() && p.find_first_not_of("0123456789") == std::string::npos && value > 0 && value <= 65535) {
+            port = (uint16_t)value;
+            host = host.substr(0, colon);
+        } else {
+            Fail(Format(TR("Неверный порт «%s» в адресе: нужен номер от 1 до 65535.",
+                           "Wrong port \"%s\" in the address: it must be a number from 1 to 65535."),
+                        p.c_str()));
+            return;
+        }
     }
     g_error.clear();
     g_isHosting = false;
     g_hostAddr = host;
     g_port = port;
     g_password = password;
-    cfg.host = hostArg;  // keep "file:" so the next start reads a fresh code
+    cfg.host = hostArg;
     cfg.wantsHost = false;
     cfg.port = port;
     cfg.password = password;
@@ -418,7 +416,7 @@ void Update() {
                 break;
             }
             if (NowMs() - g_phaseTime > 400) {
-                net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true, g_inviteKey);
+                net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true);
                 SetPhase(Phase::Connecting);
                 g_connectAttempts = 1;
             }
@@ -427,7 +425,7 @@ void Update() {
             if (net.GetState() == Session::State::Failed) {
                 if (g_isHosting && g_connectAttempts < 5 && ServerProcessAlive()) {
                     ++g_connectAttempts;
-                    net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true, g_inviteKey);
+                    net.Connect("127.0.0.1", g_port, Cfg().nickname, g_password, true);
                 } else {
                     Fail(net.FailReason());
                 }

@@ -25,7 +25,8 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
   4 by default)
 - other players' cars and pedestrians only appear near you, and distant players update less often, so the network
   and the game keep up
-- the invite code works as a pass: without it or the password you can't join
+- connecting by IP only, and when it fails the window says exactly why (port closed, no answer, a local address of
+  another network, the provider's CGNAT and so on)
 - a mission marker only waits for players within 200 m, and `/go` starts without the rest
 - up to three partners stand next to CJ in cutscenes
 - every player has a colour in the chat, over the head and on the radar
@@ -152,11 +153,11 @@ The archive also contains a detailed player guide in Russian, `Инструкц�
 The host presses F9, opens the "Host a game" tab, picks a save and clicks "Start the server". If the host is
 already in the game, the server is created from the current game. The "Friendly fire" checkbox above the button
 lets the players hurt each other, and "Players: up to N" sets the places (2–16). A couple of seconds later the
-window shows a code like `XXXX-XXXX-XXXX-XXXX`, which the host sends to the friends. The code contains the host's
-external IP address and the server's key, so only send it to the people you play with.
+window shows the external IP with the port, for example `85.12.34.56:7788`, and a "Copy" button. The host sends it
+to the friends. Set a password if you want to keep strangers out.
 
-The friends open the "Join a game" tab, paste the code and click "Connect". After that, the host's world loads on
-their side.
+The friends open the "Join a game" tab, type that address and click "Connect". The port can go into the address
+after a colon or into the "Port" field. After that, the host's world loads on their side.
 
 ![The SA:COOP window in the main menu](docs/images/en/menu.jpg)
 
@@ -164,9 +165,10 @@ You can also start the story from the very beginning: the last item in the save 
 plays the prologue alone, while the friend connects right away and waits. When CJ gets on the bike, the friend
 appears next to him, and there is a bike for the friend too.
 
-You don't need Hamachi or Radmin. The server opens its port through UPnP or punches through NAT. If neither works
-with your internet providers, the host can turn on a relay with the `turn` line in `coop\server.ini`, as the
-guide describes.
+The server tries to open its UDP port on the router through UPnP, and the host's F9 window shows whether that
+worked. If not, forward the port (7788/UDP by default) on the router by hand. If the provider keeps the host behind
+CGNAT, the window says so too: then nobody can connect from the internet, and you need a public IP or a VPN such as
+Radmin or ZeroTier (friends then connect to the VPN address).
 
 ## Keys
 
@@ -211,8 +213,8 @@ A unique beginning of a nickname is enough.
   start over.
 - Whatever gets knocked down or broken on the streets stays that way for a few minutes, then the map puts
   everything back, as in the normal game.
-- If both players are behind a "symmetric" NAT (common with mobile internet), the invite code cannot connect them
-  without a relay. Then you need `turn` or port 7788/UDP forwarded to the host's computer.
+- The host needs an open UDP port, through UPnP or forwarded on the router. Hosting over mobile internet or behind
+  CGNAT does not work without a VPN.
 - Only `gta_sa.exe` version 1.0 US is supported. The players' builds may differ, but mods that change the story or
   the saves are needed on both sides. If the partner's `data\script\main.scm` differs from the host's, the host's
   world does not load for them, and the mod says so in the chat.

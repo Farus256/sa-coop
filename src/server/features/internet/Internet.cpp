@@ -1,7 +1,5 @@
 #include "features/internet/Internet.h"
 
-#include <random>
-
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
 
@@ -11,22 +9,22 @@ namespace {
 Internet* g_self = nullptr;
 }
 
-void Internet::Start(ENetHost* host, uint16_t port, const std::string& turnSpec, uint32_t key) {
+void Internet::Start(ENetHost* host, uint16_t port, bool internet) {
     m_host = host;
     m_port = port;
-    m_key = key;
-    m_turnEnabled = !turnSpec.empty();
-    if (m_turnEnabled) m_turn.Start(turnSpec, port);
     g_self = this;
     host->intercept = &Internet::Intercept;
+    AddressInfo info;
+    if (nat::Endpoint lan{nat::LocalIp(), port}; lan.Valid()) info.lan = lan.ToString();
+    info.done = !internet;
+    Publish(info);
+    if (!internet) return;
     m_quit = false;
     m_thread = std::thread(&Internet::Worker, this);
 }
 
 void Internet::Stop() {
     m_quit = true;
-    m_signal.Stop();
-    m_turn.Stop();
     if (m_thread.joinable()) m_thread.join();
     if (m_upnp.ok) {
         nat::UpnpUnmapPort(m_upnp, m_port);
@@ -36,29 +34,33 @@ void Internet::Stop() {
     g_self = nullptr;
 }
 
-std::string Internet::Code() {
+void Internet::Publish(const AddressInfo& info) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_code;
+    m_info = info;
+    m_infoNew = true;
 }
 
-bool Internet::TakeNewCode(std::string& code) {
+bool Internet::TakeNewInfo(AddressInfo& out) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_codeNew) return false;
-    m_codeNew = false;
-    code = m_code;
+    if (!m_infoNew) return false;
+    m_infoNew = false;
+    out = m_info;
     return true;
 }
 
-// STUN answers and punch packets arrive on the game port: they never reach ENet's protocol code
+AddressInfo Internet::Info() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_info;
+}
+
+// STUN answers and the clients' pings arrive on the game port: they never reach ENet's protocol code
 int ENET_CALLBACK Internet::Intercept(ENetHost* host, ENetEvent*) {
     Internet* self = g_self;
     const uint8_t* data = host->receivedData;
     size_t len = host->receivedDataLength;
     if (!self) return 0;
-    if (len >= sizeof(nat::kPunchMagic) - 1 && !memcmp(data, nat::kPunchMagic, sizeof(nat::kPunchMagic) - 1)) return 1;
-    if (len == sizeof(nat::kDiscoverMagic) - 1 && !memcmp(data, nat::kDiscoverMagic, len)) {
-        std::string reply = nat::kHereMagic + std::to_string(self->m_port);
-        ENetBuffer buf{reply.size(), (void*)reply.data()};
+    if (len == sizeof(nat::kPingMagic) - 1 && !memcmp(data, nat::kPingMagic, len)) {
+        ENetBuffer buf{sizeof(nat::kPongMagic) - 1, (void*)nat::kPongMagic};
         enet_socket_send(host->socket, &host->receivedAddress, &buf, 1);
         return 1;
     }
@@ -73,10 +75,14 @@ int ENET_CALLBACK Internet::Intercept(ENetHost* host, ENetEvent*) {
 }
 
 void Internet::Worker() {
-    // 1. the router forwards the port (works for most home routers; useless behind carrier NAT)
+    AddressInfo info = Info();
+
+    // 1. the router forwards the port (most home routers can; it does not help behind the provider's NAT)
     m_upnp = nat::UpnpMapPort(m_port, "SA:COOP server");
+    info.upnp = m_upnp.ok;
+    info.upnpError = m_upnp.error;
     if (m_upnp.ok) LOGI("UPnP: порт %u проброшен. Внешний адрес роутера: %s", m_port, m_upnp.externalIp.c_str());
-    else LOGI("UPnP недоступен (%s). Будем пробивать NAT", m_upnp.error.c_str());
+    else LOGW("UPnP недоступен (%s). Порт %u нужно открыть на роутере вручную", m_upnp.error.c_str(), m_port);
 
     // 2. the address the internet sees for our socket
     for (const std::string& server : nat::StunServers()) {
@@ -102,87 +108,30 @@ void Internet::Worker() {
         if (m_mapped.Valid()) break;
         m_stunWaiting = false;
     }
-
-    nat::Endpoint ep;
-    nat::Endpoint upnpEp;
-    if (m_upnp.ok && nat::Endpoint::Parse(m_upnp.externalIp + ":" + std::to_string(m_port), upnpEp) &&
-        !nat::IsPrivateIp(upnpEp.ip)) {
-        ep = upnpEp;  // directly reachable
-    } else {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        ep = m_mapped;
-    }
-    // the relay address goes to the signalling channel (or into the code when nothing else works)
-    nat::Endpoint relay;
-    for (int i = 0; i < 150 && m_turnEnabled && !m_quit && !(relay = m_turn.Relayed()).Valid(); ++i) Sleep(100);
-    if (!ep.Valid()) ep = relay;
-    if (!ep.Valid()) {
-        // no internet: a code with this computer's address in the local network (its key lets the friend in)
-        ep = {nat::LocalIp(), m_port};
-        if (!ep.Valid()) {
-            LOGW("Внешний адрес не определён (нет интернета?). Подключиться можно только по локальной сети или по IP");
-            return;
-        }
-        std::string code = nat::MakeInviteCode(ep, m_key);
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_code = code;
-        m_codeNew = true;
-        LOGW("Внешний адрес не определён (нет интернета?). Код для локальной сети: %s (%s)", code.c_str(), ep.ToString().c_str());
-        return;
-    }
-    std::string code = nat::MakeInviteCode(ep, m_key);
+    nat::Endpoint stun;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_code = code;
-        m_codeNew = true;
-    }
-    LOGI("Код приглашения: %s (внешний адрес %s)", code.c_str(), ep.ToString().c_str());
-
-    // 3. joiners behind NAT announce their endpoint; we answer with packets that open our NAT for them
-    m_signal.Start(nat::kDefaultSignalUrl, nat::SignalTopic(code), [this](const std::string& msg) { QueuePunch(msg); });
-    if (relay.Valid() && relay.ip != ep.ip) {
-        nat::SignalPublish(nat::kDefaultSignalUrl, nat::SignalTopic(code), "RELAY " + relay.ToString());
-        LOGI("Ретранслятор для друзей за любым NAT: %s", relay.ToString().c_str());
+        stun = m_mapped;
     }
 
-    // 4. renew a finite UPnP lease while the server runs
+    // the router's WAN address is private (or another than the internet sees): the provider's NAT is in front of it
+    nat::Endpoint wan;
+    bool wanKnown = m_upnp.ok && nat::Endpoint::Parse(m_upnp.externalIp + ":" + std::to_string(m_port), wan);
+    if (wanKnown && (nat::IsPrivateIp(wan.ip) || (stun.Valid() && stun.ip != wan.ip))) info.cgnat = true;
+    if (stun.Valid()) info.external = nat::Endpoint{stun.ip, m_port}.ToString();  // the port the router forwards
+    else if (wanKnown && !nat::IsPrivateIp(wan.ip)) info.external = wan.ToString();
+    info.done = true;
+    Publish(info);
+    if (info.external.empty()) LOGW("Внешний адрес не определён (нет интернета?). Подключиться можно только по локальной сети");
+    else LOGI("Адрес для друзей: %s%s", info.external.c_str(), info.cgnat ? " (за NAT провайдера, из интернета недоступен)" : "");
+
+    // 3. renew a finite UPnP lease while the server runs
     for (uint64_t renewAt = NowMs() + (uint64_t)m_upnp.leaseSeconds * 500; m_upnp.ok && m_upnp.leaseSeconds > 0 && !m_quit;) {
         Sleep(500);
         if (NowMs() < renewAt) continue;
         nat::UpnpResult again = nat::UpnpMapPort(m_port, "SA:COOP server");
         if (again.ok) m_upnp = again;
         renewAt = NowMs() + (uint64_t)m_upnp.leaseSeconds * 500;
-    }
-}
-
-void Internet::QueuePunch(const std::string& message) {
-    // "PUNCH 1.2.3.4:5678"
-    if (message.rfind("PUNCH ", 0) != 0) return;
-    nat::Endpoint ep;
-    if (!nat::Endpoint::Parse(message.substr(6), ep)) return;
-    ENetAddress addr{};
-    addr.host = ep.ip;
-    addr.port = ep.port;
-    LOGI("Пробивка NAT к %s", ep.ToString().c_str());
-    if (m_turnEnabled) m_turn.AllowPeer(ep.ip);  // TURN forwards only peers we named
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_punches.push_back({addr, 10, 0});
-}
-
-void Internet::Service() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    uint64_t now = NowMs();
-    for (auto it = m_punches.begin(); it != m_punches.end();) {
-        if (now >= it->nextMs) {
-            ENetBuffer buf{sizeof(nat::kPunchMagic) - 1, (void*)nat::kPunchMagic};
-            enet_socket_send(m_host->socket, &it->addr, &buf, 1);
-            it->nextMs = now + 200;
-            if (--it->left <= 0) {
-                it = m_punches.erase(it);
-                continue;
-            }
-        }
-        ++it;
     }
 }
 

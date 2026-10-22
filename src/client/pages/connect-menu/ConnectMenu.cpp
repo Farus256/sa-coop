@@ -4,7 +4,6 @@
 
 #include <algorithm>
 
-#include "common/api/nat-traversal/NatTraversal.h"
 #include "common/config/version/Version.h"
 #include "common/lib/util/Util.h"
 #include "entities/session/Flow.h"
@@ -178,7 +177,7 @@ void RenderConnectMenu() {
     };
 
     if (online) {
-        // ---- in a session: who we are, the code for the friend, the players
+        // ---- in a session: who we are, the address for friends, the players
         bool host = net.IsHost();
         g.Text(FONT_BIG, cx, cy, host ? TR("Сервер запущен", "Server running") : TR("Вы в игре", "Connected"), kSaBlue,
                TEXT_SHADOW);
@@ -186,23 +185,46 @@ void RenderConnectMenu() {
         if (!host) para(Format(TR("Сервер «%s»", "Server \"%s\""), net.ServerName().c_str()), kSaMuted, FONT_NORMAL);
         cy += 22 * s;
         if (host) {
-            caption(cx, TR("Код для друга", "Code for your friend"));
+            const Session::Address& a = net.ServerAddress();
+            caption(cx, TR("Адрес для друзей", "Address for your friends"));
             cy += ch + 6 * s;
-            // our wide capitals, not the game's pricedown: translations swap letters in that font
-            // (a Russian build drew 2QMY as "2qmy")
-            const std::string& code = net.InviteCode();
-            if (code.empty()) {
-                g.Text(FONT_NORMAL, cx, cy, TR("Узнаём внешний адрес...", "Finding out the external address..."), kSaMuted, TEXT_SHADOW);
+            if (!a.done && a.external.empty()) {
+                g.Text(FONT_NORMAL, cx, cy, TR("Узнаём внешний IP...", "Finding out the external IP..."), kSaMuted, TEXT_SHADOW);
                 cy += bh;
             } else {
-                g.Text(FONT_BIG, cx, cy, code, kGold, TEXT_OUTLINE);
-                cy += bh + 2 * s;
-                bool copied = NowMs() - g_copiedMs < 1500;
-                if (item("copy", cx, cy, copied ? TR("Скопировано", "Copied") : TR("Скопировать", "Copy"), true, copied))
-                    CopyToClipboard(code);
-                cy += rowH;
+                std::string shown = !a.external.empty() ? a.external : a.lan;
+                // our wide capitals, not the game's pricedown: translations swap letters in that font
+                g.Text(FONT_BIG, cx, cy, shown.empty() ? TR("не определён", "unknown") : shown, kGold, TEXT_OUTLINE);
+                if (!shown.empty()) {
+                    bool copied = NowMs() - g_copiedMs < 1500;
+                    const std::string label = copied ? TR("Скопировано", "Copied") : TR("Скопировать", "Copy");
+                    if (item("copy", cx + cw - g.TextWidth(FONT_MENU, label), cy + (bh - rowH) * 0.5f, label, true, copied))
+                        CopyToClipboard(shown);
+                }
+                cy += bh + 4 * s;
+                if (!a.external.empty() && !a.lan.empty()) para(Format(TR("В локальной сети: %s", "In your local network: %s"), a.lan.c_str()), kSaMuted);
+                if (a.cgnat)
+                    para(TR("Роутер за NAT провайдера (CGNAT): из интернета к вам не подключиться. Нужен белый IP у провайдера "
+                            "или VPN (Radmin VPN, ZeroTier); в локальной сети всё работает.",
+                            "Your router is behind the provider's NAT (CGNAT): nobody can connect from the internet. You need a "
+                            "public IP from the provider or a VPN (Radmin VPN, ZeroTier); the local network works."),
+                         kSaRed);
+                else if (a.done && a.external.empty())
+                    para(TR("Внешний IP не определён: нет доступа в интернет. Подключиться можно только из локальной сети.",
+                            "The external IP is unknown: no internet access. Only players in your local network can connect."),
+                         kSaRed);
+                else if (a.done && !a.upnp)
+                    para(Format(TR("UPnP не сработал (%s): откройте UDP-порт %u на роутере вручную, иначе друзья из интернета "
+                                   "не подключатся.",
+                                   "UPnP did not work (%s): open UDP port %u on your router by hand, or friends from the internet "
+                                   "cannot connect."),
+                                a.upnpError.empty() ? "?" : a.upnpError.c_str(), (unsigned)Cfg().port),
+                         kSaRed);
+                else if (a.done)
+                    para(Format(TR("Порт %u открыт на роутере через UPnP.", "Port %u is open on your router through UPnP."), (unsigned)Cfg().port),
+                         kSaMuted);
             }
-            cy += 20 * s;
+            cy += 16 * s;
         }
         int rows = 1 + (int)net.Peers().size();
         caption(cx, Format(TR("Игроки: %d из %d", "Players: %d of %d"), rows, net.MaxPlayers()));
@@ -248,11 +270,6 @@ void RenderConnectMenu() {
             g.Rect(cx + (cw - bw) * (t < 1 ? t : 2 - t), cy, bw, barH, kSaBlue);
         }
         cy += barH + 16 * s;
-        nat::Endpoint ep;
-        uint32_t key = 0;
-        if (phase == flow::Phase::Connecting && nat::ParseInviteCode(Trim(Narrow(g_addr)), ep, key))
-            para(TR("Подключение по коду может занять до 20 секунд.", "Connecting by code can take up to 20 seconds."), kSaMuted,
-                 FONT_SMALL, true);
         if (phase == flow::Phase::WaitingWorld && p < 0)
             para(TR("Хост сохраняет мир. Скоро он загрузится у вас.", "The host is saving the world. It will load for you soon."),
                  kSaMuted, FONT_SMALL, true);
@@ -279,12 +296,12 @@ void RenderConnectMenu() {
 
         int hostSlot = 0;
         if (g_tab == 0) {
-            caption(cx, TR("Код приглашения или IP-адрес", "Invite code or IP address"));
+            caption(cx, TR("IP-адрес хоста", "Host's IP address"));
             cy += ch + 6 * s;
             const char* paste = TR("Вставить", "Paste");
             float pw = g.TextWidth(FONT_MENU, paste) + room * 1.9f;
             enter |= w::TextBox("addr", cx, cy, cw - pw, rowH, g_addr, 64, false, false,
-                                TR("например, 2QMY-7KAP-JR8Y", "for example, 2QMY-7KAP-JR8Y"));
+                                TR("например, 85.12.34.56 или 85.12.34.56:7788", "for example, 85.12.34.56 or 85.12.34.56:7788"));
             if (item("paste", cx + cw - g.TextWidth(FONT_MENU, paste), cy, paste)) {
                 std::wstring clip = Widen(Trim(Narrow(w::ClipboardText())));
                 if (!clip.empty()) g_addr = clip.substr(0, 64);

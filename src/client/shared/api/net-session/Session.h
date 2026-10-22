@@ -25,10 +25,9 @@ public:
     enum class State { Offline, Connecting, Online, Failed };
     using Handler = void (*)(uint8_t from, Reader& r);
 
-    // host: an address or an invite code (whose key goes along); inviteKey: the key when it is not in `host` (the host's
-    // own game connecting to the server it started)
+    // host: an IP address or a host name
     void Connect(const std::string& host, uint16_t port, const std::string& nick, const std::string& password,
-                 bool wantsHost, uint32_t inviteKey = 0);
+                 bool wantsHost);
     void Disconnect(const std::string& reason = "");
     void Update();  // once per frame, game thread
 
@@ -71,8 +70,13 @@ public:
     std::function<void(uint8_t id)> onPeerJoin;
     std::function<void(uint8_t id)> onPeerLeave;
     std::function<void(uint8_t newHost)> onHostChanged;
-    std::function<void(const std::string&)> onInvite;      // the server learned its invite code
-    const std::string& InviteCode() const { return m_inviteCode; }
+    // where friends connect to, as the server learned it (UPnP, STUN)
+    struct Address {
+        std::string external, lan, upnpError;
+        bool done = false, upnp = false, cgnat = false;
+    };
+    std::function<void(const Address&)> onAddress;
+    const Address& ServerAddress() const { return m_address; }
 
     // World transfer progress (0..1) while downloading, -1 when idle.
     float WorldProgress() const { return m_worldExpected ? (float)m_worldRecv / (float)m_worldExpected : -1.0f; }
@@ -85,12 +89,11 @@ private:
     std::string m_failReason;
     std::string m_nick, m_password;
     bool m_wantsHost = false;
-    uint32_t m_inviteKey = 0;
     uint8_t m_myId = 255, m_hostId = 255;
     std::string m_serverName;
     bool m_friendlyFire = false;
     int m_maxPlayers = proto::kDefaultMaxPlayers;
-    std::string m_inviteCode;
+    Address m_address;
     std::map<uint8_t, PeerInfo> m_peers;
     Handler m_handlers[256] = {};
     std::vector<NetClient::Packet> m_inbox;

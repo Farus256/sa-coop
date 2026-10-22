@@ -4,7 +4,6 @@
 
 #include <algorithm>
 
-#include "common/api/nat-traversal/NatTraversal.h"
 #include "common/api/net/Net.h"
 #include "common/config/version/Version.h"
 #include "common/lib/log/Log.h"
@@ -44,16 +43,7 @@ bool Server::Start(const Config& cfg) {
     }
     enet_host_compress_with_range_coder(m_host);
     m_host->mtu = net::kMtu;
-    // the code always carries a key; it is asked for when the game started this server for its host, or by server.ini
-    m_key = m_cfg.inviteKey ? m_cfg.inviteKey & nat::kInviteKeyMask : nat::NewInviteKey();
-    m_keyRequired = m_cfg.inviteKey != 0 || m_cfg.requireKey;
-    if (m_cfg.internet) {
-        m_internet.Start(m_host, m_cfg.port, m_cfg.turn, m_key);
-    } else if (nat::Endpoint lan{nat::LocalIp(), m_cfg.port}; lan.Valid()) {  // a local network only: its code
-        m_lanCode = nat::MakeInviteCode(lan, m_key);
-        WriteFileBytes(m_cfg.dataDir + L"invite.txt", m_lanCode.data(), m_lanCode.size());
-        LOGI("Код для локальной сети: %s (%s)", m_lanCode.c_str(), lan.ToString().c_str());
-    }
+    m_internet.Start(m_host, m_cfg.port, m_cfg.internet);
 
     // initial world: explicit file from the launcher, otherwise the last uploaded one
     if (!m_cfg.worldFile.empty()) {
@@ -66,8 +56,8 @@ bool Server::Start(const Config& cfg) {
     }
 
     for (int i = 0; i < kMaxPlayers; ++i) m_players[i].id = (uint8_t)i;
-    LOGI("Сервер \"%s\" запущен на порту %u, мест: %d%s%s", m_cfg.name.c_str(), m_cfg.port, m_cfg.maxPlayers,
-         m_cfg.password.empty() ? "" : ", с паролем", m_keyRequired ? ", вход по коду приглашения" : "");
+    LOGI("Сервер \"%s\" запущен на порту %u, мест: %d%s", m_cfg.name.c_str(), m_cfg.port, m_cfg.maxPlayers,
+         m_cfg.password.empty() ? "" : ", с паролем");
     m_running = true;
     return true;
 }
@@ -85,10 +75,12 @@ bool Server::LoadWorld(const std::wstring& path, const std::string& label) {
 void Server::Run() {
     while (m_running) {
         Service();
-        m_internet.Service();
-        if (std::string code; m_internet.TakeNewCode(code)) {
-            SendInvite(nullptr);
-            WriteFileBytes(m_cfg.dataDir + L"invite.txt", code.data(), code.size());  // for dedicated servers
+        if (AddressInfo info; m_internet.TakeNewInfo(info)) {
+            SendAddress(nullptr);
+            if (info.done) {  // for dedicated servers
+                std::string text = (info.external.empty() ? std::string() : info.external + "\r\n") + info.lan;
+                WriteFileBytes(m_cfg.dataDir + L"address.txt", text.data(), text.size());
+            }
         }
         std::vector<std::string> cmds;
         {
@@ -110,7 +102,7 @@ void Server::Run() {
         }
     }
     for (auto& p : m_players)
-        if (p.used && p.peer) enet_peer_disconnect(p.peer, 0);
+        if (p.used && p.peer) enet_peer_disconnect(p.peer, DISCONNECT_SERVER_STOP);
     enet_host_flush(m_host);
     m_internet.Stop();
     enet_host_destroy(m_host);
@@ -164,7 +156,7 @@ void Server::OnConnect(ENetPeer* peer) {
         w.Str("на сервере нет свободных мест");
         w.Str("the server is full");
         net::Send(peer, CH_RELIABLE, w);
-        enet_peer_disconnect_later(peer, 0);
+        enet_peer_disconnect_later(peer, DISCONNECT_REJECTED);
         return;
     }
     uint8_t id = slot->id;
@@ -292,7 +284,7 @@ void Server::HandleHello(Player& p, Reader& r) {
         w.Str(why);
         w.Str(en);
         net::Send(p.peer, CH_RELIABLE, w);
-        enet_peer_disconnect_later(p.peer, 0);
+        enet_peer_disconnect_later(p.peer, DISCONNECT_REJECTED);
         p.joined = false;
     };
     // the version comes first in every hello: an older client's shorter one was told "damaged data" instead
@@ -304,24 +296,18 @@ void Server::HandleHello(Player& p, Reader& r) {
                              "same version", kProtocolVersion, h.protocol));
     if (!read) return reject("клиент прислал повреждённые данные", "the client sent damaged data");
     uint32_t ip = p.peer->address.host;
-    if (KeyFailedTooOften(ip))
-        return reject("слишком много неудачных попыток входа. Подождите минуту", "too many failed attempts to join. Wait a minute");
+    if (PasswordFailedTooOften(ip))
+        return reject("слишком много попыток с неверным паролем. Подождите минуту", "too many wrong passwords. Wait a minute");
     std::string name = SanitizeNickname(h.name);
     if (name.size() < 2)
         return reject("в нике должно быть от 2 до 20 символов (буквы, цифры, знаки _-.[])",
                       "a nickname needs 2 to 20 characters (letters, digits, _-.[])");
     if (ReservedFileName(name))  // the profile is a file named after it: profiles\con.bin is a device on Windows 10
         return reject("такой ник занят системой Windows, выберите другой", "this nickname is reserved by Windows, pick another one");
-    // the invite code is a ticket of its own; the password lets in those who join by address
-    bool keyOk = m_keyRequired && h.inviteKey == m_key;
-    bool passOk = !m_cfg.password.empty() && h.password == m_cfg.password;
-    if (!keyOk && !passOk && (m_keyRequired || !m_cfg.password.empty())) {
-        KeyFailed(ip);
-        if (!m_cfg.password.empty() && !h.password.empty()) return reject("неверный пароль", "wrong password");
-        if (m_keyRequired && h.inviteKey)
-            return reject("код приглашения устарел: попросите у хоста новый", "the invite code is out of date: ask the host for a new one");
-        return reject(m_cfg.password.empty() ? "на этот сервер входят по коду приглашения" : "нужен пароль или код приглашения",
-                      m_cfg.password.empty() ? "this server is joined with its invite code" : "a password or the invite code is needed");
+    if (!m_cfg.password.empty() && h.password != m_cfg.password) {
+        PasswordFailed(ip);
+        if (h.password.empty()) return reject("на сервере пароль, а вы его не ввели", "the server has a password, and you entered none");
+        return reject("неверный пароль", "wrong password");
     }
     if (Player* old = FindByName(name)) {
         // the same player again while its old connection has not timed out (its game crashed, the line dropped): the
@@ -373,7 +359,7 @@ void Server::HandleHello(Player& p, Reader& r) {
     Broadcast(CH_RELIABLE, j, p.id);
 
     SendProfile(p);
-    SendInvite(&p);
+    SendAddress(&p);
     LOGI("%s вошёл как игрок %d%s (версия %s)", p.name.c_str(), p.id, p.isHost ? " [ХОСТ]" : "", h.version.c_str());
     SendChat(nullptr, kServerId, kColorInfo, Format("%s зашёл в игру%s.", p.name.c_str(), p.isHost ? " (хост)" : ""),
              Format("%s joined the game%s.", p.name.c_str(), p.isHost ? " (host)" : ""));
@@ -684,11 +670,13 @@ void Server::SendProfile(Player& p) {
     net::Send(p.peer, CH_RELIABLE, w);
 }
 
-void Server::SendInvite(Player* to) {
-    std::string code = m_cfg.internet ? m_internet.Code() : m_lanCode;
-    if (code.empty()) return;
-    Writer w(S_INVITE);
-    w.Str(code, 32);
+void Server::SendAddress(Player* to) {
+    AddressInfo info = m_internet.Info();
+    Writer w(S_ADDRESS);
+    w.Str(info.external, 32);
+    w.Str(info.lan, 32);
+    w.U8((info.done ? ADDRESS_DONE : 0) | (info.upnp ? ADDRESS_UPNP : 0) | (info.cgnat ? ADDRESS_CGNAT : 0));
+    w.Str(info.upnpError, 128);
     if (to) net::Send(to->peer, CH_RELIABLE, w);
     else Broadcast(CH_RELIABLE, w);
 }
@@ -719,9 +707,9 @@ void Server::Relay(Player& from, uint8_t channel, const uint8_t* data, size_t si
     if (pkt && pkt->referenceCount == 0) enet_packet_destroy(pkt);  // no queue took it
 }
 
-// Eight wrong keys or passwords from one address in a minute close the door to it for a minute: a key of 28 bits is not
-// to be guessed one connection at a time.
-bool Server::KeyFailedTooOften(uint32_t ip) {
+// Eight wrong passwords from one address in a minute close the door to it for a minute: a password is not to be guessed
+// one connection at a time.
+bool Server::PasswordFailedTooOften(uint32_t ip) {
     auto it = m_failures.find(ip);
     if (it == m_failures.end()) return false;
     if (NowMs() - it->second.lastMs > 60000) {
@@ -731,7 +719,7 @@ bool Server::KeyFailedTooOften(uint32_t ip) {
     return it->second.count >= 8;
 }
 
-void Server::KeyFailed(uint32_t ip) {
+void Server::PasswordFailed(uint32_t ip) {
     Failures& f = m_failures[ip];
     if (NowMs() - f.lastMs > 60000) f.count = 0;
     ++f.count;
@@ -764,7 +752,7 @@ void Server::Kick(Player& p, const std::string& reason, const std::string& reaso
     w.Str(reason);
     w.Str(reasonEn);
     net::Send(p.peer, CH_RELIABLE, w);
-    enet_peer_disconnect_later(p.peer, 0);
+    enet_peer_disconnect_later(p.peer, DISCONNECT_KICKED);
     Leave(p, LEAVE_KICKED, reason);
 }
 
