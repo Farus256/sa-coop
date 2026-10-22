@@ -14,37 +14,26 @@ SA:COOP is a mod for GTA San Andreas that lets two to sixteen players go through
 network. One player is the host: the game runs on their save, and they start the missions. The others connect to
 them and play in the same world as characters of their own, with their own money, skills and look.
 
-> This is a fork of [SA:COOP](https://github.com/Karimov-Akbar/sa-coop) by Karimov-Akbar (MIT license). The original
-> is made for two players, the fork for 2–16. See [What's new in the fork](#whats-new-in-the-fork-030).
+> A fork of [SA:COOP](https://github.com/Karimov-Akbar/sa-coop) by Karimov-Akbar (MIT license). The original is for
+> two players, this one for up to 16.
 
-## What's new in the fork (0.3.0)
+## Differences from the original
 
-- **Up to 16 players.** The host picks the number of places (2–16, 4 by default) on the "Host a game" tab of the F9
-  window, or with `max_players` in `coop\server.ini`.
-- **Traffic by distance.** Players near each other (within 350 m) get each other's state 30 times a second, distant
-  ones twice a second. Another game's cars and pedestrians appear for a player only near them (cars within 190 m,
-  pedestrians within 135 m); distant ones stay records and do not fill the game's pools.
-- **The invite code is a ticket.** The 16-character code `XXXX-XXXX-XXXX-XXXX` holds a random server key besides the
-  address. You join with the code or with the password. After 8 wrong codes a minute the server blocks that address
-  for a minute. Old 12-character codes still parse.
-- **Missions.** A marker waits only for the players within 200 m of it; distant ones catch up later. The host can
-  start without the missing ones with `/go`. The marker shows whom it waits for.
-- **Cutscenes.** Up to three partners stand next to CJ, each in a spot of their own; the others watch on their screen.
-- **Player colours** for the name over the head, in the chat, in the F2 list and on the radar.
-- **Commands:** `/tp <nick>`, `/tphere <nick>`, `/tphere all` (host), `/go` (host), `/mute <nick>`, `/unmute <nick>`.
-- **The microphone** opens only while B is held and closes after 30 s of silence (unless voice is always on).
-- **A shared world per group.** Where players are together, one game makes the pedestrians, traffic and trains: the
-  host's, or the lowest-numbered player's. Groups in different parts of the map each get their own.
-- **Linux and macOS builds** (`LLVM_MINGW`) and server tests (`python tools/build.py servertest`).
-- **Based on the original 0.2.7.** Everything new there is in the fork too: objects in hand, the phone at the ear,
-  pedestrian speech, police roadblocks, story characters as the player model, quick reconnect and crash fixes. Objects
-  and speech go only to the players nearby, and the people of a player who leaves are taken over by the game of the
-  player nearest to them rather than by every game at once.
+It is based on the original 0.2.7 and keeps everything from it. Added:
 
-Version 0.3.0 does not connect to the original 0.2.x, 0.2.7 included: every player needs to update.
+- up to 16 players; the host sets the number of places in the F9 window or in `coop\server.ini` (`max_players`,
+  4 by default)
+- other players' cars and pedestrians only appear near you, and distant players update less often, so the network
+  and the game keep up
+- the invite code works as a pass: without it or the password you can't join
+- a mission marker only waits for players within 200 m, and `/go` starts without the rest
+- up to three partners stand next to CJ in cutscenes
+- every player has a colour in the chat, over the head and on the radar
+- new commands `/tp`, `/tphere`, `/go`, `/mute`, `/unmute`
+- Linux and macOS builds, server tests
 
-**Status:** the server and the protocol pass automated tests with 16 bots (275 checks). Behaviour in the game with
-three or more players has not been tried in practice yet — please report bugs with `coop\coop.log`.
+Not compatible with the original 0.2.x versions, everyone has to update. Playing with three or more people has
+barely been tested yet, so if something breaks, send `coop\coop.log` in Issues.
 
 ![The host and the partner on Grove Street](docs/images/en/street-host.jpg)
 
@@ -164,7 +153,7 @@ The host presses F9, opens the "Host a game" tab, picks a save and clicks "Start
 already in the game, the server is created from the current game. The "Friendly fire" checkbox above the button
 lets the players hurt each other, and "Players: up to N" sets the places (2–16). A couple of seconds later the
 window shows a code like `XXXX-XXXX-XXXX-XXXX`, which the host sends to the friends. The code contains the host's
-external IP address and the server's key, so only send it to the people you play with: it is the pass to the server.
+external IP address and the server's key, so only send it to the people you play with.
 
 The friends open the "Join a game" tab, paste the code and click "Connect". After that, the host's world loads on
 their side.
@@ -207,8 +196,8 @@ A unique beginning of a nickname is enough.
 
 ## Limitations
 
-- The more players are together, the more the host uploads (the server runs on the host's PC): about 8–10 Mbit/s
-  for 16 players in one place, about 0.5 Mbit/s for 4. Players spread over the map load the network much less.
+- The server runs on the host's PC, and its upload grows with the number of players near each other: about
+  8-10 Mbit/s with all 16 in one place, about 0.5 Mbit/s with four.
 - A cutscene shows at most three partners next to CJ.
 - Only the host can start story missions, Cesar's races and turf wars. When a mission has CJ carry something, like
   the crates in the house robbery with Ryder, the host does it.
@@ -293,7 +282,7 @@ inside and why it is built this way is described in [docs/ARCHITECTURE.md](docs/
 ## License
 
 The SA:COOP code is released under the MIT license (see [LICENSE](LICENSE)): the original project © Karimov-Akbar,
-the fork's changes © their authors. ENet and MinHook have their own
+the fork's changes © Farus. ENet and MinHook have their own
 licenses, and their texts are in `third_party` and in the `coop\licenses` folder of the archive.
 
 SA:COOP is not affiliated with Rockstar Games or Take-Two Interactive. You need your own copy of GTA San Andreas,
