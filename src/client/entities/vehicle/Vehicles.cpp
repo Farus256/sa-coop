@@ -1048,10 +1048,10 @@ void Vehicles::OnPostProcess() {
             nv.lastChangeMs = now;
             continue;
         }
-        // A car of the host's mission (its id has the host's prefix) the partner drove was the partner's game's from then
+        // A car of the host's mission (its id has the host's number) the partner drove was the partner's game's from then
         // on, and the host's mission moving, freezing, mending or deleting it only touched its copy there, which the
         // owner's states undid. Left standing empty for 2 s, it goes back to the host.
-        if (nv.script && !Net().IsHost() && (nv.netId >> 12) == Net().HostId() + 1 && !nv.veh->Driver() &&
+        if (nv.script && !Net().IsHost() && proto::EntityMaker(nv.netId) == Net().HostId() && !nv.veh->Driver() &&
             !HasPlayerInside(nv.veh) && now - nv.lastChangeMs > 2000) {
             nv.owner = Net().HostId();
             nv.hasState = false;

@@ -31,6 +31,7 @@ inline PlayerMask Bit(uint8_t id) { return id < kMaxPlayers ? (PlayerMask)(1u <<
 inline uint16_t EntityId(uint8_t owner, uint16_t serial) {
     return (uint16_t)(((owner & 0x0F) << 12) | (serial % 4095 + 1));
 }
+inline uint8_t EntityMaker(uint16_t id) { return (uint8_t)(id >> 12); }  // whose game made it (its id says)
 
 enum Channel : uint8_t {
     CH_RELIABLE = 0,  // ordered, reliable: events

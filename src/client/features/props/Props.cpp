@@ -3,7 +3,8 @@
 // so the other game showed the person without the thing. Each game reports such objects of its player and of the peds
 // it shares (Peds): the model, how the object hangs on the person, its own animation, size and visibility. The other
 // game hangs the same object on its copy of that person, without collision. Let go (the canopy on landing), the object
-// stays where the owner's is until that one is gone.
+// stays where the owner's is until that one is gone. A thing goes to the players within kPropRange of it only, and to one
+// that comes near later then; out of range its copy goes.
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -32,6 +33,7 @@ constexpr int TASK_SIMPLE_HOLD_ENTITY = 307, TASK_SIMPLE_PICKUP_ENTITY = 308, TA
 constexpr uint8_t HOLD_ENTITY_UPDATE_TRANSLATION_ONLY = 0x10;
 constexpr int kPedNodes = 19;
 constexpr uint64_t kLooseKeepMs = 30000;  // a let-go object is followed this long at most
+constexpr float kPropRange = 250.0f;      // the players this near a thing have it (a remote ped is made within 190 m)
 enum : uint8_t { OP_STATE = 1, OP_GONE = 2 };
 enum : uint8_t { BY_PLAYER = 0, BY_PED = 1 };
 enum : uint8_t { HANG_ATTACHED = 0, HANG_HELD = 1, HANG_LOOSE = 2 };
@@ -125,11 +127,11 @@ struct Owned {
     Prop sent;
     float animTime = 0;    // the latest seen: a non-looped one going back started again
     uint64_t looseMs = 0;  // let go at
+    proto::PlayerMask sentTo = 0;  // the players that have it
 };
 std::map<uint16_t, Owned> g_owned;
 uint16_t g_nextId = 1;
 uint64_t g_scanMs = 0;
-bool g_resend = false;  // a peer (re)started its game: everything again
 
 // the host's mission objects go over as such (mission-objects), with their moves
 bool MissionObject(int handle) {
@@ -176,20 +178,22 @@ bool ReadLook(CObject* o, Prop& p) {
     return true;
 }
 
-void SendState(uint16_t id, const Prop& p) {
+void SendState(uint16_t id, const Prop& p, proto::PlayerMask to) {
     Writer w(proto::G_PROP);
     w.U8(OP_STATE);
     w.U16(id);
     Write(w, p);
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
 }
 
-void SendGone(uint16_t id) {
+void SendGone(uint16_t id, proto::PlayerMask to) {
     Writer w(proto::G_PROP);
     w.U8(OP_GONE);
     w.U16(id);
-    Net().Send(proto::CH_RELIABLE, w);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
 }
+
+proto::PlayerMask Audience(CObject* o) { return PlayersNear(o->GetPosition(), o->AreaCode(), kPropRange, false); }
 
 void Update(uint16_t id, Owned& ow, Prop p) {
     const Prop& s = ow.sent;
@@ -200,8 +204,12 @@ void Update(uint16_t id, Owned& ow, Prop p) {
     if (other || again)
         LOGD("Prop %04X animation %s/%d (flags %04X, %.2f s)", id, p.animBlock >= 0 ? (const char*)anim::Block(p.animBlock) : "-",
              p.animIdx, p.animFlags, p.animTime);
-    if (!g_resend && !Differs(p, s)) return;
-    SendState(id, p);
+    proto::PlayerMask want = Audience(ow.obj);
+    if (proto::PlayerMask left = ow.sentTo & ~want) SendGone(id, left);
+    proto::PlayerMask to = Differs(p, s) ? want : want & ~ow.sentTo;  // a change to all, else to the new ones only
+    ow.sentTo = want;
+    if (!to) return;
+    SendState(id, p, to);
     ow.sent = p;
 }
 
@@ -300,7 +308,7 @@ void Scan() {
         Update(id, ow, p);
     }
     for (uint16_t id : gone) {
-        SendGone(id);
+        SendGone(id, g_owned[id].sentTo);
         g_owned.erase(id);
         LOGI("Prop %04X gone", id);
     }
@@ -316,12 +324,12 @@ void Scan() {
         p.animRev = 1;
         ow.sent = p;
         ow.animTime = p.animTime;
-        SendState(id, p);
+        ow.sentTo = Audience(o);
+        SendState(id, p, ow.sentTo);
         LOGI("Prop %04X: model %d %s by %s %04X", id, p.model,
              p.hang == HANG_HELD ? "held" : p.hang == HANG_ATTACHED ? "attached" : "standing in the street",
              p.by == BY_PLAYER ? "our player" : "ped", p.holder);
     }
-    g_resend = false;
 }
 
 // ---------------------------------------------------------------- the other game's
@@ -558,7 +566,7 @@ public:
     }
 
     void OnPeerResync(uint8_t id) override {  // its game started over: its props of before are gone there
-        g_resend = true;
+        for (auto& [pid, ow] : g_owned) ow.sentTo &= (proto::PlayerMask)~proto::Bit(id);  // ours go to it again
         DeleteCopies(id);
     }
     void OnPeerLeave(uint8_t id) override { DeleteCopies(id); }

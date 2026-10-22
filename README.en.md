@@ -36,10 +36,14 @@ them and play in the same world as characters of their own, with their own money
 - **A shared world per group.** Where players are together, one game makes the pedestrians, traffic and trains: the
   host's, or the lowest-numbered player's. Groups in different parts of the map each get their own.
 - **Linux and macOS builds** (`LLVM_MINGW`) and server tests (`python tools/build.py servertest`).
+- **Based on the original 0.2.7.** Everything new there is in the fork too: objects in hand, the phone at the ear,
+  pedestrian speech, police roadblocks, story characters as the player model, quick reconnect and crash fixes. Objects
+  and speech go only to the players nearby, and the people of a player who leaves are taken over by the game of the
+  player nearest to them rather than by every game at once.
 
-Version 0.3.0 does not connect to the original 0.2.x: every player needs to update.
+Version 0.3.0 does not connect to the original 0.2.x, 0.2.7 included: every player needs to update.
 
-**Status:** the server and the protocol pass automated tests with 16 bots (274 checks). Behaviour in the game with
+**Status:** the server and the protocol pass automated tests with 16 bots (275 checks). Behaviour in the game with
 three or more players has not been tried in practice yet — please report bugs with `coop\coop.log`.
 
 ![The host and the partner on Grove Street](docs/images/en/street-host.jpg)

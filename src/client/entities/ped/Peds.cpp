@@ -984,9 +984,25 @@ void Peds::OnSessionEnd() {
     m_wasReady = false;
 }
 
-// The player left: its people stay in this game as its own (deleted, they left its cars driverless in the street, as MTA
-// keeps the elements and picks a new syncer).
+// The player left: its people stay in the game of the player nearest to them as its own (deleted, they left its cars
+// driverless in the street, as MTA keeps the elements and picks a new syncer); the others' copies go, and that game
+// announces them again under its own ids.
 void Peds::OnPeerLeave(uint8_t id) { DropMirrorsOf(id, true); }
+
+// Of the players still here, ours is the nearest to p (ties: the lower number), by the places last heard. Each game
+// that had a copy of a leaving player's ped asks this, and one of them keeps it: every one keeping its copy made the
+// ped several times over.
+static bool NearestOfAll(const CVector& p, uint8_t leaver) {
+    CPlayerPed* me = FindPlayerPed(0);
+    if (!me) return false;
+    float mine = (p - me->GetPosition()).Length();
+    for (auto& [pid, rp] : Players::Instance().All()) {
+        if (pid == leaver || !rp.hasState || !Net().Peer(pid) || NowMs() - rp.stateRecvMs > 5000) continue;
+        float d = (p - rp.state.pos).Length();
+        if (d < mine || (d == mine && pid < Net().MyId())) return false;
+    }
+    return true;
+}
 
 void Peds::DropMirrorsOf(uint8_t id, bool keep) {
     std::vector<uint16_t> mirrors;
@@ -994,7 +1010,7 @@ void Peds::DropMirrorsOf(uint8_t id, bool keep) {
         if (np.owner == id) mirrors.push_back(pid);
     for (uint16_t pid : mirrors) {
         NetPed& np = m_byId[pid];
-        bool adopt = keep && IsAlive(np) && !IsPedDead(np.ped);
+        bool adopt = keep && IsAlive(np) && !IsPedDead(np.ped) && NearestOfAll(np.ped->GetPosition(), id);
         if (adopt) Adopt(np);
         Forget(pid, !adopt);
     }

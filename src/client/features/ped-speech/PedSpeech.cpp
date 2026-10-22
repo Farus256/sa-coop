@@ -77,7 +77,8 @@ void __fastcall HookLoadAndPlaySpeech(void* s, void* edx, uint32_t delay) {
     w.U32(delay);
     w.F32(Field<float>(s, 0xAC));    // m_EventVolume
     w.U8(Field<uint8_t>(s, 0x9C));   // m_IsForcedAudible
-    Net().Send(proto::CH_RELIABLE, w);
+    // heard within 40 m of a camera: to the players near enough for that (a camera may hang a little behind its player)
+    Net().SendTo(PlayersNear(e->GetPosition(), e->AreaCode(), kHeardWithin + 20.0f, false), proto::CH_RELIABLE, w);
 }
 
 // a free slot of the peds' ones, in turn as CAEPedSpeechAudioEntity::CanWePlayGlobalSpeechContext takes them, without

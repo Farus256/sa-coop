@@ -324,7 +324,14 @@ void Sixteen(const std::wstring& exe) {
     for (auto& b : w.bots) chats += b->Has(C_CHAT);
     CHECK(chats == 0, "a service message passed through C_RELAY_TO");
 
-    // unreliable state of everyone at 30 Hz for a second: nobody drops off
+    // unreliable state of everyone at 30 Hz for a second: nobody drops off. States go to players in the game only: the
+    // last one stays in the menu and gets none
+    for (size_t i = 0; i + 1 < w.bots.size(); ++i) {
+        Writer st(C_STATUS);
+        st.U8(STATUS_INGAME);
+        w.bots[i]->Send(CH_RELIABLE, st);
+    }
+    w.Pump(300);
     for (int frame = 0; frame < 30; ++frame) {
         for (auto& b : w.bots) {
             Writer st = GameMsg(G_PLAYER_ONFOOT, (uint32_t)frame);
@@ -338,8 +345,9 @@ void Sixteen(const std::wstring& exe) {
     for (auto& b : w.bots) dropped += b->disconnected;
     CHECK(dropped == 0, "%d dropped under load", dropped);
     int states = 0;
-    for (auto& b : w.bots) states += b->Count(G_PLAYER_ONFOOT);
-    CHECK(states > 16 * 15 * 30 * 8 / 10, "states relayed: %d of %d", states, 16 * 15 * 30);
+    for (size_t i = 0; i + 1 < w.bots.size(); ++i) states += w.bots[i]->Count(G_PLAYER_ONFOOT);
+    CHECK(states > 15 * 15 * 30 * 8 / 10, "states relayed: %d of %d", states, 15 * 15 * 30);
+    CHECK(w.bots.back()->Count(G_PLAYER_ONFOOT) == 0, "states reached a player in the menu");
 }
 
 void Keys(const std::wstring& exe) {
@@ -422,14 +430,17 @@ void Profiles(const std::wstring& exe) {
     if (!s.Start(exe, 7817, L"--max 4")) return ++g_failed, void();
     World w;
     Join(w, s.port, "host");
+    // a device name (profiles\con.bin would be the console) is refused as a nickname
     Bot& con = Join(w, s.port, "con");
-    CHECK(con.welcomed, "the nickname CON (%s)", con.rejectReason.c_str());
+    CHECK(!con.welcomed && !con.rejectReason.empty(), "the nickname CON was let in");
+    Bot& ok = Join(w, s.port, "Player_2");
     Writer p(C_PROFILE_SAVE);
     std::vector<uint8_t> blob(100, 7);
     p.Bytes(blob.data(), blob.size());
-    con.Send(CH_RELIABLE, p);
+    ok.Send(CH_RELIABLE, p);
     w.Pump(500);
-    CHECK(FileExists(s.data + L"profiles\\_con_.bin"), "its profile is a file (_con_.bin)");
+    CHECK(FileExists(s.data + L"profiles\\player_2.bin") || FileExists(s.data + L"profiles\\Player_2.bin"),
+          "a profile is saved");
 }
 
 }  // namespace
