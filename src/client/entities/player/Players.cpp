@@ -16,7 +16,6 @@
 #include "entities/world-share/WorldShare.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
-#include "shared/game/HudScale.h"
 #include "shared/game/Script.h"
 #include "shared/lib/memory/Memory.h"
 #include "shared/ui/chat/Chat.h"
@@ -440,9 +439,7 @@ void DrawWantedStars(int level, float right, float midY, uint8_t alpha) {
 using HudDrawFn = void(__cdecl*)();
 HudDrawFn g_origHudDraw = nullptr;
 void __cdecl HookHudDraw() {
-    hud::Begin();  // the HUD in its own proportions (HudScale); the icons over heads are the world's places, after it
     g_origHudDraw();
-    hud::End();
     if (Net().Online()) Players::Instance().DrawWeaponIcons();
 }
 

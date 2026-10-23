@@ -35,7 +35,6 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
   default, so ALT+TAB is instant (`exclusive_fullscreen = 1` in `coop\coop.ini` brings back the real full screen
   with the menu's resolution)
 - a longer draw distance than the game's (`draw_distance` and `lod_distance` in `coop\coop.ini`, `/draw` in the game)
-- the HUD in its own proportions on a wide screen: a round radar, icons and letters not stretched (`hud_widescreen`)
 - everyone's map waypoints for everyone: the host's crosshair is red, the others' green, yellow, blue, pink
 - a wounded player can be revived: it lies for 30 seconds while a partner presses `E` and gives it CPR
 - the host's mission seats the partners near it in its car, or stands them on the truck next to CJ
