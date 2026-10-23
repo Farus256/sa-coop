@@ -85,31 +85,46 @@ bool HelpNear(CPlayerPed* me) {
     return false;
 }
 
-// ---- the people of this game near a wounded player: a paramedic or a Families member comes and revives it, a rival
-// gang's member comes and pisses on it. Only this game's own people (a copy of another game's is moved by that game),
-// no mission people, none in a car.
-constexpr float kNpcReach = 40.0f;
+// ---- the people of this game near a wounded player: the nearest one within 30 m (a passer-by, a paramedic, a cop, a
+// gang member: anyone but the rival gangs) runs to it and revives it, a rival gang's member comes and kicks it while it
+// lies there (each kick takes 3 seconds off its time). Only this game's own people (a copy of another game's is moved
+// by that game), no mission people, none in a car.
+constexpr float kNpcReach = 30.0f;
+constexpr uint64_t kKickEveryMs = 1300, kKickCostMs = 3000;
 constexpr uint64_t kNpcWayMs = 25000;  // an NPC that has not got there by then gives up
 constexpr int PED_TYPE_GANG1 = 7, PED_TYPE_GANG2 = 8, PED_TYPE_GANG3 = 9, PED_TYPE_GANG4 = 10, PED_TYPE_MEDIC = 18;
 constexpr uint8_t PED_MISSION = 2;    // CPed::m_nCreatedBy
 constexpr uint32_t kNeverTarget = 1u << 28;  // CPed::bNeverEverTargetThisPed (the second flags word)
 constexpr int kBackOffField = 0x1E;   // CWanted's flags: m_bEverybodyBackOff is bit 2
-enum class Role { Medic, Pisser };
 struct Npc {
     int handle = -1;
     int stage = 0;   // 0 on the way, 1 there
     uint64_t since = 0, taskMs = 0;
     CVector spot{};
-    bool grove = false;
+    int kind = 0;    // the helper: 0 a passer-by, 1 a paramedic, 2 a Families member, 3 a cop
+    uint64_t kickMs = 0;
     CPed* Ped() const { return handle >= 0 ? GetPed(handle) : nullptr; }
-} g_medic, g_pisser;
+} g_medic, g_kicker;
 bool g_npcIgnore = false;  // the others leave this wounded player alone (we set it)
 uint8_t g_backOffWas = 0;
 
-bool Helps(CPed* p) { return p->PedType() == PED_TYPE_MEDIC || p->PedType() == PED_TYPE_GANG2; }
 bool Rival(CPed* p) {
     int t = p->PedType();
     return t == PED_TYPE_GANG1 || t == PED_TYPE_GANG3 || t == PED_TYPE_GANG4;  // Ballas, Vagos, Rifa
+}
+bool Helps(CPed* p) { return !Rival(p) && p->PedType() >= 4; }  // people (not the players, PED_TYPE_PLAYER1..3)
+constexpr int PED_TYPE_COP = 6;
+int KindOf(CPed* p) {
+    int t = p->PedType();
+    return t == PED_TYPE_MEDIC ? 1 : t == PED_TYPE_GANG2 ? 2 : t == PED_TYPE_COP ? 3 : 0;
+}
+std::string HelperName(int kind) {
+    switch (kind) {
+        case 1: return TR("врач", "a paramedic");
+        case 2: return TR("парень из Grove Street", "a Grove Street homie");
+        case 3: return TR("полицейский", "a cop");
+    }
+    return TR("прохожий", "a passer-by");
 }
 
 CPed* NearestNpc(CPlayerPed* me, bool helper, CPed* except = nullptr) {
@@ -216,7 +231,7 @@ void EndDown(CPlayerPed* me) {
     g_wantDown = false;
     g_rescuer = -1;
     ReleaseNpc(g_medic);
-    ReleaseNpc(g_pisser);
+    ReleaseNpc(g_kicker);
     LeaveAlone(me, false);
     if (me) me->PhysicalFlags() = (me->PhysicalFlags() & ~kProofBits) | g_savedProofs;
     Pad()->DisablePlayerControls &= (uint16_t)~kOwnControls;
@@ -344,12 +359,6 @@ void UpdateRescuer(CPlayerPed* me) {
     }
 }
 
-bool AnimExists(const char* anim, const char* block) {
-    if (!EnsureBlock(block)) return false;
-    void* b = Call<0x4D3940, void*>(block);  // CAnimManager::GetAnimationBlock
-    return b && Call<0x4D42F0, void*>(anim, b);  // CAnimManager::GetAnimation(name, block)
-}
-
 void Face(int handle, CPed* p, const CVector& at) {
     CVector d = at - p->GetPosition();
     Cmd(0x0173).I(handle).F(std::atan2(-d.x, d.y) * 57.29578f).Run();  // SET_CHAR_HEADING
@@ -369,7 +378,7 @@ void Pick(Npc& n, CPed* p, CPlayerPed* me, float dist) {
     n = Npc{};
     n.handle = GetPedRef(p);
     n.since = NowMs();
-    n.grove = p->PedType() == PED_TYPE_GANG2;
+    n.kind = KindOf(p);
     CVector d = p->GetPosition() - me->GetPosition();
     float len = std::max(0.1f, std::sqrt(d.x * d.x + d.y * d.y));
     n.spot = me->GetPosition() + CVector{d.x / len * dist, d.y / len * dist, 0.0f};
@@ -386,9 +395,9 @@ void UpdateNpcs(CPlayerPed* me) {
         m = nullptr;
     }
     if (!m && g_rescuer < 0 && now - g_downEnd + kDownMs > 1500) {  // a moment after the fall
-        if (CPed* p = NearestNpc(me, true, g_pisser.Ped())) {
+        if (CPed* p = NearestNpc(me, true, g_kicker.Ped())) {
             Pick(g_medic, p, me, 0.9f);
-            LOGI("Wounded: a %s comes to help", g_medic.grove ? "Families member" : "paramedic");
+            LOGI("Wounded: an NPC (kind %d, ped type %d) comes to help", g_medic.kind, p->PedType());
             m = p;
         }
     }
@@ -401,32 +410,42 @@ void UpdateNpcs(CPlayerPed* me) {
         } else if (g_medic.stage == 1) {
             g_downEnd = std::max(g_downEnd, now + 1500);  // not while it is being revived
             if (now - g_medic.taskMs >= kCprMs) {
-                std::string who = g_medic.grove ? TR("парень из Grove Street", "a Grove Street homie") : TR("врач", "a paramedic");
-                Revive(me, who);  // releases it
+                Revive(me, HelperName(g_medic.kind));  // releases it
                 return;
             }
         }
     }
-    // the one who pisses on it
-    CPed* q = g_pisser.Ped();
-    if (g_pisser.handle >= 0 && (!q || q->Health() <= 0.0f || q->InVehicle() || (g_pisser.stage == 0 && now - g_pisser.since > kNpcWayMs))) {
-        ReleaseNpc(g_pisser);
+    // the one who kicks it
+    CPed* q = g_kicker.Ped();
+    if (g_kicker.handle >= 0 && (!q || q->Health() <= 0.0f || q->InVehicle() || (g_kicker.stage == 0 && now - g_kicker.since > kNpcWayMs))) {
+        ReleaseNpc(g_kicker);
         q = nullptr;
     }
     if (!q && now - g_downEnd + kDownMs > 2500) {
         if (CPed* p = NearestNpc(me, false)) {
-            Pick(g_pisser, p, me, 0.8f);
-            LOGI("Wounded: a rival gang member comes over");
+            Pick(g_kicker, p, me, 0.8f);
+            LOGI("Wounded: a rival gang member comes to finish it off");
             q = p;
         }
     }
-    if (q && g_pisser.stage == 0 && Approach(g_pisser, q, me, 4)) {  // walking
-        g_pisser.stage = 1;
-        Face(g_pisser.handle, q, me->GetPosition());
-        if (AnimExists("Piss_loop", "PAULNMAC"))
-            Cmd(0x0605).I(g_pisser.handle).S("Piss_loop").S("PAULNMAC").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
-        else
-            Cmd(0x0605).I(g_pisser.handle).S("fucku").S("PED").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
+    if (q && g_kicker.stage == 0 && Approach(g_kicker, q, me, 6)) {  // running
+        g_kicker.stage = 1;
+        g_kicker.kickMs = 0;
+        Face(g_kicker.handle, q, me->GetPosition());
+    }
+    if (q && g_kicker.stage == 1 && now - g_kicker.kickMs >= kKickEveryMs) {
+        if ((q->GetPosition() - me->GetPosition()).Length2D() > 2.0f) {  // pushed away: back to it
+            g_kicker.stage = 0;
+            g_kicker.since = now;
+            return;
+        }
+        // a stamp with the foot (the fight's kick at a man on the ground, PED's FightA_G), again and again
+        Face(g_kicker.handle, q, me->GetPosition());
+        Cmd(0x0605).I(g_kicker.handle).S("FightA_G").S("PED").F(8.0f).I(0).I(0).I(0).I(0).I(-1).Run();
+        if (g_kicker.kickMs) {  // the first one swings, the next ones land
+            g_downEnd = g_downEnd > now + kKickCostMs ? g_downEnd - kKickCostMs : now;
+        }
+        g_kicker.kickMs = now;
     }
 }
 
@@ -541,11 +560,11 @@ std::string ReviveText(std::string& hint) {
         if (g_rescuer >= 0) {
             hint = Format(TR("%s откачивает вас", "%s is reviving you"), Name(g_rescuer).c_str());
         } else if (g_medic.handle >= 0) {
-            bool there = g_medic.stage == 1;
-            hint = g_medic.grove ? (there ? TR("Парень из Grove Street откачивает вас", "A Grove Street homie is reviving you")
-                                          : TR("К вам бежит парень из Grove Street", "A Grove Street homie runs to you"))
-                                 : (there ? TR("Врач откачивает вас", "A paramedic is reviving you")
-                                          : TR("К вам бежит врач", "A paramedic runs to you"));
+            std::string who = HelperName(g_medic.kind);
+            hint = g_medic.stage == 1 ? Format(TR("Вас откачивает %s", "%s is reviving you"), who.c_str())
+                                      : Format(TR("К вам бежит %s", "%s runs to you"), who.c_str());
+        } else if (g_kicker.handle >= 0 && g_kicker.stage == 1) {
+            hint = TR("Вас добивают ногами!", "You are being kicked to death!");
         } else {
             hint = Format(TR("Ждите напарника · удерживайте %s, чтобы сдаться", "Wait for a partner · hold %s to give up"),
                           Key().c_str());

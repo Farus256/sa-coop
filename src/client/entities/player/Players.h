@@ -43,6 +43,10 @@ struct RemotePlayer {
     uint64_t duckOffMs = 0;     // since when the copy's crouch differs from its owner's (a lost crouch press)
     bool muted = false;         // its voice is not played here (/mute)
     bool downShown = false;     // it lies wounded here (F_DOWNED)
+    // its shots: the count its owner sent last, the ones its copy here still owes, when the copy last fired
+    bool shotsKnown = false;
+    uint8_t shotsSeen = 0, shotsOwed = 0;
+    uint64_t shotsOwedMs = 0, copyFiredMs = 0;
     uint64_t downCheckMs = 0;
 
     // Its ped's own CPlayerPedData (wanted level, clothes, look pitch, gun spin...): every remote player is a ped of

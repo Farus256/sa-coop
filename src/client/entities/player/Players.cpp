@@ -317,6 +317,7 @@ void __cdecl HookDeleteChar(CPed* ped) {
 using ProcessControlFn = void(__fastcall*)(CPlayerPed*, void*);
 ProcessControlFn g_origProcessControl = nullptr;
 bool g_inRemoteContext = false;
+void FireOwedShot(RemotePlayer& rp);
 
 void __fastcall HookPlayerProcessControl(CPlayerPed* self, void* edx) {
     RemotePlayer* rp = g_inRemoteContext ? nullptr : Players::Instance().FindByPed(self);
@@ -333,6 +334,7 @@ void __fastcall HookPlayerProcessControl(CPlayerPed* self, void* edx) {
     g_inRemoteContext = true;
     g_origProcessControl(self, edx);
     DriveBy(self);  // still under its pad and camera
+    FireOwedShot(*rp);
     g_inRemoteContext = false;
     if (follow) *follow = followSaved;
     RestoreLocal(saved);
@@ -629,8 +631,71 @@ void KeepDriversGoing() {
         }
 }
 
+// ---- shots. A remote player's shots are its pad replayed here: a tap of the fire button whose press was lost on the
+// way (the state goes unreliably) was a shot the others never saw nor heard, a pistol's or a shotgun's most of all.
+// Each game counts its player's shots (CWeapon::Fire, the guns), the count goes in its state, and a copy that fired
+// fewer than its owner fires the missing one itself (towards where its owner's camera looks), once its pad had its
+// chance. Its damage counts nowhere here (Damage drops a remote player's), its flash and its sound are what show.
+uint8_t g_localShots = 0;  // this game's player's shots, counted round
+bool CountedGun(int type) { return (type >= 22 && type <= 34) || type == 38; }  // the projectiles and fire go their own way
+
+using WeaponFireFn = bool(__fastcall*)(CWeapon*, void*, CEntity*, CVector*, CVector*, CEntity*, CVector*, CVector*);
+WeaponFireFn g_origWeaponFire = nullptr;
+bool g_forcingShot = false;
+bool __fastcall HookWeaponFire(CWeapon* w, void* edx, CEntity* by, CVector* start, CVector* barrel, CEntity* target,
+                               CVector* targetPos, CVector* alt) {
+    int type = w->type;
+    bool fired = g_origWeaponFire(w, edx, by, start, barrel, target, targetPos, alt);
+    if (!fired || !by || !by->IsPed() || !CountedGun(type) || !Net().Online()) return fired;
+    if (by == (CEntity*)FindPlayerPed(0) && !g_inRemoteContext) {
+        ++g_localShots;
+    } else if (RemotePlayer* rp = Players::Instance().FindByPed((CPed*)by)) {
+        rp->copyFiredMs = NowMs();
+        if (rp->shotsOwed && !g_forcingShot) --rp->shotsOwed;
+    }
+    return fired;
+}
+
+void NoteShots(RemotePlayer& rp, uint8_t shots) {
+    if (rp.shotsKnown) {
+        uint8_t more = (uint8_t)(shots - rp.shotsSeen);
+        if (more && more < 64) {
+            rp.shotsOwed = (uint8_t)std::min(3, rp.shotsOwed + more);
+            rp.shotsOwedMs = NowMs();
+        }
+    }
+    rp.shotsSeen = shots;
+    rp.shotsKnown = true;
+}
+
+// in the copy's own processing (its pad, camera and stats in place): the shot its pad did not fire
+void FireOwedShot(RemotePlayer& rp) {
+    uint64_t now = NowMs();
+    if (!rp.shotsOwed || now - rp.shotsOwedMs < 150 || now - rp.copyFiredMs < 150) return;
+    CPed* ped = rp.ped;
+    CWeapon& w = ped->ActiveWeapon();
+    if (!CountedGun(w.type) || w.type != rp.state.weapon || ped->Health() <= 0.0f ||
+        (ped->InVehicle() && !FindTaskOf(ped, 1022 /* TASK_SIMPLE_GANG_DRIVEBY */))) {
+        rp.shotsOwed = 0;  // nothing to fire it with here: let it go
+        return;
+    }
+    const CameraState& c = rp.state.cam;
+    CVector from = ped->GetPosition() + c.sourceOffset, to = from + c.front.Normalized() * 80.0f;
+    if (w.ammoInClip <= 0) w.ammoInClip = 1;
+    if (w.state != 0 && w.state != 1) w.state = 0;  // WEAPONSTATE_READY: a reload here is not one there
+    g_forcingShot = true;
+    bool fired = CallMethod<0x742300, bool>(&w, (CEntity*)ped, (CVector*)nullptr, (CVector*)nullptr, (CEntity*)nullptr, &to,
+                                             (CVector*)nullptr);  // CWeapon::Fire
+    g_forcingShot = false;
+    --rp.shotsOwed;
+    rp.shotsOwedMs = now;
+    rp.copyFiredMs = now;
+    LOGD("Remote player %d: a missed shot fired (%s)", rp.id, fired ? "ok" : "refused");
+}
+
 void FillCommon(OnFootState& st, CPlayerPed* me) {
     st.flags = MakesFlags();
+    st.shots = g_localShots;
     st.health = ClampByte(me->Health());
     st.wanted = WantedLevel(me);
     st.armour = ClampByte(me->Armour());
@@ -660,6 +725,7 @@ void FillCommon(OnFootState& st, CPlayerPed* me) {
 }
 
 void WriteCommon(Writer& w, const OnFootState& st) {
+    w.U8(st.shots);
     st.pad.Write(w);
     st.cam.Write(w);
     w.U8(st.health);
@@ -672,6 +738,7 @@ void WriteCommon(Writer& w, const OnFootState& st) {
 }
 
 void ReadCommon(Reader& r, OnFootState& st) {
+    st.shots = r.U8();
     st.pad.Read(r);
     st.cam.Read(r);
     st.health = r.U8();
@@ -775,6 +842,7 @@ void Players::OnInstallHooks() {
     mem::HookFn(0x706970, &HookGetRealTimeShadow, &g_origGetShadow, "CRealTimeShadowManager::GetRealTimeShadow");
     mem::HookFn(0x502280, &HookVehicleAudioService, &g_origVehicleAudio, "CAEVehicleAudioEntity::Service");
     mem::HookFn(0x58FAE0, &HookHudDraw, &g_origHudDraw, "CHud::Draw");
+    mem::HookFn(0x742300, &HookWeaponFire, &g_origWeaponFire, "CWeapon::Fire");
     mem::RedirectCallFn(0x60F595, &HookGroupBehaviour, &g_origGroupBehaviour);  // CPlayerPed::ProcessControl
     mem::RedirectCallFn(0x74278B, &HookTakePhotograph, &g_origTakePhoto);      // CWeapon::Fire, the camera
     mem::RedirectCallFn(0x5D0880, &HookSavePedPool, &g_origSavePedPool);  // CPools::Save
@@ -1011,6 +1079,7 @@ void Players::HandleOnFoot(uint8_t from, Reader& r) {
     // enter/exit are replicated as events; with the target held the button is the fight's second attack (a kick,
     // CTaskSimplePlayerOnFoot: MeleeAttackJustDown 4), which only the pad replay shows
     if (!(st.pad.buttons & PadState::B_RS1)) st.pad.buttons &= ~PadState::B_TRIANGLE;
+    NoteShots(rp, st.shots);
     rp.state = st;
     rp.hasState = true;
     rp.stateRecvMs = NowMs();
@@ -1039,6 +1108,7 @@ void Players::HandleDriver(uint8_t from, Reader& r) {
     st.pos = vs.pos;
     st.vel = vs.vel;
     st.pad.buttons &= ~PadState::B_TRIANGLE;
+    NoteShots(rp, st.shots);
     rp.state = st;
     rp.hasState = true;
     rp.stateRecvMs = NowMs();
@@ -1064,6 +1134,7 @@ void Players::HandlePassenger(uint8_t from, Reader& r) {
     st.time = time;
     st.pos = {p.x, p.y, p.z};
     st.pad.buttons &= ~PadState::B_TRIANGLE;
+    NoteShots(rp, st.shots);
     rp.state = st;
     rp.hasState = true;
     rp.stateRecvMs = NowMs();
@@ -1573,6 +1644,7 @@ void Players::SendLocalState() {
                 st.onLocal = ToLocal(v, st.pos);
             }
     st.area = me->AreaCode();
+    st.shots = g_localShots;
     st.moveState = (uint8_t)me->MoveState();
     st.wanted = WantedLevel(me);
     CPad* pad = GetPad(0);

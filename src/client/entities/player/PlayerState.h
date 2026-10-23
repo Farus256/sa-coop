@@ -69,6 +69,7 @@ struct OnFootState {
     int8_t area = 0;
     uint8_t moveState = 0;
     uint8_t wanted = 0;  // stars, shown on the name tag
+    uint8_t shots = 0;   // the shots its gun has fired, counted round (the others' copies fire as many)
     PadState pad;
     CameraState cam;
 
