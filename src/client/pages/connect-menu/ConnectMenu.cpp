@@ -179,7 +179,9 @@ void RenderConnectMenu() {
     if (online) {
         // ---- in a session: who we are, the address for friends, the players
         bool host = net.IsHost();
-        g.Text(FONT_BIG, cx, cy, host ? TR("Сервер запущен", "Server running") : TR("Вы в игре", "Connected"), kSaBlue,
+        bool lobby = flow::InLobby();
+        g.Text(FONT_BIG, cx, cy,
+               lobby ? TR("Лобби", "Lobby") : host ? TR("Сервер запущен", "Server running") : TR("Вы в игре", "Connected"), kSaBlue,
                TEXT_SHADOW);
         cy += bh + 2 * s;
         if (!host) para(Format(TR("Сервер «%s»", "Server \"%s\""), net.ServerName().c_str()), kSaMuted, FONT_NORMAL);
@@ -248,12 +250,39 @@ void RenderConnectMenu() {
             g.Text(font, rx + 10 * s, ry + (rh - fh) * 0.5f, dot + (me ? name + TR(" (вы)", " (you)") : name),
                    me ? 0xFFFFFFFF : kText, TEXT_SHADOW);
             if (isHost) g.Text(FONT_MENU_SMALL, rx + colW * (compact ? 0.62f : 0.55f), ry + (rh - ch) * 0.5f, TR("хост", "host"), kSaBlue);
+            else if (lobby && (me ? flow::LobbyMyReady() : flow::LobbyReady(id)))
+                g.Text(FONT_MENU_SMALL, rx + colW * (compact ? 0.62f : 0.55f), ry + (rh - ch) * 0.5f, TR("готов", "ready"), kSaGreen);
             g.Text(FONT_SMALL, rx + colW - 10 * s, ry + (rh - sh) * 0.5f, Format(TR("%u мс", "%u ms"), ping), kSaMuted, TEXT_RIGHT);
             cy = std::max(cy, ry + rh + 4 * s);
         };
         row(net.MyId(), Cfg().nickname, host, net.Rtt(), true);
         for (auto& [id, p] : net.Peers()) row(id, p.name, p.isHost, p.ping, false);
         if (host && net.Peers().empty()) para(TR("Ждём друзей...", "Waiting for your friends..."), kSaMuted);
+        if (lobby) {  // the host starts the game for everyone, a partner says it is ready
+            cy += 10 * s;
+            int ready = 0;
+            for (auto& [id, p] : net.Peers())
+                if (!p.isHost && flow::LobbyReady(id)) ++ready;
+            if (host) {
+                if (w::Button("start", cx, cy, cw, bh + 10 * s, TR("Начать игру", "Start the game"), true, true, true))
+                    flow::LobbyStart();
+                cy += bh + 16 * s;
+                para(Format(TR("Готовы: %d из %d. Кто подключится позже, сразу войдёт в игру.",
+                               "Ready: %d of %d. Whoever joins later goes straight into the game."),
+                            ready, (int)net.Peers().size()),
+                     kSaMuted, FONT_SMALL, true);
+            } else {
+                bool me = flow::LobbyMyReady();
+                if (w::Button("ready", cx, cy, cw, bh + 10 * s, me ? TR("Не готов", "Not ready") : TR("Готов", "Ready"), true, !me, true))
+                    flow::LobbySetReady(!me);
+                cy += bh + 16 * s;
+                para(TR("Игра начнётся, когда хост нажмёт «Начать игру». Если вы впервые в этом мире, персонажа выберете, "
+                        "когда он загрузится.",
+                        "The game starts when the host presses \"Start the game\". New to this world, you pick your character "
+                        "once it loads."),
+                     kSaMuted, FONT_SMALL, true);
+            }
+        }
     } else if (busy) {
         // ---- connecting / starting / loading, in the middle of the body
         float barH = 6 * s;

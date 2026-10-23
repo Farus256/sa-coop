@@ -358,6 +358,22 @@ struct CVehicle : CPhysical {
 
 struct CObject : CPhysical {};
 
+// a point in an entity's own frame and back (its matrix; without one, the point relative to its place)
+inline CVector ToLocal(CEntity* e, const CVector& p) {
+    CMatrix* m = e->Matrix();
+    CVector d = p - e->GetPosition();
+    return m ? CVector{d.Dot(m->right), d.Dot(m->forward), d.Dot(m->up)} : d;
+}
+inline CVector ToWorld(CEntity* e, const CVector& l) {
+    CMatrix* m = e->Matrix();
+    return m ? m->pos + m->right * l.x + m->forward * l.y + m->up * l.z : e->GetPosition() + l;
+}
+// what a ped stands on (CPed::m_standingOnEntity), when it is a vehicle
+inline CVehicle* StandingOnVehicle(CPed* ped) {
+    auto* on = Field<CEntity*>(ped, 0x568);
+    return on && on->IsVehicle() ? (CVehicle*)on : nullptr;
+}
+
 struct CPlayerInfo {
     CPlayerPed* ped;  // 0x00
     uint8_t _pad04[0xB8 - 0x04];

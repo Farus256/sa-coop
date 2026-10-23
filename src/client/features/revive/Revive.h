@@ -5,6 +5,8 @@
 // revived twice in 6 minutes; after that it dies at once, as it does with nobody near, in a car or in the water. The
 // wounded one can hold the key to give up. Its game decides all of it (the damage is its own): the others see it lie
 // by its state (F_DOWNED, with the seconds left on its name tag) and the rescuer's CPR as its activity animation.
+// Meanwhile nobody bothers it (everybody backs off, nobody targets it) and the host's mission goes on; a paramedic or
+// a Families member of its game near comes and revives it, a rival gang's member comes and pisses on it.
 #include <string>
 
 namespace coop {

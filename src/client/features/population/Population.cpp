@@ -5,7 +5,8 @@
 //  * entities owned by this game are not removed while the other player is close to them
 //    (CPopulation::ManagePed / CCarCtrl::PossiblyRemoveVehicle measure distance to the nearest player);
 //  * farther from this game's player, an ordinary ped or car the other player is nearer to goes to the other game
-//    instead of being dropped here (it vanished in front of the other player).
+//    instead of being dropped here (it vanished in front of the other player);
+//  * no random Ballas on Grove Street (Ganton).
 #include <algorithm>
 #include <cmath>
 
@@ -34,6 +35,24 @@ constexpr float kShareRadiusOff = 90.0f;  // hysteresis
 // crashed into each other at the junctions. The cars of one game give way to each other as in the single-player game.
 constexpr float kCarShareRadius = 110.0f;
 constexpr float kCarShareRadiusOff = 160.0f;
+
+// Grove Street's own neighbourhood (Ganton, both its zones): random gang members made around a player there are the
+// Families' own, never Ballas (CPopCycle::PickGangToCreateMembersOf picks the gang of both people and gang cars by the
+// zone's densities and how many of each are around already, and gave Ballas on the cul-de-sac). The story's and the
+// gang wars' Ballas are made by scripts and stay.
+constexpr float kGantonMinX = 2220.0f, kGantonMaxX = 2640.0f, kGantonMinY = -1855.0f, kGantonMaxY = -1600.0f;
+constexpr int PED_TYPE_GANG1 = 7, PED_TYPE_GANG2 = 8;  // Ballas, Grove Street Families
+using PickGangFn = int(__cdecl*)();
+PickGangFn g_origPickGang = nullptr;
+int __cdecl HookPickGang() {
+    int gang = g_origPickGang();
+    if (gang != PED_TYPE_GANG1) return gang;
+    CPlayerPed* me = FindPlayerPed(0);
+    if (!me || me->AreaCode() != 0) return gang;
+    CVector p = me->GetPosition();
+    if (p.x < kGantonMinX || p.x > kGantonMaxX || p.y < kGantonMinY || p.y > kGantonMaxY) return gang;
+    return PED_TYPE_GANG2;
+}
 
 bool g_suppress = false;      // the passers-by are another player's game's
 bool g_suppressCars = false;  // and the traffic and parked cars
@@ -202,6 +221,7 @@ public:
         mem::HookFn(0x6F3F40, &HookCarGeneratorsProcess, &g_origCarGenerators, "CTheCarGenerators::Process");
         mem::HookFn(0x611FC0, &HookManagePed, &g_origManagePed, "CPopulation::ManagePed");
         mem::HookFn(0x424F80, &HookPossiblyRemoveVehicle, &g_origPossiblyRemove, "CCarCtrl::PossiblyRemoveVehicle");
+        mem::HookFn(0x60F8D0, &HookPickGang, &g_origPickGang, "CPopCycle::PickGangToCreateMembersOf");
     }
     void OnPreProcess() override { UpdateSuppression(); }
     void OnSessionEnd() override {

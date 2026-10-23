@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <map>
 
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/ini/Ini.h"
@@ -52,6 +53,14 @@ bool g_progressUpload = false;      // host: the next snapshot goes to the partn
 std::vector<uint8_t> g_pendingWorld;  // partner: the host's world after its progress, loaded at a safe moment
 SavedSpot g_spot;
 bool g_hasSpot = false;
+
+// the lobby
+enum : uint8_t { LOBBY_QUERY = 1, LOBBY_STATE = 2, LOBBY_READY = 3 };
+bool g_lobbyStarted = false;   // host: the game is on (started from the lobby, or hosted from inside a game)
+bool g_lobbyKnown = false;     // partner: the host answered whether the game is on
+uint64_t g_lobbyAskMs = 0;
+bool g_myReady = false;
+std::map<uint8_t, bool> g_ready;  // what the partners said
 
 void SetPhase(Phase p) {
     g_phase = p;
@@ -158,9 +167,10 @@ void UploadWorld(const std::vector<uint8_t>& data, const std::string& label) {
     LOGI("World snapshot uploaded (%u bytes)", (unsigned)data.size());
 }
 
-void OnOnline() {
+// host: the save it chose, or a new game (from the lobby's start); hosting from inside a game goes on as it is
+void StartHostGame() {
     auto& net = Net();
-    if (net.IsHost()) {
+    {
         if (g_hostSlot > 0 && !core::IsInGame()) {
             ui::TheChat().AddSystem(Format(TR("Загружаем сохранение из слота %d...", "Loading the save from slot %d..."), g_hostSlot));
             if (!core::LoadSaveFile(core::SlotPath(g_hostSlot))) {
@@ -179,15 +189,70 @@ void OnOnline() {
                                            "The server is up. Start a new game or load a save."));
             else g_worldUploadPending = true;  // give the server a fresh world
         }
+    }
+    (void)net;
+}
+
+// partner: the game is on, the host's world comes
+void RequestWorld() {
+    g_follower = g_prologueWait = g_worldNone = false;  // a new session: the server says again whether the host is in a prologue
+    // what was waiting from a session that dropped is older than the world asked for now (it was loaded over it)
+    g_pendingWorld.clear();
+    g_hasSpot = false;
+    ui::TheChat().AddSystem(TR("Запрашиваем мир у хоста...", "Asking the host for the world..."));
+    Writer w(C_WORLD_REQUEST);
+    Net().Send(CH_BULK, w);
+    SetPhase(Phase::WaitingWorld);
+}
+
+void SendLobby(uint8_t op, uint8_t value, int to = -1) {
+    Writer w(G_LOBBY);
+    w.U8(op);
+    w.U8(value);
+    if (to < 0) Net().Send(CH_RELIABLE, w);
+    else Net().SendTo((uint8_t)to, CH_RELIABLE, w);
+}
+
+void HandleLobby(uint8_t from, Reader& r) {
+    uint8_t op = r.U8(), value = r.U8();
+    if (!r.Ok()) return;
+    auto& net = Net();
+    if (op == LOBBY_QUERY) {  // a newcomer: whether the game is on (the host), who is ready (everyone)
+        if (net.IsHost()) SendLobby(LOBBY_STATE, g_lobbyStarted || g_phase != Phase::Lobby, from);
+        else SendLobby(LOBBY_READY, g_myReady, from);
+    } else if (op == LOBBY_STATE && from == net.HostId() && !net.IsHost()) {
+        g_lobbyKnown = true;
+        if (value && g_phase == Phase::Lobby) {
+            LOGI("The host started the game: its world comes");
+            RequestWorld();
+        }
+    } else if (op == LOBBY_READY) {
+        g_ready[from] = value != 0;
+    }
+}
+
+void OnOnline() {
+    auto& net = Net();
+    static bool handler = false;
+    if (!handler) net.SetHandler(G_LOBBY, &HandleLobby), handler = true;
+    g_ready.clear();
+    g_myReady = false;
+    if (net.IsHost()) {
+        if (g_hostSlot != 0 && !core::IsInGame()) {  // the lobby: the game starts when the host says
+            g_lobbyStarted = false;
+            SetPhase(Phase::Lobby);
+            ui::TheChat().AddSystem(TR("Лобби открыто. Когда друзья подключатся, нажмите «Начать игру» (F9).",
+                                       "The lobby is open. When your friends are in, press \"Start the game\" (F9)."));
+            return;
+        }
+        g_lobbyStarted = true;
+        StartHostGame();
     } else {
-        g_follower = g_prologueWait = g_worldNone = false;  // a new session: the server says again whether the host is in a prologue
-        // what was waiting from a session that dropped is older than the world asked for now (it was loaded over it)
-        g_pendingWorld.clear();
-        g_hasSpot = false;
-        ui::TheChat().AddSystem(TR("Запрашиваем мир у хоста...", "Asking the host for the world..."));
-        Writer w(C_WORLD_REQUEST);
-        net.Send(CH_BULK, w);
-        SetPhase(Phase::WaitingWorld);
+        // the lobby first: the host says whether the game is on (whoever joins after its start goes straight in)
+        g_lobbyKnown = false;
+        g_lobbyAskMs = NowMs();
+        SetPhase(Phase::Lobby);
+        SendLobby(LOBBY_QUERY, 0);
     }
 }
 
@@ -225,6 +290,9 @@ std::string StatusText() {
             if (g_isHosting) return TR("Запускаем сервер...", "Starting the server...");
             return Format(TR("Подключаемся к %s:%u...", "Connecting to %s:%u..."), g_hostAddr.c_str(), g_port);
         }
+        case Phase::Lobby:
+            return net.IsHost() ? TR("Лобби: ждём игроков", "Lobby: waiting for the players")
+                                : TR("Лобби: ждём, когда хост начнёт игру", "Lobby: waiting for the host to start");
         case Phase::WaitingWorld: {
             float p = net.WorldProgress();
             if (p >= 0) return Format(TR("Получаем мир хоста: %d%%", "Receiving the host's world: %d%%"), (int)(p * 100));
@@ -342,6 +410,8 @@ void Leave() {
     Net().Disconnect();
     StopServerProcess();
     g_isHosting = g_follower = g_prologueWait = g_worldNone = g_progressUpload = g_hasSpot = false;
+    g_lobbyStarted = g_myReady = false;
+    g_ready.clear();
     g_pendingWorld.clear();
     SetPhase(Phase::Idle);
     ui::TheChat().AddSystem(TR("Вы вышли из совместной игры.", "You left the co-op game."));
@@ -435,6 +505,10 @@ void Update() {
             if (NowMs() - g_phaseTime > 120000 && net.WorldProgress() < 0 && !g_prologueWait && !g_worldNone)
                 Fail(TR("Хост так и не прислал мир.", "The host never sent the world."));
             break;
+        case Phase::Lobby:
+            // a host that never answers (it is loading its world right now): the world is asked for anyway
+            if (!net.IsHost() && !g_lobbyKnown && NowMs() - g_lobbyAskMs > 8000) RequestWorld();
+            break;
         case Phase::LoadingWorld:
             break;
         case Phase::Playing:
@@ -524,6 +598,29 @@ bool IsFollower() { return g_follower && Net().Online() && !Net().IsHost(); }
 bool InHostWorld() { return Net().Online() && g_phase == Phase::Playing && !g_prologueWait; }
 
 bool InSharedWorld() { return Net().Online() && (Net().IsHost() || InHostWorld()); }
+
+bool InLobby() { return Net().Online() && g_phase == Phase::Lobby; }
+
+void LobbyStart() {
+    if (!InLobby() || !Net().IsHost()) return;
+    g_lobbyStarted = true;
+    SendLobby(LOBBY_STATE, 1);
+    LOGI("Lobby: the host starts the game");
+    StartHostGame();
+}
+
+void LobbySetReady(bool ready) {
+    if (!InLobby() || Net().IsHost()) return;
+    g_myReady = ready;
+    SendLobby(LOBBY_READY, ready);
+}
+
+bool LobbyReady(uint8_t id) {
+    auto it = g_ready.find(id);
+    return it != g_ready.end() && it->second;
+}
+
+bool LobbyMyReady() { return g_myReady; }
 
 // The story moved on in the host's game (a mission passed, the call that unlocks something after it): a new
 // snapshot goes to the partners already playing, who load it, staying where they are.
@@ -623,7 +720,8 @@ void OnWorldReceived(const std::vector<uint8_t>& data) {
 void OnGameStarted() {
     g_gameStartedAt = NowMs();
     g_prologue = g_afterPrologue = false;  // another world: its own story
-    if (g_phase == Phase::LoadingWorld || (Net().Online() && g_phase != Phase::Playing)) SetPhase(Phase::Playing);
+    if (g_phase == Phase::LoadingWorld || (Net().Online() && g_phase != Phase::Playing && g_phase != Phase::Lobby))
+        SetPhase(Phase::Playing);
     // the host's save carries the host's wanted level: the partner starts without it
     if (Net().Online() && !Net().IsHost()) game::script::Cmd(0x0110).I(0).Run();  // CLEAR_WANTED_LEVEL
     if (Net().Online() && Net().IsHost()) g_worldUploadPending = true;

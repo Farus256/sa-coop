@@ -25,6 +25,7 @@ struct ClientConfig {
     // the game's own full screen (a display mode of its own). Off, "full screen" is a borderless window over the
     // monitor: ALT+TAB goes to the desktop at once, with no black screen while the display mode switches back
     bool exclusiveFullscreen = false;
+    bool modernAim = true;            // aiming over the shoulder, a dot in the middle of the screen
     bool windowedStrict = false;      // test setups: quit at once if windowed mode could not be applied
     int windowX = -1, windowY = -1;   // -1 = centre
     int width = 0, height = 0;        // 0 = use the game's video mode
@@ -71,3 +72,5 @@ ClientConfig& Cfg();
 
 // A text of the interface in both languages, where it is used: TR("Подключиться", "Connect").
 #define TR(ru, en) (::coop::Cfg().english ? (en) : (ru))
+// The same pair kept in a table ({ru, en}): TR(p.ru, p.en) picks one where it is shown.
+#define TRP(ru, en) {ru, en}

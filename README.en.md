@@ -38,6 +38,12 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
 - everyone's map waypoints for everyone: the host's crosshair is red, the others' green, yellow, blue, pink
 - a wounded player can be revived: it lies for 30 seconds while a partner presses `E` and gives it CPR
 - the host's mission seats the partners near it in its car, or stands them on the truck next to CJ
+- a lobby: friends join beforehand and press "Ready", the host presses "Start the game"; a newcomer to the world
+  picks a character: CJ or a Grove Street homie
+- over-the-shoulder aiming as in the newer games, with a dot in the middle of the screen (`modern_aim`)
+- cheats can be typed in the chat (`/code HESOYAM`), and everyone sees who entered which code and what it does
+- the in-game scenes of missions (script cameras) show for the partners as for the host, and bring them next to him
+- the Las Venturas casinos take any bet up to $1,000,000 from the first visit
 - Linux and macOS builds, server tests
 
 Not compatible with the original 0.2.x versions, everyone has to update. Playing with three or more people has
@@ -213,6 +219,7 @@ Chat commands:
 | `/go` | host: start the mission without waiting for the missing ones |
 | `/mute <nick>`, `/unmute <nick>` | stop / start hearing a player's voice (for you only) |
 | `/draw [0.5-4] [detail]` | draw distance (2 by default, 1 is the game's own) |
+| `/code <cheat>` | enter a cheat, for example `/code HESOYAM` |
 | `/pm <nick> <text>` | private message |
 | `/kick <nick> [reason]` | host: kick a player |
 

@@ -79,6 +79,7 @@ void WriteState(Writer& w, const PedSyncState& s) {
         w.U16(s.animFlags);
         w.F32(s.animTime);
     }
+    if (s.flags & PedSyncState::F_ON_VEHICLE) w.VecQ(V(s.onLocal), 32.0f);
 }
 
 void ReadState(Reader& r, PedSyncState& s) {
@@ -106,6 +107,7 @@ void ReadState(Reader& r, PedSyncState& s) {
         s.animFlags = r.U16();
         s.animTime = r.F32();
     }
+    if (s.flags & PedSyncState::F_ON_VEHICLE) s.onLocal = G(r.VecQ(32.0f));
 }
 
 using RequestSpecialFn = void(__cdecl*)(int, const char*, int);
@@ -406,6 +408,17 @@ PedSyncState Peds::Capture(NetPed& np) {
         return s;
     }
 
+    // on foot on a vehicle (its roof, its back; or stood there by a script, ATTACH_CHAR_TO_CAR): the place in its own
+    // frame, for its copy to carry it
+    CVehicle* on = StandingOnVehicle(ped);
+    if (!on && ped->AttachedTo() && ped->AttachedTo()->IsVehicle()) on = (CVehicle*)ped->AttachedTo();
+    if (on && IsVehicleValid(on) && !on->IsTrain())
+        if (NetVehicle* nv = Vehicles::Instance().Find(on)) {
+            s.flags |= PedSyncState::F_ON_VEHICLE;
+            s.vehNetId = nv->netId;
+            s.onLocal = ToLocal(on, s.pos);
+        }
+
     void* enter = FindTask(ped, TASK_ENTER_CAR_AS_DRIVER);
     bool asDriver = enter != nullptr;
     if (!enter) enter = FindTask(ped, TASK_ENTER_CAR_AS_PASSENGER);
@@ -413,7 +426,7 @@ PedSyncState Peds::Capture(NetPed& np) {
         auto* target = Field<CVehicle*>(enter, 0x0C);  // CTaskComplexEnterCar::m_Car
         if (target && IsVehicleValid(target) && IsSyncableVehicle(target))
             if (NetVehicle* nv = Vehicles::Instance().EnsureNetworked(target)) {
-                s.flags |= PedSyncState::F_ENTERING;
+                s.flags = (uint8_t)((s.flags & ~PedSyncState::F_ON_VEHICLE) | PedSyncState::F_ENTERING);
                 s.vehNetId = nv->netId;
                 // m_TargetDoor once at the door, before that the door the go-to-door task was given (m_TargetSeat)
                 int door = Field<int32_t>(enter, 0x14) ? Field<int32_t>(enter, 0x14) : Field<int32_t>(enter, 0x1C);
@@ -875,6 +888,17 @@ void Peds::ApplyMirror(NetPed& np) {
     // ---- on foot
     float age = std::min(0.5f, (float)(now - np.recvMs) / 1000.0f);
     CVector target = st.pos + st.vel * age;
+    // on a moving vehicle: where it stands on this game's copy of it, carried along with it (by its world place, which
+    // comes with the network's delay, it was pulled along behind the car and fell off)
+    bool riding = false;
+    if (st.flags & PedSyncState::F_ON_VEHICLE)
+        if (NetVehicle* nv = Vehicles::Instance().Find(st.vehNetId);
+            nv && Vehicles::Alive(*nv) && nv->veh->MoveSpeed().Length() * 50.0f >= 0.5f) {
+            riding = true;
+            target = ToWorld(nv->veh, st.onLocal);
+            SetEntityPosition(ped, target);
+            ped->MoveSpeed() = nv->veh->MoveSpeed();
+        }
     CVector cur = ped->GetPosition();
     CVector err = target - cur;
     float d = err.Length2D();
@@ -953,6 +977,10 @@ void Peds::ApplyMirror(NetPed& np) {
         return;
     }
 
+    if (riding) {  // carried by the vehicle: no walking after its place
+        ped->CurrentRotation() = ped->AimingRotation() = LerpAngle(ped->CurrentRotation(), st.heading, 0.3f);
+        return;
+    }
     // walking/running with the normal animations towards the owner's position
     float speed = st.vel.Length2D();
     if (speed > 0.4f || d > 1.2f) {

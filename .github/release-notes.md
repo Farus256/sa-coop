@@ -55,6 +55,24 @@
 - метки на карте у всех игроков: перекрестие хоста всегда красное, остальных - зелёное, жёлтое, синее, розовое
 - версия протокола 104: обновиться нужно всем
 
+### 0.3.5
+
+- **лобби**: если хост создаёт игру из главного меню, все сначала ждут в лобби, друзья жмут «Готов», хост —
+  «Начать игру». Кто подключится позже, сразу входит в игру
+- **выбор персонажа**: кто впервые в мире хоста (или хост начал новую игру), после загрузки выбирает CJ или бойца
+  Grove Street прямо в игре; не-CJ не пускают в магазины одежды, парикмахерские и тату-салоны
+- **чит-коды**: у всех в чате видно, кто ввёл какой код и что он делает; код можно ввести командой `/code HESOYAM`
+- **ранение**: пока игрок лежит, его никто не трогает, а миссия хоста идёт дальше; врач или парень из Grove Street
+  рядом подбегает и откачивает, враждебный бандит подходит и мочится на лежащего
+- **сцены миссий на движке**: камеру скрипта миссии хоста напарники видят так же, тех, кто далеко, переносит к хосту
+- **катсцены**: персонажи напарников стоят и в катсценах, которые идут одна за другой
+- прицеливание через плечо с точкой в центре экрана (`modern_aim = 0` возвращает обычное)
+- игроки и NPC на крыше или в кузове едущей машины у других стоят на ней, а не волочатся по дороге
+- в казино Лас-Вентураса ставки до $1 000 000 с первого визита
+- на Грув-стрит больше не появляются случайные Ballas
+- поезд миссии (Catalyst) у напарников ставится туда же, где он у хоста
+- версия протокола 105: обновиться нужно всем
+
 С оригинальными 0.2.x не совместимо, обновиться нужно всем. Игра втроём и больше пока почти не тестировалась,
 если что-то не так, пришлите `coop\coop.log`.
 
@@ -64,4 +82,4 @@
 
 ## In English
 
-A fork of SA:COOP for GTA San Andreas 1.0 US: the story over the network for 2-16 players, based on the original 0.2.7. Up to 16 places, other games' cars and pedestrians only near you, connecting by IP with a specific reason when it fails, mission markers that wait only for nearby players (`/go` for the host), up to three partners in cutscenes, player colours, `/tp`, `/tphere`, `/go`, `/mute`. Not compatible with the original 0.2.x. Play with three or more people has barely been tested yet. 0.3.1: every screen resolution in the menu (1920x1080 too) and borderless windowed mode, a longer draw distance (`/draw`), the later cutscenes of a mission play for the partner again, interior shopkeepers and residents are each player's own so they can be dealt with, and no camera shake for a passenger aiming out of a car. Protocol 103: everyone has to update. 0.3.4: a player whose health runs out with a partner near lies wounded for 30 seconds and can be revived with `E` (CPR, 5 seconds, all weapons and half health, twice in 6 minutes); partners near the host take the free seats of a car the host's mission puts CJ in, and the cab seats or places beside him when it stands him on a truck; `G` takes the nearest free passenger seat; everyone's map waypoints with a coloured crosshair (the host's red). Protocol 104: everyone has to update.
+A fork of SA:COOP for GTA San Andreas 1.0 US: the story over the network for 2-16 players, based on the original 0.2.7. Up to 16 places, other games' cars and pedestrians only near you, connecting by IP with a specific reason when it fails, mission markers that wait only for nearby players (`/go` for the host), up to three partners in cutscenes, player colours, `/tp`, `/tphere`, `/go`, `/mute`. Not compatible with the original 0.2.x. Play with three or more people has barely been tested yet. 0.3.1: every screen resolution in the menu (1920x1080 too) and borderless windowed mode, a longer draw distance (`/draw`), the later cutscenes of a mission play for the partner again, interior shopkeepers and residents are each player's own so they can be dealt with, and no camera shake for a passenger aiming out of a car. Protocol 103: everyone has to update. 0.3.4: a player whose health runs out with a partner near lies wounded for 30 seconds and can be revived with `E` (CPR, 5 seconds, all weapons and half health, twice in 6 minutes); partners near the host take the free seats of a car the host's mission puts CJ in, and the cab seats or places beside him when it stands him on a truck; `G` takes the nearest free passenger seat; everyone's map waypoints with a coloured crosshair (the host's red). Protocol 104: everyone has to update. 0.3.5: a lobby (the host starts the game for everyone), a character choice for newcomers (CJ or a Grove Street homie), cheats announced to everyone and typed with `/code`, nobody touches a wounded player while paramedics and Families members revive him and rival gangsters piss on him, partners see the host's mission's in-game scenes with the same camera, partners in follow-up cutscenes, over-the-shoulder aiming, players and NPCs riding on cars stay on them, $1,000,000 casino bets, no random Ballas on Grove Street, the mission train of "Catalyst" placed right for partners. Protocol 105.

@@ -115,7 +115,7 @@ enum MsgId : uint8_t {
     G_OBJ_DAMAGE = 105,       // reliable: the partner hit a mirror object, its owner applies it
     G_FIRE = 106,             // reliable: a fire started / went out
     G_ZONE = 107,             // reliable: gang densities of a territory
-    G_CHEAT = 108,            // reliable: a cheat that changes the shared world
+    G_CHEAT = 108,            // reliable: a cheat typed (u8 id, u8 on, str code, u8 a switch, u8 the others apply it)
     G_ENEX = 109,             // reliable: entrances the host's scripts opened or closed
 
     G_WORLD_STATE = 110,      // time, weather, gravity... (host -> all)
@@ -161,6 +161,10 @@ enum MsgId : uint8_t {
                               // one, 3 took him off), u16 vehicle; u8 n, {u8 player, i8 seat (-1: stand on it), vec3
                               // place, u16 turret angle, f32 turret range}: where each partner near goes
     G_REVIVE = 148,           // reliable, to one player: u8 op (1 started, 2 stopped, 3 done): the sender revives it
+    G_SCRIPT_CAM = 149,       // reliable, host -> all: u8 op and its data: the host's mission's script took the camera
+                              // (a fixed place, a point, an entity, a move, a zoom) or gave it back
+    G_LOBBY = 150,            // reliable: u8 op, u8 value: a newcomer asks (1), the host says whether the game is on
+                              // (2), a partner is ready or not (3)
 
     G_VOICE = 200,            // unreliable: voice frame
     G_LAST = 255,

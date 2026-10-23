@@ -36,7 +36,9 @@ struct PedSyncState {
         F_FIRING = 16,
         F_ENTERING = 32,  // walking to / opening vehicle vehNetId
         F_LEAVING = 64,
+        F_ON_VEHICLE = 128,  // standing on vehicle vehNetId (a car's roof, a truck's back) at onLocal in its own frame
     };
+    game::CVector onLocal;
 };
 
 // NPC known to the players. owner == my id: simulated here and announced; otherwise a mirror (a record without a ped

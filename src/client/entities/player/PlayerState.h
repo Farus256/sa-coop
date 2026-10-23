@@ -79,7 +79,11 @@ struct OnFootState {
         F_ATTACHED = 512,    // a script stood it on a vehicle (ATTACH_CHAR_TO_CAR): attach* below
         F_DOWNED = 1024,     // wounded, lying where it fell until someone revives it (downSeconds left)
         F_REVIVING = 2048,   // it is reviving a wounded player
+        F_ON_VEHICLE = 4096, // it stands on a vehicle (a car's roof, a truck's back): onVeh, onLocal
     };
+    // F_ON_VEHICLE: the vehicle's net id and the place in its own frame (the other games put it on their copy there)
+    uint16_t onVeh = 0;
+    game::CVector onLocal{};
     // F_ATTACHED: the vehicle's net id, the place on it and the turret's angles (CPed::AttachPedToEntity)
     uint16_t attachVeh = 0;
     game::CVector attachOffset{};

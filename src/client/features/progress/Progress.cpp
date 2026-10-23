@@ -22,6 +22,7 @@
 #include "entities/player/Players.h"
 #include "entities/profile/Profile.h"
 #include "entities/session/Flow.h"
+#include "features/progress/SkinChoice.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
@@ -37,7 +38,8 @@ using namespace game;
 using game::script::Cmd;
 
 constexpr uint32_t kProfileMagic = 0x46504353;  // "SCPF"
-constexpr uint16_t kProfileVersion = 3;  // 2: the rewards of side missions (CPlayerInfo +0x14C..+0x152); 3: whose look
+constexpr uint16_t kProfileVersion = 4;  // 2: the rewards of side missions (CPlayerInfo +0x14C..+0x152); 3: whose look;
+                                         // 4: the character chosen (SkinChoice)
 constexpr uintptr_t kStatsBlock = 0xB79000;  // CStats::StatTypesInt + StatTypesFloat
 constexpr size_t kStatsSize = 0x4C8;
 // stats the world owns, not the player (CStats::StatTypesInt, id - 120): the profile keeps the values of the world it was
@@ -138,6 +140,7 @@ std::vector<uint8_t> CaptureProfile() {
     w.U8(perks[5]);  // m_bGetOutOfJailFree
     w.U8(perks[6]);  // m_bFreeHealthCare
     w.U8(LookIsOwn());
+    w.U16(skin::Worn());
     return w.Buffer();
 }
 
@@ -160,6 +163,7 @@ bool ApplyProfile(const std::vector<uint8_t>& blob, bool& lookOwn) {
     if (version >= 2)
         for (uint8_t& b : perks) b = r.U8();
     uint8_t own = version >= 3 ? r.U8() : 0;
+    uint16_t character = version >= 4 ? r.U16() : 0;
     if (!r.Ok() || stats.size() != kStatsSize || clothes.size() != kClothesSize) return false;
     lookOwn = own != 0;
 
@@ -173,7 +177,9 @@ bool ApplyProfile(const std::vector<uint8_t>& blob, bool& lookOwn) {
     for (const auto& range : kWorldStats)
         for (int id = range[0]; id <= range[1]; ++id) Ref<int32_t>(kStatsBlock + (uintptr_t)(id - 120) * 4) = world[id - 120];
     memcpy(me->ClothesDesc(), clothes.data(), kClothesSize);
+    skin::Wear(0);
     RebuildPlayer(me, false);  // body from the profile's fat/muscle stats
+    if (character) skin::Wear(character);  // the Families member it chose
     Cmd(0x048F).I(h).Run();    // REMOVE_ALL_CHAR_WEAPONS
     for (const Slot& s : slots) {
         if (s.type == 0 || s.type > 46) continue;  // eWeaponType ends with the parachute
@@ -314,6 +320,7 @@ public:
                                                      "You are here for the first time. From now on your money, skills and look "
                                                      "are your own."));
                 m_reset = false;
+                skin::Begin();  // new to this world (or to the host's new game): its character first
             } else if (ApplyProfile(m_profile, own)) {
                 LOGI("Profile applied (%zu bytes)", m_profile.size());
                 m_quietUntil = now + 5000;

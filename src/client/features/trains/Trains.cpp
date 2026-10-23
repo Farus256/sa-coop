@@ -55,6 +55,9 @@ struct Copy {
     uint8_t kind;
     float rail, speed;
     uint64_t ms;
+    CVector pos;            // where the real one is (as sent)
+    float railOffset = 0;   // this game's distance along the rails at the same place minus the sent one
+    uint64_t offMs = 0;     // since when the copy is away from the real one's place
 };
 std::map<uint32_t, Copy> g_copies;  // by owner << 16 | its id
 bool g_randomOff = false;           // we switched the random trains off
@@ -155,14 +158,23 @@ void HandleTrain(uint8_t from, Reader& r) {
         g_copying = true;
         g_origCreateTrain(CVector{p.x, p.y, p.z}, clockwise, kind, &first, &last, -1, track, true);
         g_copying = false;
-        if (!first) return;
+        if (!first) {
+            LOGW("Train %d of player %d (kind %d, track %d) could not be copied here", id, from, kind, track);
+            return;
+        }
         for (CVehicle* t = first; t; t = NextCarriage(t)) t->DoorLock() = 2;  // CARLOCK_LOCKED: driven in its game
-        it = g_copies.emplace(key, Copy{first, kind, rail, speed, NowMs()}).first;
-        LOGI("Train %d of player %d (kind %d, track %d) copied", id, from, kind, track);
+        // made at the node nearest to the real one's place: the distance along the rails there is this game's own
+        // reckoning of it (a mission's train put on its rails by coordinates, "Catalyst", was elsewhere along them by
+        // the sent distance, and the copy was taken away as far from the player at once)
+        Copy c{first, kind, rail, speed, NowMs(), CVector{p.x, p.y, p.z}};
+        c.railOffset = RailDistance(first) - rail;
+        it = g_copies.emplace(key, c).first;
+        LOGI("Train %d of player %d (kind %d, track %d) copied, rails %+.1f", id, from, kind, track, c.railOffset);
     }
     it->second.rail = rail;
     it->second.speed = speed;
     it->second.ms = NowMs();
+    it->second.pos = CVector{p.x, p.y, p.z};
 }
 
 // near a player before it whose game makes random trains, a game makes none: that one makes them for both
@@ -214,14 +226,19 @@ public:
         CPlayerPed* me = FindPlayerPed(0);
         for (auto it = g_copies.begin(); it != g_copies.end();) {
             Copy& c = it->second;
-            bool far = IsEngine(c.engine) && (c.engine->GetPosition() - me->GetPosition()).Length() > kCopyOut;
-            if (!IsEngine(c.engine) || NowMs() - c.ms > 3000 || far) {
+            bool far = (c.pos - me->GetPosition()).Length() > kCopyOut;  // the real one's place, not the copy's
+            // a copy that stays away from the real one's place is made again there
+            bool astray = IsEngine(c.engine) && (c.engine->GetPosition() - c.pos).Length() > 40.0f;
+            c.offMs = astray ? (c.offMs ? c.offMs : NowMs()) : 0;
+            if (!IsEngine(c.engine) || NowMs() - c.ms > 3000 || far || (c.offMs && NowMs() - c.offMs > 1500)) {
+                if (c.offMs) LOGW("Train copy %u was away from its train: made again", it->first);
                 RemoveCopy(c);
                 it = g_copies.erase(it);
                 continue;
             }
             Speed(c.engine) = c.speed;
-            RailDistance(c.engine) = c.rail + c.speed * (float)(NowMs() - c.ms) / 20.0f;
+            float sign = (Flags(c.engine) & kClockwise) ? 1.0f : -1.0f;  // the speed is along the train's direction
+            RailDistance(c.engine) = c.rail + c.railOffset + sign * c.speed * (float)(NowMs() - c.ms) / 20.0f;
             ++it;
         }
     }

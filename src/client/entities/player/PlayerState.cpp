@@ -135,6 +135,10 @@ void OnFootState::Write(Writer& w) const {
         w.F32(attachB);
     }
     if (flags & F_DOWNED) w.U8(downSeconds);
+    if (flags & F_ON_VEHICLE) {
+        w.U16(onVeh);
+        w.VecQ(V(onLocal), 32.0f);
+    }
 }
 
 bool OnFootState::Read(Reader& r) {
@@ -160,6 +164,10 @@ bool OnFootState::Read(Reader& r) {
         attachB = r.F32();
     }
     if (flags & F_DOWNED) downSeconds = r.U8();
+    if (flags & F_ON_VEHICLE) {
+        onVeh = r.U16();
+        onLocal = G(r.VecQ(32.0f));
+    }
     return r.Ok();
 }
 

@@ -102,6 +102,7 @@ private:
     void KeepApart(game::CPed* other);
     bool RideTrain(RemotePlayer& rp);
     bool FollowAttach(RemotePlayer& rp);
+    bool RideVehicle(RemotePlayer& rp);
     void ShowDowned(RemotePlayer& rp);
     bool TagAnchor(RemotePlayer& rp, float& sx, float& sy, float& alpha);
     RemotePlayer& Touch(uint8_t from);

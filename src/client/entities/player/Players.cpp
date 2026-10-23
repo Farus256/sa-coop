@@ -1226,6 +1226,7 @@ void Players::ApplyState(RemotePlayer& rp) {
     }
 
     if (Ref<uint8_t>(0xB5F851)) return;  // CCutsceneMgr::ms_running: Missions places the ped in the scene
+    if (RideVehicle(rp)) return;
 
     // position: predict, then correct smoothly (teleport on large errors)
     float age = std::min(0.25f, (float)(NowMs() - rp.stateRecvMs) / 1000.0f);
@@ -1267,6 +1268,8 @@ void Players::ApplyState(RemotePlayer& rp) {
 // the pose needs showing: it falls as its owner did, lies there, gets up when it is revived (a death is F_DEAD).
 void Players::ShowDowned(RemotePlayer& rp) {
     bool down = (rp.state.flags & OnFootState::F_DOWNED) != 0;
+    // nobody here aims at it either (CPed::bNeverEverTargetThisPed)
+    rp.ped->PedFlags2() = down ? (rp.ped->PedFlags2() | (1u << 28)) : (rp.ped->PedFlags2() & ~(1u << 28));
     if (down) {
         if (rp.downShown && NowMs() - rp.downCheckMs < 1000) return;
         rp.downCheckMs = NowMs();
@@ -1306,6 +1309,22 @@ bool Players::FollowAttach(RemotePlayer& rp) {
         LOGI("Remote player %d stands on vehicle %u (%.1f %.1f %.1f)", rp.id, st.attachVeh, o.x, o.y, o.z);
     }
     return ped->AttachedTo() == veh;
+}
+
+// Standing on a moving vehicle (a car's roof, the back of a pickup): its place goes in the vehicle's own frame and it
+// stands there on this game's copy of it. Its place in the world came with the network's delay while the copy moves
+// on: it was pulled along behind the car, fell off and was dragged down the road.
+bool Players::RideVehicle(RemotePlayer& rp) {
+    const OnFootState& st = rp.state;
+    if (!(st.flags & OnFootState::F_ON_VEHICLE)) return false;
+    NetVehicle* nv = Vehicles::Instance().Find(st.onVeh);
+    if (!nv || !Vehicles::Alive(*nv) || nv->veh->MoveSpeed().Length() * 50.0f < 0.5f) return false;  // standing still: as usual
+    CPed* ped = rp.ped;
+    SetEntityPosition(ped, ToWorld(nv->veh, st.onLocal));
+    ped->MoveSpeed() = nv->veh->MoveSpeed();
+    float r = LerpAngle(ped->CurrentRotation(), st.rotation, 0.3f);
+    ped->CurrentRotation() = ped->AimingRotation() = r;
+    return true;
 }
 
 // Trains are not networked as vehicles (Trains.cpp copies them): the player riding one sits in the cab of the train
@@ -1546,6 +1565,13 @@ void Players::SendLocalState() {
             st.attachB = Field<float>(me, 0x77C);         // m_fTurretAngleB (how far it turns, radians)
         }
     }
+    if (!(st.flags & OnFootState::F_ATTACHED) && !me->InVehicle())
+        if (CVehicle* v = StandingOnVehicle(me); v && IsVehicleValid(v) && !v->IsTrain())
+            if (NetVehicle* nv = Vehicles::Instance().Find(v)) {
+                st.flags |= OnFootState::F_ON_VEHICLE;
+                st.onVeh = nv->netId;
+                st.onLocal = ToLocal(v, st.pos);
+            }
     st.area = me->AreaCode();
     st.moveState = (uint8_t)me->MoveState();
     st.wanted = WantedLevel(me);

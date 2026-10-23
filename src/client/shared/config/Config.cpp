@@ -51,6 +51,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     windowed = ini.GetBool("game", "windowed", windowed);
     borderless = ini.GetBool("game", "borderless", borderless);
     exclusiveFullscreen = ini.GetBool("game", "exclusive_fullscreen", exclusiveFullscreen);
+    modernAim = ini.GetBool("game", "modern_aim", modernAim);
     if (!windowed && !exclusiveFullscreen) borderless = true;  // full screen as a borderless window
     if (borderless) windowed = true;
     windowedStrict = ini.GetBool("game", "windowed_strict", windowedStrict);

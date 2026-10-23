@@ -10,6 +10,7 @@ enum class Phase {
     Idle,            // not in a session
     StartingServer,  // local server process is starting
     Connecting,
+    Lobby,           // connected, the game has not started: the host starts it for everyone (LobbyStart)
     WaitingWorld,    // joined as partner, waiting for the host's save
     LoadingWorld,    // a save is being loaded
     Playing,         // in the shared world
@@ -29,6 +30,15 @@ void Host(int slot, uint16_t port, const std::string& password);  // slot 0 = cu
 void Join(const std::string& host, uint16_t port, const std::string& password);
 void Leave();
 void SaveConnectSettings();  // the menu's choices (nickname, mode, address, language, friendly fire) to coop.ini
+
+// The lobby. A host who creates a game from the main menu (a save or a new game) waits there with the partners who
+// join: the partners say they are ready, the host starts the game for everyone (its world loads, the partners get it
+// as before). Whoever joins after the start goes straight in. Hosting from inside a game has no lobby.
+bool InLobby();
+void LobbyStart();                // host
+void LobbySetReady(bool ready);   // partner
+bool LobbyReady(uint8_t id);      // what that partner said
+bool LobbyMyReady();
 
 std::vector<SaveSlotInfo> ListSaveSlots();
 void Update();             // per frame

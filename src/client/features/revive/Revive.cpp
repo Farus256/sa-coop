@@ -9,6 +9,7 @@
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "entities/ped/Peds.h"
 #include "entities/player/Players.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
@@ -80,10 +81,56 @@ bool HelpNear(CPlayerPed* me) {
     return false;
 }
 
+// ---- the people of this game near a wounded player: a paramedic or a Families member comes and revives it, a rival
+// gang's member comes and pisses on it. Only this game's own people (a copy of another game's is moved by that game),
+// no mission people, none in a car.
+constexpr float kNpcReach = 40.0f;
+constexpr uint64_t kNpcWayMs = 25000;  // an NPC that has not got there by then gives up
+constexpr int PED_TYPE_GANG1 = 7, PED_TYPE_GANG2 = 8, PED_TYPE_GANG3 = 9, PED_TYPE_GANG4 = 10, PED_TYPE_MEDIC = 18;
+constexpr uint8_t PED_MISSION = 2;    // CPed::m_nCreatedBy
+constexpr uint32_t kNeverTarget = 1u << 28;  // CPed::bNeverEverTargetThisPed (the second flags word)
+constexpr int kBackOffField = 0x1E;   // CWanted's flags: m_bEverybodyBackOff is bit 2
+enum class Role { Medic, Pisser };
+struct Npc {
+    int handle = -1;
+    int stage = 0;   // 0 on the way, 1 there
+    uint64_t since = 0, taskMs = 0;
+    CVector spot{};
+    bool grove = false;
+    CPed* Ped() const { return handle >= 0 ? GetPed(handle) : nullptr; }
+} g_medic, g_pisser;
+bool g_npcIgnore = false;  // the others leave this wounded player alone (we set it)
+uint8_t g_backOffWas = 0;
+
+bool Helps(CPed* p) { return p->PedType() == PED_TYPE_MEDIC || p->PedType() == PED_TYPE_GANG2; }
+bool Rival(CPed* p) {
+    int t = p->PedType();
+    return t == PED_TYPE_GANG1 || t == PED_TYPE_GANG3 || t == PED_TYPE_GANG4;  // Ballas, Vagos, Rifa
+}
+
+CPed* NearestNpc(CPlayerPed* me, bool helper, CPed* except = nullptr) {
+    CPoolHeader* pool = PedPool();
+    if (!pool) return nullptr;
+    CPed* best = nullptr;
+    float bestDist = kNpcReach;
+    for (int i = 0; i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        auto* p = (CPed*)(pool->objects + (size_t)i * kPedPoolElemSize);
+        if (p == me || p == except || p->IsPlayer() || p->Health() <= 0.0f || p->InVehicle() || p->AreaCode() != me->AreaCode() ||
+            p->CreatedBy() == PED_MISSION || (helper ? !Helps(p) : !Rival(p)))
+            continue;
+        if (NetPed* np = Peds::Instance().Find(p); np && np->owner != Net().MyId()) continue;  // another game's
+        if (Peds::Instance().IsLocalOnly(p)) continue;  // a shop's staff
+        float d = (p->GetPosition() - me->GetPosition()).Length();
+        if (d < bestDist) bestDist = d, best = p;
+    }
+    return best;
+}
+
 bool CanGoDown(CPlayerPed* me, int weapon) {
     if (weapon == WEAPON_DROWNING || me->InVehicle() || (me->PhysicalFlags() & kSubmerged) || Ref<uint8_t>(kCutsceneRunning))
         return false;
-    if (!HelpNear(me)) return false;
+    if (!HelpNear(me) && !NearestNpc(me, true)) return false;
     if (RevivesLeft() <= 0) {
         ui::TheChat().AddSystem(TR("Вас уже откачивали дважды за 6 минут: в этот раз не повезло.",
                                    "You were revived twice in 6 minutes already: no luck this time."));
@@ -117,6 +164,8 @@ void __fastcall HookWillKill(void* calc, void* edx, CPed* ped, uint8_t* rsp, boo
     g_wantDown = true;
 }
 
+void LeaveAlone(CPlayerPed* me, bool on);
+
 void GoDown(CPlayerPed* me) {
     g_wantDown = false;
     if (g_down) return;
@@ -132,16 +181,39 @@ void GoDown(CPlayerPed* me) {
     LieDown(me);
     g_animCheckMs = NowMs();
     Players::Instance().SetLocalDowned(true, (uint8_t)(kDownMs / 1000));
+    LeaveAlone(me, true);  // nobody shoots at it or arrests it while it lies there
     ui::TheChat().AddSystem(Format(TR("Вы тяжело ранены! Напарник может откачать вас за %d с. Удерживайте %s, чтобы сдаться.",
                                       "You are badly wounded! A partner can revive you within %d s. Hold %s to give up."),
                                    (int)(kDownMs / 1000), Key().c_str()));
     LOGI("Wounded: lying for %llu s (revives left %d)", (unsigned long long)(kDownMs / 1000), RevivesLeft());
 }
 
+void ReleaseNpc(Npc& n) {
+    if (n.Ped()) {
+        Cmd(0x0687).I(n.handle).Run();  // CLEAR_CHAR_TASKS
+        Cmd(0x05DE).I(n.handle).Run();  // TASK_WANDER_STANDARD: on its way
+    }
+    n = Npc{};
+}
+
+void LeaveAlone(CPlayerPed* me, bool on) {
+    if (on == g_npcIgnore) return;
+    g_npcIgnore = on;
+    if (me) me->PedFlags2() = on ? (me->PedFlags2() | kNeverTarget) : (me->PedFlags2() & ~kNeverTarget);
+    if (void* wanted = me ? Call<0x56E230, void*>(-1) : nullptr) {  // FindPlayerWanted (it needs the player)
+        uint8_t& f = Field<uint8_t>(wanted, kBackOffField);
+        if (on) g_backOffWas = f & 4, f |= 4;
+        else f = (uint8_t)((f & ~4) | g_backOffWas);
+    }
+}
+
 void EndDown(CPlayerPed* me) {
     g_down = false;
     g_wantDown = false;
     g_rescuer = -1;
+    ReleaseNpc(g_medic);
+    ReleaseNpc(g_pisser);
+    LeaveAlone(me, false);
     if (me) me->PhysicalFlags() = (me->PhysicalFlags() & ~kProofBits) | g_savedProofs;
     Pad()->DisablePlayerControls &= (uint16_t)~kOwnControls;
     Players::Instance().SetLocalDowned(false);
@@ -154,7 +226,7 @@ void Die(CPlayerPed* me, const char* why) {
     LOGI("Wounded: died (%s)", why);
 }
 
-void Revive(CPlayerPed* me, uint8_t by) {
+void Revive(CPlayerPed* me, const std::string& who) {
     EndDown(me);
     int handle = GetPedRef(me);
     Cmd(0x0792).I(handle).Run();  // CLEAR_CHAR_TASKS_IMMEDIATELY
@@ -163,10 +235,10 @@ void Revive(CPlayerPed* me, uint8_t by) {
     me->Health() = maxHealth * 0.5f;
     g_revives.push_back(NowMs());
     int left = RevivesLeft();
-    ui::TheChat().AddSystem(Format(TR("%s откачал вас. Ещё возрождений в ближайшие 6 минут: %d.",
+    ui::TheChat().AddSystem(Format(TR("Вас откачал %s. Ещё возрождений в ближайшие 6 минут: %d.",
                                       "%s revived you. Revives left for the next 6 minutes: %d."),
-                                   Name(by).c_str(), left));
-    LOGI("Revived by player %d (revives left %d)", by, left);
+                                   who.c_str(), left));
+    LOGI("Revived by %s (revives left %d)", who.c_str(), left);
 }
 
 // ---- the rescuer
@@ -240,6 +312,92 @@ void UpdateRescuer(CPlayerPed* me) {
     }
 }
 
+bool AnimExists(const char* anim, const char* block) {
+    if (!EnsureBlock(block)) return false;
+    void* b = Call<0x4D3940, void*>(block);  // CAnimManager::GetAnimationBlock
+    return b && Call<0x4D42F0, void*>(anim, b);  // CAnimManager::GetAnimation(name, block)
+}
+
+void Face(int handle, CPed* p, const CVector& at) {
+    CVector d = at - p->GetPosition();
+    Cmd(0x0173).I(handle).F(std::atan2(-d.x, d.y) * 57.29578f).Run();  // SET_CHAR_HEADING
+}
+
+// on its way to the spot by the wounded player (again every 2 s: a bump ends the task); true once it is there
+bool Approach(Npc& n, CPed* p, CPlayerPed* me, int moveMode) {
+    if ((p->GetPosition() - n.spot).Length2D() < 1.0f) return true;
+    if (NowMs() - n.taskMs > 2000) {
+        n.taskMs = NowMs();
+        Cmd(0x05D3).I(n.handle).F(n.spot.x).F(n.spot.y).F(n.spot.z).I(moveMode).I(20000).Run();  // TASK_GO_STRAIGHT_TO_COORD
+    }
+    return false;
+}
+
+void Pick(Npc& n, CPed* p, CPlayerPed* me, float dist) {
+    n = Npc{};
+    n.handle = GetPedRef(p);
+    n.since = NowMs();
+    n.grove = p->PedType() == PED_TYPE_GANG2;
+    CVector d = p->GetPosition() - me->GetPosition();
+    float len = std::max(0.1f, std::sqrt(d.x * d.x + d.y * d.y));
+    n.spot = me->GetPosition() + CVector{d.x / len * dist, d.y / len * dist, 0.0f};
+    Cmd(0x0687).I(n.handle).Run();  // CLEAR_CHAR_TASKS
+}
+
+void UpdateNpcs(CPlayerPed* me) {
+    uint64_t now = NowMs();
+    // the one who revives: none while a player does it
+    CPed* m = g_medic.Ped();
+    if (g_medic.handle >= 0 && (!m || m->Health() <= 0.0f || m->InVehicle() || (g_medic.stage == 0 && now - g_medic.since > kNpcWayMs))) {
+        LOGI("Wounded: the NPC coming to help gave up");
+        ReleaseNpc(g_medic);
+        m = nullptr;
+    }
+    if (!m && g_rescuer < 0 && now - g_downEnd + kDownMs > 1500) {  // a moment after the fall
+        if (CPed* p = NearestNpc(me, true, g_pisser.Ped())) {
+            Pick(g_medic, p, me, 0.9f);
+            LOGI("Wounded: a %s comes to help", g_medic.grove ? "Families member" : "paramedic");
+            m = p;
+        }
+    }
+    if (m) {
+        if (g_medic.stage == 0 && Approach(g_medic, m, me, 7)) {  // sprinting
+            g_medic.stage = 1;
+            g_medic.taskMs = now;
+            Face(g_medic.handle, m, me->GetPosition());
+            if (EnsureBlock("MEDIC")) Cmd(0x0605).I(g_medic.handle).S("CPR").S("MEDIC").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
+        } else if (g_medic.stage == 1) {
+            g_downEnd = std::max(g_downEnd, now + 1500);  // not while it is being revived
+            if (now - g_medic.taskMs >= kCprMs) {
+                std::string who = g_medic.grove ? TR("парень из Grove Street", "a Grove Street homie") : TR("врач", "a paramedic");
+                Revive(me, who);  // releases it
+                return;
+            }
+        }
+    }
+    // the one who pisses on it
+    CPed* q = g_pisser.Ped();
+    if (g_pisser.handle >= 0 && (!q || q->Health() <= 0.0f || q->InVehicle() || (g_pisser.stage == 0 && now - g_pisser.since > kNpcWayMs))) {
+        ReleaseNpc(g_pisser);
+        q = nullptr;
+    }
+    if (!q && now - g_downEnd + kDownMs > 2500) {
+        if (CPed* p = NearestNpc(me, false)) {
+            Pick(g_pisser, p, me, 0.8f);
+            LOGI("Wounded: a rival gang member comes over");
+            q = p;
+        }
+    }
+    if (q && g_pisser.stage == 0 && Approach(g_pisser, q, me, 4)) {  // walking
+        g_pisser.stage = 1;
+        Face(g_pisser.handle, q, me->GetPosition());
+        if (AnimExists("Piss_loop", "PAULNMAC"))
+            Cmd(0x0605).I(g_pisser.handle).S("Piss_loop").S("PAULNMAC").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
+        else
+            Cmd(0x0605).I(g_pisser.handle).S("fucku").S("PED").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
+    }
+}
+
 // ---- this player wounded, every frame
 void UpdateDowned(CPlayerPed* me) {
     if (g_wantDown) GoDown(me);
@@ -281,6 +439,8 @@ void UpdateDowned(CPlayerPed* me) {
         g_animCheckMs = now;
         if (!Cmd(0x0611).I(GetPedRef(me)).S(kDownAnim).Run()) LieDown(me);  // IS_CHAR_PLAYING_ANIM
     }
+    UpdateNpcs(me);
+    if (!g_down) return;  // an NPC revived it
     Players::Instance().SetLocalDowned(true, (uint8_t)std::min<uint64_t>(255, (g_downEnd - now + 999) / 1000));
 }
 
@@ -293,7 +453,7 @@ void HandleRevive(uint8_t from, Reader& r) {
     } else if (op == OP_STOP) {
         if (g_rescuer == from) g_rescuer = -1;
     } else if (op == OP_DONE) {
-        if (CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr) Revive(me, from);
+        if (CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr) Revive(me, Name(from));
     }
 }
 
@@ -344,6 +504,12 @@ std::string ReviveText(std::string& hint) {
         int secs = (int)((std::max(g_downEnd, now) - now + 999) / 1000);
         if (g_rescuer >= 0) {
             hint = Format(TR("%s откачивает вас", "%s is reviving you"), Name(g_rescuer).c_str());
+        } else if (g_medic.handle >= 0) {
+            bool there = g_medic.stage == 1;
+            hint = g_medic.grove ? (there ? TR("Парень из Grove Street откачивает вас", "A Grove Street homie is reviving you")
+                                          : TR("К вам бежит парень из Grove Street", "A Grove Street homie runs to you"))
+                                 : (there ? TR("Врач откачивает вас", "A paramedic is reviving you")
+                                          : TR("К вам бежит врач", "A paramedic runs to you"));
         } else {
             hint = Format(TR("Ждите напарника · удерживайте %s, чтобы сдаться", "Wait for a partner · hold %s to give up"),
                           Key().c_str());
