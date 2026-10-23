@@ -216,6 +216,7 @@ std::string g_csPending;            // partner: the host's cutscene, not loaded 
 uint64_t g_csPendingSince = 0;
 bool g_csPendingFromScene = false;  // it came while our player was in the previous one (just put back from it)
 bool g_csPendingLogged = false;
+uint64_t g_csClearedMs = 0;         // partner: when the last cutscene was cleared here
 
 bool Replicating() { return Net().Online() && Net().IsHost() && !Net().Peers().empty() && (g_active || HostOnMission()); }
 
@@ -1022,6 +1023,7 @@ void PartnerClearCutscene() {
     if (g_weWide || TheCameraWide()) SetWideScreen(false);
     g_weWide = false;
     g_csState = 0;
+    g_csClearedMs = NowMs();
     LOGI("Host cutscene finished here");
 }
 
@@ -1156,6 +1158,11 @@ void TryLoadPendingCutscene() {
         return;
     }
     if (!core::IsPlayerReady() || !flow::InHostWorld()) return;
+    // The previous cutscene was cleared a moment ago: our player was just put back in its place (and in its car), and the
+    // cutscene data, its animations and its models are being freed. Loading the next one in the same frame (the host's
+    // script does, ours follows a message) took the player out of the car it was warped into a moment before, and freed
+    // what the last frame of the old scene still used. The next one waits a few frames.
+    if (NowMs() - g_csClearedMs < 300) return;
     CPlayerPed* me = FindPlayerPed(0);
     if (!me || me->Health() <= 0.0f) return;  // dying: after the respawn
     int type = me->InVehicle() && me->Vehicle() ? me->Vehicle()->VehicleSubClass() : -1;

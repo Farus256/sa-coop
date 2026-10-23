@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <cmath>
 
 #include "common/api/protocol/Protocol.h"
@@ -543,6 +544,61 @@ uint16_t MakesFlags() {
 constexpr uint16_t kMakesFlags = OnFootState::F_POPULATION | OnFootState::F_TRAINS;
 constexpr int kMakesShift = 7;  // they go in a byte of their own: F_POPULATION is 1 there, F_TRAINS 2
 
+// A ped getting into a car stops it (CTaskComplexEnterCar::PrepareVehicleForPedEnter: the autopilot's cruise speed 0,
+// the old one kept in the task's m_CruiseSpeed, +0x48) and gives the speed back once it sits inside. For a player that
+// happens only if it gave up getting in (0x63E7A4 tests !bInVehicle for players: a slip of Rockstar's, the single-player
+// game never puts the player beside a driver). A player who got in beside a passer-by left the car standing for good,
+// its driver frozen at the wheel, in the game that drives it (ours for our traffic, the other one's for its traffic,
+// where our player's copy got in). Here the speed goes back as it does for anyone else.
+constexpr int kAutopilotCruise = 0x390 + 0x40;  // CVehicle::m_autoPilot.m_nCruiseSpeed
+constexpr int kEnterCruise = 0x48;               // CTaskComplexEnterCar::m_CruiseSpeed
+constexpr uint8_t kDefaultCruise = 10;           // what the game gives a car it sets driving again (TASK_STEAL_CAR...)
+std::map<CVehicle*, uint8_t> g_enterCruise;      // the speed a car had before a player started getting into it
+std::set<CVehicle*> g_cruiseGiven;               // cars started again without a record: once each, the game may stop them
+
+void* FindTaskOf(CPed* ped, int type) {  // CTaskManager::FindActiveTaskByType
+    void* intel = ped ? ped->Intelligence() : nullptr;
+    return intel ? CallMethod<0x681740, void*>((uint8_t*)intel + 4, type) : nullptr;
+}
+
+void KeepDriverGoing(CPed* player) {
+    if (!player || !IsPedValid(player)) return;
+    if (void* enter = FindTaskOf(player, 700 /* TASK_COMPLEX_ENTER_CAR_AS_PASSENGER */)) {
+        auto* v = Field<CVehicle*>(enter, 0x0C);
+        float was = Field<float>(enter, kEnterCruise);
+        if (v && was > 0.0f) g_enterCruise[v] = (uint8_t)std::min(was, 255.0f);
+        return;
+    }
+    CVehicle* v = player->InVehicle() ? player->Vehicle() : nullptr;
+    CPed* driver = v ? v->Driver() : nullptr;
+    if (!v || !driver || driver == player || driver->IsPlayer() || Players::Instance().FindByPed(driver)) return;
+    // getting out: the car waits for it standing (CTaskSimpleCarWaitToSlowDown), as it should; a driver dying stops too
+    if (FindTaskOf(player, 704 /* TASK_COMPLEX_LEAVE_CAR */) || driver->Health() <= 0.0f) return;
+    auto rec = g_enterCruise.find(v);
+    uint8_t was = rec != g_enterCruise.end() ? rec->second : 0;
+    if (rec != g_enterCruise.end()) g_enterCruise.erase(rec);
+    NetVehicle* nv = Vehicles::Instance().Find(v);
+    if (nv && Vehicles::Instance().IsMirror(*nv)) return;  // the owner's game drives it (and gives the speed back there)
+    uint8_t& cruise = Field<uint8_t>(v, kAutopilotCruise);
+    if (cruise != 0) return;
+    // a car stopped this way before the fix: a passer-by's goes on at the game's usual speed; a mission's driver is its
+    // script's to start again
+    if (!was && driver->CreatedBy() != 2 /* PED_MISSION */ && g_cruiseGiven.insert(v).second) was = kDefaultCruise;
+    if (!was) return;
+    cruise = was;
+    LOGI("The driver of the car %s sits in goes on (cruise speed %u)", player == FindPlayerPed(0) ? "our player" : "a player's copy",
+         (unsigned)was);
+}
+
+void KeepDriversGoing() {
+    for (auto it = g_enterCruise.begin(); it != g_enterCruise.end();)  // gone meanwhile (the pointer may be another car's)
+        it = IsVehicleValid(it->first) ? std::next(it) : g_enterCruise.erase(it);
+    for (auto it = g_cruiseGiven.begin(); it != g_cruiseGiven.end();) it = IsVehicleValid(*it) ? std::next(it) : g_cruiseGiven.erase(it);
+    KeepDriverGoing(FindPlayerPed(0));
+    for (auto& [id, rp] : Players::Instance().All())
+        if (rp.ped) KeepDriverGoing(rp.ped);
+}
+
 void FillCommon(OnFootState& st, CPlayerPed* me) {
     st.flags = MakesFlags();
     st.health = ClampByte(me->Health());
@@ -746,6 +802,8 @@ void Players::OnPeerLeave(uint8_t id) {
 void Players::OnGameStarted() {
     Cmd(0x0501).I(0).I(1).Run();  // SET_PLAYER_CAN_DO_DRIVE_BY: passengers may shoot from the window
     g_ourDriveBy.clear();
+    g_enterCruise.clear();
+    g_cruiseGiven.clear();
     m_enterReported = nullptr;
     m_lastCar = -1;  // another world
     m_exitReported = false;
@@ -1416,6 +1474,7 @@ void Players::OnPostProcess() {
     CPlayerPed* me = FindPlayerPed(0);
     if (!me) return;
     DetectCarTasks();
+    KeepDriversGoing();
     FollowHost();
     if (me->InVehicle() && me->Vehicle() && me->Vehicle()->Driver() == me) m_lastCar = GetVehicleRef(me->Vehicle());
     if (me->InVehicle() && me->Vehicle() && !me->Vehicle()->IsTrain()) SendVehicleState(me->Vehicle());

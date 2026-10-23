@@ -11,7 +11,11 @@
 // a script or an attractor plays these on the player, never its pad. The owner reports the one it plays (IFP block and
 // index, as for the mirrored peds) and the other game plays it on its copy of the player.
 //
-// The same channel (G_PLAYER_ANIM) carries both.
+// Choking (CTaskSimpleChoking: a spray can, a fire extinguisher, tear gas) plays gas_cwr of the ped group on the player
+// whom the spray reached. The copy of that player in the other games has every proof (its owner decides its damage),
+// and CShotInfo skips proof peds, so it never choked there: the owner reports it as it does an idle animation.
+//
+// The same channel (G_PLAYER_ANIM) carries them all.
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -39,7 +43,7 @@ enum : uint8_t { OP_PLAY = 1, OP_STOP_IDLE = 2, OP_ACTIVITY = 3, OP_ACTIVITY_END
 
 // groups whose animations are replicated as events (they are not produced by the pad replay)
 constexpr int kReplicatedGroups[] = {ANIM_GROUP_PLAYIDLES};
-constexpr int ANIM_GROUP_DEFAULT = 0, ANIM_ID_PHONE_IN = 145, ANIM_ID_PHONE_TALK = 147;
+constexpr int ANIM_GROUP_DEFAULT = 0, ANIM_ID_PHONE_IN = 145, ANIM_ID_PHONE_TALK = 147, ANIM_ID_GAS_CWR = 21;
 
 // IFP blocks of what a player does at a place
 constexpr const char* kActivityBlocks[] = {
@@ -48,7 +52,8 @@ constexpr const char* kActivityBlocks[] = {
     "LAPDAN3",  "BOMBER",   "CARRY",    "PARACHUTE", "INT_HOUSE", "INT_OFFICE", "INT_SHOP"};
 
 bool IsReplicated(int g, int id) {
-    if (g == ANIM_GROUP_DEFAULT) return id >= ANIM_ID_PHONE_IN && id <= ANIM_ID_PHONE_TALK;  // phone_in, phone_out, phone_talk
+    if (g == ANIM_GROUP_DEFAULT)  // phone_in, phone_out, phone_talk; choking
+        return (id >= ANIM_ID_PHONE_IN && id <= ANIM_ID_PHONE_TALK) || id == ANIM_ID_GAS_CWR;
     for (int r : kReplicatedGroups)
         if (r == g) return true;
     return false;

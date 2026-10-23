@@ -278,6 +278,10 @@ IDirect3D9* WINAPI HookDirect3DCreate9(UINT sdk) {
 
 void InstallWindowedMode() {
     auto& cfg = Cfg();
+    // The game knows nothing of display scaling: at 125 % Windows told it a 1920x1080 monitor was 1536x864, and the
+    // borderless window was drawn at that size and stretched (blurry). Real pixels, before the window is made.
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll"))
+        if (auto aware = (BOOL(WINAPI*)())GetProcAddress(user32, "SetProcessDPIAware")) aware();
     RECT mon = MonitorRect(nullptr);
     int monW = mon.right - mon.left, monH = mon.bottom - mon.top;
     g_winW = cfg.width > 0 ? cfg.width : 1280;

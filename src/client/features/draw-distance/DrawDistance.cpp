@@ -1,12 +1,20 @@
 // Draw distance. The game's far clip and fog come from the time cycle (CTimeCycle::m_CurrentColours, set for the
 // camera's place every frame by CTimeCycle::Update), and the range where models show in detail instead of their low
 // LODs is the menu's draw distance (CRenderer::ms_lodDistScale, 0.925..1.8 on the slider). Both are stretched by the
-// factors of coop.ini ([game] draw_distance, lod_distance; /draw in the chat changes the first one while playing).
+// factors of coop.ini ([game] draw_distance, lod_distance; /draw in the chat changes them while playing).
 //
-// A longer view puts more entities in the frame, and the renderer's lists do not check their room
-// (CRenderer::AddEntityToRenderList writes ms_aVisibleEntityPtrs[1000] / ms_aVisibleLodPtrs[1000] and
-// AddToLodRenderList the 16 KB scratch block with no bound): what would not fit is left out of the frame instead
-// of writing past them. The streaming memory the game gives models (50 MB) fills quickly with a long view: it is raised.
+// A longer view puts more entities in the frame, and the renderer's lists have fixed room: ms_aVisibleEntityPtrs[1000]
+// and ms_aVisibleLodPtrs[1000] (CRenderer::AddEntityToRenderList checks nothing: past them lie the lists' counters), and
+// the LOD render list in the 16 KB PC_Scratch (CRenderer::SetupBigBuildingVisibility writes it itself, unchecked; past
+// the block lie the platform's globals). 0.3.1 stretched the view by the full factors everywhere and left out of the
+// frame what did not fit. In a forest or over the city that was a part of the frame, chosen anew in every frame by the
+// order the sectors were scanned: trees and buildings blinked as the camera turned. A LOD whose child was left out
+// counted it as drawn, so neither the LOD nor the child showed (a hole in the map), and the LOD list overflowed into the
+// globals after the scratch block: the game crashed. Now the stretch shrinks as soon as the lists fill up (to the game's
+// own view when it must) and grows back slowly when there is room again, so nothing has to be left out; the guard
+// stays as the last resort. The streaming memory is raised as far as the process's address space allows.
+#include <windows.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -32,39 +40,73 @@ constexpr uintptr_t kMenuDrawDistance = addr::MenuManager + 0x40;  // CMenuManag
 constexpr uintptr_t kVisibleLods = 0xB76840;      // CRenderer::ms_nNoOfVisibleLods
 constexpr uintptr_t kVisibleEntities = 0xB76844;  // CRenderer::ms_nNoOfVisibleEntities
 constexpr uintptr_t kLodRenderList = 0xB745D0;    // CRenderer::ms_pLodRenderList, entries of 8 bytes
-constexpr uintptr_t kLodRenderListEnd = 0xC8E0C8 + 16384;  // PC_Scratch's end (the "don't render" list there is unused)
+constexpr uintptr_t kScratch = 0xC8E0C8;          // PC_Scratch, 16 KB
+constexpr uintptr_t kLodRenderListBase = kScratch + 24;  // CRenderer::GetLodRenderListBase
+constexpr uintptr_t kLodRenderListEnd = kScratch + 16384;
 constexpr uintptr_t kStreamingMemory = 0x8A5A80;  // CStreaming::ms_memoryAvailable
 constexpr int kVisibleMax = 1000;
+// the game's own LOD list ends where its unused "don't render" list begins (+0x2000): kept to that
+constexpr int kLodListRoom = (0x2000 - 24) / 8;
 // the far plane: a few kilometres keep the depth buffer's precision (beyond, distant buildings flicker)
-constexpr float kMaxFarClip = 3600.0f;
+constexpr float kMaxFarClip = 3000.0f;
+// the models' detail range at most this (the menu's slider ends at 1.8): beyond, the streamer cannot keep the HD
+// models in, and they swap with their LODs back and forth
+constexpr float kMaxLodScale = 2.4f;
+
+float g_adapt = 1.0f;          // the share of the configured stretch in use now (0: the game's own view)
+uint32_t g_droppedFrame = 0;   // entities the guard left out since the last frame
+uint32_t g_dropped = 0;        // ... since the last log line
+float g_minAdapt = 1.0f;       // the lowest share since the last log line
+
+// How full the renderer's lists were in the frame drawn last (they keep their counts until the next one is built)
+float LastFill() {
+    float ents = (float)Ref<int32_t>(kVisibleEntities) / kVisibleMax;
+    float lods = (float)Ref<int32_t>(kVisibleLods) / kVisibleMax;
+    uintptr_t at = Ref<uintptr_t>(kLodRenderList);
+    float lodList = at > kLodRenderListBase && at <= kLodRenderListEnd ? (float)((at - kLodRenderListBase) / 8) / kLodListRoom : 0.0f;
+    return std::max({ents, lods, lodList});
+}
+
+void Adapt() {
+    float fill = LastFill();
+    if (g_droppedFrame || fill > 0.85f) g_adapt -= 0.1f;  // nearly full: back at once
+    else if (fill > 0.72f) g_adapt -= 0.01f;
+    else if (fill < 0.6f) g_adapt += 0.004f;               // room again: out slowly (a few seconds), no blinking at the edge
+    g_adapt = std::clamp(g_adapt, 0.0f, 1.0f);
+    g_minAdapt = std::min(g_minAdapt, g_adapt);
+    g_droppedFrame = 0;
+}
 
 using VoidFn = void(__cdecl*)();
 VoidFn g_origTimeCycleUpdate = nullptr;
 void __cdecl HookTimeCycleUpdate() {
     g_origTimeCycleUpdate();
+    Adapt();
     const auto& cfg = Cfg();
-    float k = cfg.drawDistance;
+    float k = 1.0f + (cfg.drawDistance - 1.0f) * g_adapt;
     if (std::fabs(k - 1.0f) > 0.01f) {
-        float& far = Ref<float>(kFarClip);
+        float& farClip = Ref<float>(kFarClip);  // ("far" is a macro of windows.h)
         float& fog = Ref<float>(kFogStart);
-        if (far > 0.0f && far < 100000.0f) {
-            float stretched = std::min(far * k, std::max(far, kMaxFarClip));
-            fog = fog * (stretched / far);  // the fog starts as far off in proportion
-            far = stretched;
+        if (farClip > 0.0f && farClip < 100000.0f) {
+            float stretched = std::min(farClip * k, std::max(farClip, kMaxFarClip));
+            fog = fog * (stretched / farClip);  // the fog starts as far off in proportion
+            farClip = stretched;
         }
     }
     float menu = Ref<float>(kMenuDrawDistance);
-    if (menu > 0.1f && menu < 10.0f) Ref<float>(kLodDistScale) = menu * cfg.lodDistance;
+    if (menu > 0.1f && menu < 10.0f) {
+        float l = 1.0f + (cfg.lodDistance - 1.0f) * g_adapt;
+        Ref<float>(kLodDistScale) = std::min(menu * l, std::max(menu, kMaxLodScale));
+    }
 }
 
 using AddToRenderListFn = void(__cdecl*)(CEntity*, float);
 AddToRenderListFn g_origAddEntity = nullptr, g_origAddLod = nullptr;
-uint32_t g_dropped = 0;
 
 void __cdecl HookAddEntityToRenderList(CEntity* entity, float distance) {
     // which of the two lists it would go to is decided inside (a LOD with children, else an entity): either full, it waits
     if (Ref<int32_t>(kVisibleEntities) >= kVisibleMax - 1 || Ref<int32_t>(kVisibleLods) >= kVisibleMax - 1) {
-        ++g_dropped;
+        ++g_droppedFrame, ++g_dropped;
         return;
     }
     g_origAddEntity(entity, distance);
@@ -72,15 +114,30 @@ void __cdecl HookAddEntityToRenderList(CEntity* entity, float distance) {
 
 void __cdecl HookAddToLodRenderList(CEntity* entity, float distance) {
     if (Ref<uintptr_t>(kLodRenderList) + 8 > kLodRenderListEnd) {
-        ++g_dropped;
+        ++g_droppedFrame, ++g_dropped;
         return;
     }
     g_origAddLod(entity, distance);
 }
 
+// The game is a 32-bit program: 2 GB of address space, 4 GB with the large-address flag (a patched gta_sa.exe). Models
+// kept for a long view go into that space with everything else, and a build with HD textures ran out of it.
+uint32_t StreamingMemoryCap() {
+    auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    bool laa = (nt->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) != 0;
+    uint32_t cap = laa ? 1024u : 160u;
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    // what is still free of the address space: a quarter of it at most goes to more models
+    if (GlobalMemoryStatusEx(&ms)) cap = std::min<uint32_t>(cap, (uint32_t)(ms.ullAvailVirtual / 4 / (1024 * 1024)));
+    return cap;
+}
+
 void RaiseStreamingMemory() {
-    uint32_t want = (uint32_t)Cfg().streamingMemoryMb * 1024u * 1024u;
     uint32_t& have = Ref<uint32_t>(kStreamingMemory);
+    uint32_t wantMb = std::min<uint32_t>((uint32_t)Cfg().streamingMemoryMb, StreamingMemoryCap());
+    uint32_t want = wantMb * 1024u * 1024u;
     if (want && have < want) {
         LOGI("Streaming memory %u MB -> %u MB (draw distance)", have >> 20, want >> 20);
         have = want;
@@ -96,24 +153,28 @@ public:
         mem::HookFn(0x553710, &HookAddToLodRenderList, &g_origAddLod, "CRenderer::AddToLodRenderList");
         LOGI("Draw distance x%.2f, model detail x%.2f", Cfg().drawDistance, Cfg().lodDistance);
     }
-    void OnGameStarted() override { RaiseStreamingMemory(); }
+    void OnGameStarted() override {
+        g_adapt = 0.0f;  // a world just loaded: its view grows as the lists show room
+        RaiseStreamingMemory();
+    }
     void OnPreProcess() override {
         static uint64_t last = 0;
         if (NowMs() - last < 5000) return;
         last = NowMs();
         RaiseStreamingMemory();  // CStreaming::Init and stream.ini set it on their own
-        if (g_dropped) {
-            LOGD("Draw distance: %u entities left out of full render lists in the last 5 s", g_dropped);
-            g_dropped = 0;
-        }
+        if (g_dropped || g_minAdapt < 0.99f)
+            LOGD("Draw distance: stretch at %.0f%% (lowest %.0f%%), %u entities left out of full render lists in the last 5 s",
+                 g_adapt * 100.0f, g_minAdapt * 100.0f, g_dropped);
+        g_dropped = 0;
+        g_minAdapt = g_adapt;
     }
     bool OnCommand(const std::string& cmd, const std::vector<std::string>& args) override {
         if (cmd != "draw") return false;
         auto& cfg = Cfg();
         if (args.empty()) {
-            ui::TheChat().AddSystem(Format(TR("Дальность прорисовки: %.1f (детализация %.1f). /draw 1.0–4.0",
-                                              "Draw distance: %.1f (model detail %.1f). /draw 1.0-4.0"),
-                                           cfg.drawDistance, cfg.lodDistance));
+            ui::TheChat().AddSystem(Format(TR("Дальность прорисовки: %.1f (детализация %.1f), сейчас используется %.0f%%. /draw 1.0–4.0",
+                                              "Draw distance: %.1f (model detail %.1f), %.0f%% in use now. /draw 1.0-4.0"),
+                                           cfg.drawDistance, cfg.lodDistance, g_adapt * 100.0f));
             return true;
         }
         float v = (float)std::atof(args[0].c_str());
@@ -129,7 +190,7 @@ public:
         Ini ini;
         ini.Load(cfg.iniPath);
         ini.Set("game", "draw_distance", Format("%.1f", cfg.drawDistance));
-        ini.Set("game", "lod_distance", Format("%.1f", cfg.lodDistance));
+        ini.Set("game", "lod_distance", Format("%.2f", cfg.lodDistance));
         ini.Save(cfg.iniPath);
         ui::TheChat().AddSystem(Format(TR("Дальность прорисовки: %.1f (детализация %.1f).", "Draw distance: %.1f (model detail %.1f)."),
                                        cfg.drawDistance, cfg.lodDistance));

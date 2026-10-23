@@ -31,8 +31,9 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
 - up to three partners stand next to CJ in cutscenes
 - every player has a colour in the chat, over the head and on the radar
 - new commands `/tp`, `/tphere`, `/go`, `/mute`, `/unmute`, `/draw`
-- every screen resolution in the menu, 1920x1080 included, and borderless windowed full screen
-  (`borderless = 1` in `coop\coop.ini`)
+- every screen resolution in the menu, 1920x1080 included; full screen is a borderless window over the monitor by
+  default, so ALT+TAB is instant (`exclusive_fullscreen = 1` in `coop\coop.ini` brings back the real full screen
+  with the menu's resolution)
 - a longer draw distance than the game's (`draw_distance` and `lod_distance` in `coop\coop.ini`, `/draw` in the game)
 - Linux and macOS builds, server tests
 

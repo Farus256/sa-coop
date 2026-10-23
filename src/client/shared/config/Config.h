@@ -22,11 +22,14 @@ struct ClientConfig {
     // [game]
     bool windowed = false;
     bool borderless = false;          // windowed without a frame over the whole monitor (implies windowed)
+    // the game's own full screen (a display mode of its own). Off, "full screen" is a borderless window over the
+    // monitor: ALT+TAB goes to the desktop at once, with no black screen while the display mode switches back
+    bool exclusiveFullscreen = false;
     bool windowedStrict = false;      // test setups: quit at once if windowed mode could not be applied
     int windowX = -1, windowY = -1;   // -1 = centre
     int width = 0, height = 0;        // 0 = use the game's video mode
     float drawDistance = 2.0f;        // the far clip and fog of the time cycle times this (1 = the game's own)
-    float lodDistance = 1.5f;         // the menu's draw distance (models' detail range) times this
+    float lodDistance = 1.25f;        // the menu's draw distance (models' detail range) times this
     int streamingMemoryMb = 256;      // CStreaming::ms_memoryAvailable at least this (the game's 50 MB fill fast)
     bool multiInstance = false;       // allow several game copies (testing)
     bool runInBackground = true;      // keep simulating when the window is not focused
