@@ -29,8 +29,14 @@ using namespace game;
 // a player closer than this to one whose game generates: that population (spawned 40-55 m around it) covers both
 constexpr float kShareRadius = 60.0f;
 constexpr float kShareRadiusOff = 90.0f;  // hysteresis
+// Traffic spawns farther out (100 m and more around its player) and drives through: where two games made their own
+// within that reach, each one's cars met the other's copies, which go by the network and give way to nobody, and they
+// crashed into each other at the junctions. The cars of one game give way to each other as in the single-player game.
+constexpr float kCarShareRadius = 110.0f;
+constexpr float kCarShareRadiusOff = 160.0f;
 
-bool g_suppress = false;
+bool g_suppress = false;      // the passers-by are another player's game's
+bool g_suppressCars = false;  // and the traffic and parked cars
 
 int LocalWantedLevel() {
     void* wanted = Call<0x56E230, void*>(-1);  // FindPlayerWanted
@@ -40,32 +46,32 @@ int LocalWantedLevel() {
 // A game leaves the population to a player before it (MakesBefore) whose game makes its own (its state says so) close
 // by; one that leaves it too does not count, so a line of players apart gets people all along.
 void UpdateSuppression() {
-    bool want = false;
+    bool want = false, wantCars = false;
     uint8_t by = 255;
     if (Net().Online() && !Net().IsHost() && core::IsPlayerReady() && LocalWantedLevel() == 0) {
         CPlayerPed* me = FindPlayerPed(0);
-        float limit = g_suppress ? kShareRadiusOff : kShareRadius;
+        float limit = g_suppress ? kShareRadiusOff : kShareRadius, carLimit = g_suppressCars ? kCarShareRadiusOff : kCarShareRadius;
         for (auto& [id, rp] : Players::Instance().All()) {
             if (!rp.hasState || !(rp.state.flags & OnFootState::F_POPULATION) || !MakesBefore(id) ||
                 NowMs() - rp.stateRecvMs > 3000 || rp.state.area != me->AreaCode())
                 continue;
-            if ((rp.state.pos - me->GetPosition()).Length2D() < limit) {
+            float d = (rp.state.pos - me->GetPosition()).Length2D();
+            if (d < carLimit) wantCars = true;
+            if (d < limit) {
                 want = true;
                 by = id;
-                break;
             }
         }
     }
     if (want != g_suppress)
         LOGI("Population generation %s", want ? Format("handed to player %d", by).c_str() : "local");
+    if (wantCars != g_suppressCars) LOGI("Traffic generation %s", wantCars ? "handed to a nearby player's game" : "local");
     Share().population = !want;
-    if (g_suppress && !want) {
-        // the engine adds one ped a frame at the edge of view: the empty streets around would fill slowly. The
-        // countdowns of a game's start (and of a respawn) fill them at once
-        Ref<uint8_t>(0xC0EC23) = 2;  // CPopulation::m_CountDownToPedsAtStart
-        Ref<uint8_t>(0x9690C0) = 2;  // CCarCtrl::CountDownToCarsAtStart
-    }
+    // The game's own fills the streets as it does when the player walks on: at the edge of the view. The countdowns of a
+    // game's start (CPopulation::m_CountDownToPedsAtStart) put people and cars anywhere at once, right in front of the
+    // player as the other one walked away.
     g_suppress = want;
+    g_suppressCars = wantCars;
 }
 
 using UpdatePopFn = void(__cdecl*)(bool);
@@ -75,13 +81,13 @@ void __cdecl HookPopulationUpdate(bool generate) { g_origPopUpdate(generate && !
 using VoidFn = void(__cdecl*)();
 VoidFn g_origGenerateRandomCars = nullptr;
 void __cdecl HookGenerateRandomCars() {
-    if (g_suppress) return;
+    if (g_suppressCars) return;
     g_origGenerateRandomCars();
 }
 
 VoidFn g_origCarGenerators = nullptr;
 void __cdecl HookCarGeneratorsProcess() {
-    if (g_suppress) return;
+    if (g_suppressCars) return;
     g_origCarGenerators();
 }
 
@@ -199,7 +205,7 @@ public:
     }
     void OnPreProcess() override { UpdateSuppression(); }
     void OnSessionEnd() override {
-        g_suppress = false;
+        g_suppress = g_suppressCars = false;
         Share().population = true;
     }
 };

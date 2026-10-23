@@ -592,6 +592,13 @@ CPed* Peds::SpawnMirror(NetPed& np) {
     Cmd(0x087E).I(handle).I(0).Run();                      // SET_CHAR_DROPS_WEAPONS_WHEN_DEAD false
     ped->CurrentRotation() = ped->AimingRotation() = st.heading;
     ped->AreaCode() = st.area;
+    // The owner's game puts its passers-by at the edge of its own player's view, which is often in the middle of ours:
+    // they appeared out of nowhere in front of this player. They come into sight over half a second (the game does the
+    // same with its own, CPopulation::AddPed: alpha 0).
+    if (void* clump = ped->RwObject()) {
+        Call<0x732B00>(clump, 0);  // CVisibilityPlugins::SetClumpAlpha
+        np.fadeMs = NowMs();
+    }
     np.ped = ped;
     np.handle = handle;
     m_byPtr[ped] = np.netId;
@@ -735,6 +742,11 @@ void Peds::ApplyMirror(NetPed& np) {
     if (!WantMirror(np)) {
         Unspawn(np);
         return;
+    }
+    if (np.fadeMs) {
+        uint64_t t = now - np.fadeMs;
+        if (void* clump = ped->RwObject()) Call<0x732B00>(clump, (int)std::min<uint64_t>(255, t * 255 / 500));
+        if (t >= 500) np.fadeMs = 0;
     }
     ped->AreaCode() = st.area;
     if (st.flags & PedSyncState::F_DEAD) {

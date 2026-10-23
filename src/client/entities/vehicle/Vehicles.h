@@ -47,6 +47,11 @@ struct NetVehicle {
     VehicleState state;
     uint64_t recvMs = 0;
     uint32_t lastTime = 0;
+    // mirror: what the owner's states show between them (the extrapolation and the wheels use them)
+    game::CVector accel;      // m/s², from the last two states
+    float yawRate = 0;        // rad/s, from the turn of the last two states
+    float steerShown = 0;     // the front wheels' angle shown here
+    uint64_t fadeMs = 0;      // spawned here at: it fades in, not out of nowhere
     uint64_t lastSendMs = 0;
     uint64_t lastChangeMs = 0;  // owned: last time it moved or was used
     VehicleLook look;            // owned: last sent; mirror: wanted
@@ -57,6 +62,10 @@ struct NetVehicle {
     uint64_t claimMs = 0;          // owned: taken over when its owner left (two players taking it: the lower number keeps it)
     uint64_t orphanMs = 0;         // its owner left at: the nearest player takes it, or it goes after a while
 };
+
+// The front wheels' angle a car's motion asks for (as a bicycle: tan(steer) = wheelbase * yaw rate / forward speed):
+// for a car whose steering angle is not driven (AI traffic on rails, a mirror of such a car)
+float SteerForMotion(game::CVehicle* v, const game::CVector& vel, float yawRate);
 
 // Another player's vehicle this game has no copy of now (far from this game's player, or its model still streaming).
 struct PendingVehicle {

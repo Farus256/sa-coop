@@ -59,6 +59,23 @@ bool HasPlayerInside(CVehicle* v) {
     return false;
 }
 
+float HeadingOf(const Quat& q) {  // the forward axis' direction on the map (radians)
+    float fx = 2 * (q.x * q.y - q.w * q.z), fy = 1 - 2 * (q.x * q.x + q.z * q.z);
+    return std::atan2(-fx, fy);
+}
+
+float WrapPi(float a) {
+    while (a > 3.14159265f) a -= 6.2831853f;
+    while (a < -3.14159265f) a += 6.2831853f;
+    return a;
+}
+
+bool HasSteeredWheels(CVehicle* v) {
+    int t = v->VehicleSubClass();
+    return t == VEHICLE_TYPE_AUTOMOBILE || t == VEHICLE_TYPE_MTRUCK || t == VEHICLE_TYPE_QUAD || t == VEHICLE_TYPE_BIKE ||
+           t == VEHICLE_TYPE_BMX || t == VEHICLE_TYPE_TRAILER;
+}
+
 void SetVehicleMatrix(CVehicle* v, const CVector& pos, const Quat& q) {
     CMatrix* m = v->Matrix();
     if (!m) return;
@@ -112,6 +129,16 @@ bool VehicleLook::operator==(const VehicleLook& o) const {
 }
 
 bool IsSyncableVehicle(CVehicle* v) { return !v->IsTrain(); }
+
+float SteerForMotion(CVehicle* v, const CVector& vel, float yawRate) {
+    CMatrix* m = v->Matrix();
+    if (!m || !HasSteeredWheels(v)) return 0.0f;
+    float fwd = vel.x * m->forward.x + vel.y * m->forward.y + vel.z * m->forward.z;
+    if (std::fabs(fwd) < 1.0f) return 0.0f;  // standing or creeping: no telling
+    constexpr float kWheelbase = 2.6f;       // a car's; near enough for the look of it
+    // positive: to the left (CAutomobile turns its front wheels by (-sin, cos) of the angle), as the yaw turns left
+    return std::clamp(std::atan(kWheelbase * yawRate / fwd), -0.6f, 0.6f);
+}
 
 // A mirror has the AI-driven status (STATUS_PHYSICS), so every physics step ran its AI steering
 // (CCarCtrl::SteerAICarWithPhysics): with no mission it brakes and pulls the handbrake, and the next frame's
@@ -412,7 +439,12 @@ bool Vehicles::CreateMirror(const PendingVehicle& pv) {
     nv.model = sp.model;
     nv.createdByUs = !adopted;
     nv.script = sp.script;
-    if (adopted) Protect(nv);
+    if (adopted) {
+        Protect(nv);
+    } else if (void* clump = v->RwObject()) {
+        Call<0x732B00>(clump, 0);  // CVisibilityPlugins::SetClumpAlpha: fades in (ApplyMirror)
+        nv.fadeMs = NowMs();
+    }
     if (pv.hasState) {  // where the owner has it now, at once
         nv.state = pv.state;
         nv.hasState = true;
@@ -677,6 +709,21 @@ void Vehicles::ApplyDriverState(uint8_t from, uint16_t netId, const VehicleState
     }
     if (nv->owner != from) return;
     if (nv->hasState && (int32_t)(st.time - nv->lastTime) < 0) return;
+    // how it speeds up or brakes and turns between the owner's states (its own turn speed is 0 for AI traffic on rails)
+    if (nv->hasState) {
+        float dt = (float)(st.time - nv->lastTime) / 1000.0f;
+        if (dt > 0.02f && dt < 0.6f) {
+            CVector a = (st.vel - nv->state.vel) * (1.0f / dt);
+            float len = a.Length();
+            if (len > 15.0f) a = a * (15.0f / len);  // a crash, not an acceleration to carry on
+            nv->accel = nv->accel * 0.5f + a * 0.5f;
+            float yaw = std::fabs(st.turn.z) > 0.01f ? st.turn.z : WrapPi(HeadingOf(st.rot) - HeadingOf(nv->state.rot)) / dt;
+            nv->yawRate = nv->yawRate * 0.5f + std::clamp(yaw, -3.0f, 3.0f) * 0.5f;
+        } else {
+            nv->accel = CVector{};
+            nv->yawRate = st.turn.z;
+        }
+    }
     if ((st.flags ^ (nv->hasState ? nv->state.flags : 0)) & VehicleState::F_HORN)
         LOGD("Vehicle %04X: horn %s", netId, (st.flags & VehicleState::F_HORN) ? "on" : "off");
     if ((st.extras ^ (nv->hasState ? nv->state.extras : 0)) & VehicleState::X_LIGHT)
@@ -834,13 +881,35 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
     // A towed one keeps STATUS_IS_TOWED: with any other its ProcessControl breaks the link (0x6B32A7)
     if (!wreck && v->Driver() != me && v->VehicleSubClass() != VEHICLE_TYPE_TRAILER && !tower) v->SetStatus(STATUS_PHYSICS);
 
+    // spawned here a moment ago: it comes into sight over half a second (CVehicle::UpdateClumpAlpha goes on from where
+    // it is, for the cars that have it), not out of nowhere in front of the player
+    if (nv.fadeMs) {
+        uint64_t t = NowMs() - nv.fadeMs;
+        if (void* clump = v->RwObject()) Call<0x732B00>(clump, (int)std::min<uint64_t>(255, t * 255 / 500));  // SetClumpAlpha
+        if (t >= 500) nv.fadeMs = 0;
+    }
     float age = std::min(0.3f, (float)(NowMs() - nv.recvMs) / 1000.0f);
-    CVector target = st.pos + st.vel * age;
+    // Where the owner's car is now: on from the last state with its speed and how it was speeding up or braking. With
+    // the speed alone a braking car went on past the place it stops at, a car behind another drove into it here and
+    // was pushed back by the next state: the queues at the lights kept bumping into each other. Braking, it goes no
+    // farther than where that braking stops it.
+    CVector disp = st.vel * age + nv.accel * (0.5f * age * age);
+    CVector vNow = st.vel + nv.accel * age;
+    float speed = st.vel.Length();
+    if (speed > 0.1f) {
+        float along = (nv.accel.x * st.vel.x + nv.accel.y * st.vel.y + nv.accel.z * st.vel.z) / speed;
+        if (along < -0.5f) {
+            float stop = speed * speed / (-2.0f * along), d = disp.Length();
+            if (d > stop) disp = disp * (stop / d);
+            if (age >= speed / -along) vNow = CVector{};
+        }
+    }
+    CVector target = st.pos + disp;
     // The turn goes on too. The rotation was pulled to where the owner's car faced when the state left, while the physics
     // turned it on by its turn speed: between states a turning car lagged behind and jumped ahead with each new one. The
     // follow camera hid it, but a passenger aiming out of the window (the aim camera sits on the passenger, MODE_
     // AIMWEAPON_FROMCAR) saw the picture shake 10-30 times a second.
-    Quat targetRot = st.rot.Advanced(st.turn, age);
+    Quat targetRot = st.rot.Advanced(CVector{st.turn.x, st.turn.y, std::fabs(st.turn.z) > 0.01f ? st.turn.z : nv.yawRate}, age);
     CVector cur = v->GetPosition();
     CVector err = target - cur;
     float dist = err.Length();
@@ -862,7 +931,7 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
         v->MoveSpeed() = st.vel * (1.0f / 50.0f);
         v->TurnSpeed() = st.turn * (1.0f / 50.0f);
     } else if (!resting) {
-        CVector cmd = st.vel + err * 4.0f;  // converge in ~1/4 s
+        CVector cmd = vNow + err * 4.0f;  // converge in ~1/4 s
         v->MoveSpeed() = cmd * (1.0f / 50.0f);
         v->TurnSpeed() = st.turn * (1.0f / 50.0f);
         if (CMatrix* m = v->Matrix()) {
@@ -877,7 +946,11 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
         nv.lookCheckMs = NowMs();
         ApplyLook(nv);
     }
-    v->SteerAngle() = st.steer;
+    // The front wheels as the owner's: an AI car on rails there (out of its player's way, CCarCtrl::UpdateCarOnRails) has
+    // them straight and only its body turns, so a corner was taken with the wheels straight. Then they follow the turn.
+    float wantSteer = std::fabs(st.steer) > 0.02f ? st.steer : SteerForMotion(v, st.vel, nv.yawRate);
+    nv.steerShown += (wantSteer - nv.steerShown) * std::min(1.0f, dt * 10.0f);
+    v->SteerAngle() = nv.steerShown;
     v->GasPedal() = st.gas;
     v->BrakePedal() = st.brake;
     v->Health() = st.health;
@@ -1010,10 +1083,58 @@ void Vehicles::ReleaseKeptCar() {
     m_kept = -1;
 }
 
+namespace {
+// AI traffic out of the way of its game's physics runs on rails (STATUS_SIMPLE, CCarCtrl::UpdateCarOnRails): its body
+// follows the road, its steering angle stays 0, and it took the corners with its front wheels straight. Near a player
+// (ours, or another one, whose game shows its state) the wheels follow its turn. Before the states go out: they carry it.
+struct RailSteer {
+    float heading = 0, yaw = 0, steer = 0;
+    CVector pos, vel;  // its speed by its moves (a car on rails may have none of its own)
+    uint64_t ms = 0;
+};
+std::map<CVehicle*, RailSteer> g_railSteer;
+constexpr uint8_t STATUS_SIMPLE = 2;
+
+void SteerRailCars(CPlayerPed* me) {
+    CPoolHeader* pool = VehiclePool();
+    if (!pool || !me) return;
+    uint64_t now = NowMs();
+    for (auto it = g_railSteer.begin(); it != g_railSteer.end();)
+        it = IsVehicleValid(it->first) && it->first->Status() == STATUS_SIMPLE ? std::next(it) : g_railSteer.erase(it);
+    CVector mp = me->GetPosition();
+    for (int i = 0; i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        auto* v = (CVehicle*)(pool->objects + (size_t)i * kVehiclePoolElemSize);
+        CMatrix* m = v->Matrix();
+        if (!m || v->Status() != STATUS_SIMPLE || !v->Driver() || !HasSteeredWheels(v)) continue;
+        if (NetVehicle* nv = Vehicles::Instance().Find(v); nv && Vehicles::Instance().IsMirror(*nv)) continue;
+        CVector p = v->GetPosition();
+        if ((p - mp).Length() > 150.0f && RemoteDistance(p, v->AreaCode()) > 150.0f) continue;
+        float heading = std::atan2(-m->forward.x, m->forward.y);
+        RailSteer& r = g_railSteer[v];
+        if (r.ms) {
+            float dt = (float)(now - r.ms) / 1000.0f;
+            if (dt > 0.005f && dt < 0.5f) {
+                r.yaw = r.yaw * 0.7f + std::clamp(WrapPi(heading - r.heading) / dt, -3.0f, 3.0f) * 0.3f;
+                r.vel = r.vel * 0.7f + (p - r.pos) * (0.3f / dt);
+            }
+        }
+        r.heading = heading;
+        r.pos = p;
+        r.ms = now;
+        CVector vel = v->MoveSpeed().Length() > 0.01f ? v->MoveSpeed() * 50.0f : r.vel;
+        float want = SteerForMotion(v, vel, r.yaw);
+        r.steer += (want - r.steer) * 0.2f;
+        v->SteerAngle() = r.steer;
+    }
+}
+}  // namespace
+
 void Vehicles::OnPostProcess() {
     if (!Net().Online() || !core::IsPlayerReady()) return;
     CPlayerPed* me = FindPlayerPed(0);
     uint64_t now = NowMs();
+    SteerRailCars(me);
     KeepCarWhileInside(me);
     for (auto& [v, to] : m_giveAway)  // still ours and still free to go
         if (NetVehicle* nv = IsVehicleValid(v) ? Find(v) : nullptr; nv && !IsMirror(*nv) && CanGiveAway(v)) GiveAway(*nv, to);
@@ -1032,7 +1153,7 @@ void Vehicles::OnPostProcess() {
         if (IsMirror(nv)) {
             // keep the visual controls after the physics step (wheels, brake lights)
             if (nv.hasState) {
-                nv.veh->SteerAngle() = nv.state.steer;
+                nv.veh->SteerAngle() = nv.steerShown;
                 nv.veh->BrakePedal() = nv.state.brake;
                 // CHeli::ProcessControl just switched its searchlight off (no police AI, no player here) and
                 // CHeli::PreRender (0x6C5420) adds the light to this frame at night: as the owner's
@@ -1073,7 +1194,9 @@ void Vehicles::OnPostProcess() {
         if (speed > 0.1f) nv.lastChangeMs = now;
         bool active = now - nv.lastChangeMs < 3000;
         bool towed = Field<CVehicle*>(nv.veh, 0x4C4) != nullptr;  // CVehicle::m_pTowingVehicle
-        uint64_t interval = towed ? 50 : active ? 100 : 2000;
+        // moving near another player: 20 states a second (the traffic around that player keeps its distances there)
+        bool close = active && RemoteDistance(nv.veh->GetPosition(), nv.veh->AreaCode()) < 80.0f;
+        uint64_t interval = towed || close ? 50 : active ? 100 : 2000;
         proto::PlayerMask targets = StateTargets(nv);
         bool newcomer = (targets & ~nv.syncTo) != 0;  // came near: where it stands now, at once
         if (now - nv.lastSendMs >= interval || newcomer) {
@@ -1148,6 +1271,7 @@ void Vehicles::OnSessionStart() {
 }
 
 void Vehicles::OnGameStarted() {
+    g_railSteer.clear();
     m_lastDriven = m_kept = -1;  // a new world: the old handles mean other cars
     m_lastArea = 0;
     m_byId.clear();

@@ -75,6 +75,7 @@ struct NetPed {
     uint16_t baseBlock = 0xFFFF, baseIdx = 0;  // the full-body one under it (a fight stance under punches)
     float animTime = 0;                         // owner's time of it in the latest state (restarts go back)
     bool animFull = false;                      // it is not partial: locomotion tasks must wait
+    uint64_t fadeMs = 0;                        // spawned here at: it fades in over half a second
 };
 
 class Peds : public Module {

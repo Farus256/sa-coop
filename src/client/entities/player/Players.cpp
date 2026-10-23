@@ -590,13 +590,43 @@ void KeepDriverGoing(CPed* player) {
          (unsigned)was);
 }
 
+// A passenger leaning out of the window with a gun (CTaskSimpleGangDriveBy, the split-screen mode's drive-by the mod
+// gives to any instant-hit gun) aims and fires with an empty hand: getting in took the gun's model out of the hand
+// (CPed::RemoveWeaponWhenEnteringVehicle) and the task puts back only the SMG the split-screen mode allowed. The gun in
+// hand is shown while it leans out, ours and the other players' copies alike, and goes again when it sits back.
+constexpr int kWeaponModelId = 0x740;  // CPed::m_nWeaponModelId
+std::set<CPed*> g_driveByGun;          // the passengers whose gun this showed
+
+void ShowDriveByGun(CPed* ped) {
+    if (!ped || !IsPedValid(ped)) return;
+    bool leaning = ped->InVehicle() && ped->Vehicle() && ped->Vehicle()->Driver() != ped &&
+                   FindTaskOf(ped, 1022 /* TASK_SIMPLE_GANG_DRIVEBY */);
+    const CWeapon& w = ped->ActiveWeapon();
+    void* info = w.type > 0 && w.type <= kLastWeapon ? Call<0x743C60, void*>(w.type, (uint8_t)1) : nullptr;  // CWeaponInfo::GetWeaponInfo
+    int model = info ? Field<int32_t>(info, 0x0C) : -1;  // m_nModelId1
+    int32_t& shown = Field<int32_t>(ped, kWeaponModelId);
+    if (leaning) {
+        if (model > 0 && shown != model && IsModelLoaded(model)) {
+            CallMethod<0x5E5ED0>(ped, model);  // CPed::AddWeaponModel
+            g_driveByGun.insert(ped);
+        }
+        return;
+    }
+    if (g_driveByGun.erase(ped) && ped->InVehicle() && shown > 0) CallMethod<0x5E3990>(ped, shown);  // CPed::RemoveWeaponModel
+}
+
 void KeepDriversGoing() {
     for (auto it = g_enterCruise.begin(); it != g_enterCruise.end();)  // gone meanwhile (the pointer may be another car's)
         it = IsVehicleValid(it->first) ? std::next(it) : g_enterCruise.erase(it);
     for (auto it = g_cruiseGiven.begin(); it != g_cruiseGiven.end();) it = IsVehicleValid(*it) ? std::next(it) : g_cruiseGiven.erase(it);
+    for (auto it = g_driveByGun.begin(); it != g_driveByGun.end();) it = IsPedValid(*it) ? std::next(it) : g_driveByGun.erase(it);
     KeepDriverGoing(FindPlayerPed(0));
+    ShowDriveByGun(FindPlayerPed(0));
     for (auto& [id, rp] : Players::Instance().All())
-        if (rp.ped) KeepDriverGoing(rp.ped);
+        if (rp.ped) {
+            KeepDriverGoing(rp.ped);
+            ShowDriveByGun(rp.ped);
+        }
 }
 
 void FillCommon(OnFootState& st, CPlayerPed* me) {
@@ -787,6 +817,7 @@ bool Players::SetModel(CPlayerPed* ped, int model) {
 void Players::OnSessionStart() { m_lastSend = 0; }
 
 void Players::OnSessionEnd() {
+    g_driveByGun.clear();
     for (auto& [id, rp] : m_remote) DestroyRemote(rp);
     m_remote.clear();
     g_ourDriveBy.clear();
@@ -804,6 +835,7 @@ void Players::OnGameStarted() {
     g_ourDriveBy.clear();
     g_enterCruise.clear();
     g_cruiseGiven.clear();
+    g_driveByGun.clear();
     m_enterReported = nullptr;
     m_lastCar = -1;  // another world
     m_exitReported = false;

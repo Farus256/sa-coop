@@ -47,11 +47,13 @@ constexpr uintptr_t kStreamingMemory = 0x8A5A80;  // CStreaming::ms_memoryAvaila
 constexpr int kVisibleMax = 1000;
 // the game's own LOD list ends where its unused "don't render" list begins (+0x2000): kept to that
 constexpr int kLodListRoom = (0x2000 - 24) / 8;
-// the far plane: a few kilometres keep the depth buffer's precision (beyond, distant buildings flicker)
-constexpr float kMaxFarClip = 3000.0f;
-// the models' detail range at most this (the menu's slider ends at 1.8): beyond, the streamer cannot keep the HD
-// models in, and they swap with their LODs back and forth
-constexpr float kMaxLodScale = 2.4f;
+// The far plane at most this. The depth buffer's step grows with the square of the distance (24 bits from a near plane
+// of 0.3 m: some 0.2 m at 1 km, nearly a metre at 2 km), and far off the road over the ground, a wall's paint over the
+// wall and an LOD over its building shimmered as the camera moved: the game's own fog hides that from 1-1.5 km on.
+constexpr float kMaxFarClip = 2400.0f;
+// The models' detail range at most this (the menu's slider ends at 1.8): beyond, the streamer cannot keep the HD models
+// in, they swap with their LODs back and forth, and the two overlap while they cross-fade (their textures shimmer).
+constexpr float kMaxLodScale = 1.9f;
 
 float g_adapt = 1.0f;          // the share of the configured stretch in use now (0: the game's own view)
 uint32_t g_droppedFrame = 0;   // entities the guard left out since the last frame
@@ -89,7 +91,10 @@ void __cdecl HookTimeCycleUpdate() {
         float& fog = Ref<float>(kFogStart);
         if (farClip > 0.0f && farClip < 100000.0f) {
             float stretched = std::min(farClip * k, std::max(farClip, kMaxFarClip));
-            fog = fog * (stretched / farClip);  // the fog starts as far off in proportion
+            // The fog starts where the game has it, a little farther at most, and thickens over the longer view: the
+            // distance is seen, its shimmer (the depth buffer's) is under the fog. 0.3.1 moved the fog out with the
+            // plane and showed it bare.
+            fog = std::max(fog, std::min(fog * 1.25f, stretched * 0.6f));
             farClip = stretched;
         }
     }
