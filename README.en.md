@@ -14,9 +14,6 @@ SA:COOP is a mod for GTA San Andreas that lets two to sixteen players go through
 network. One player is the host: the game runs on their save, and they start the missions. The others connect to
 them and play in the same world as characters of their own, with their own money, skills and look.
 
-> A fork of [SA:COOP](https://github.com/Karimov-Akbar/sa-coop) by Karimov-Akbar (MIT license). The original is for
-> two players, this one for up to 16.
-
 ## Differences from the original
 
 It is based on the original 0.2.7 and keeps everything from it. Added:
