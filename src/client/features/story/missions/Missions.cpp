@@ -185,6 +185,7 @@ std::map<uint32_t, Area> g_areas;
 std::vector<uint8_t> g_lastAreasMsg, g_lastOnscreen;
 uint64_t g_lastTick = 0, g_lastFadeMs = 0;
 bool g_hostCutscene = false;
+uint64_t g_hostCutsceneEndMs = 0;  // host: when its last cutscene ended
 std::string g_missionName;
 int32_t g_moneyAtStart = 0;  // the partner gets what the host earned during the mission
 char g_cutsceneName[32] = {};  // last loaded cutscene, for partners joining during it
@@ -862,13 +863,27 @@ void __cdecl HookRebuildCutscenePlayer(CPlayerPed* ped, int model) {
     Call<0x5A81E0>((uint32_t)model, g_cutsceneCj->ClothesDesc(), (CPedClothesDesc*)nullptr, true);  // CClothes::ConstructPedModel
 }
 
+// The partners' characters stand in a cutscene the way they did in 0.3.0. There a cutscene that followed another one
+// right away (the next part of a mission's opening, loaded within seconds of the previous one's end) never played in a
+// partner's game (its player, just put back from the previous scene, counted as in the air), so the partners were not
+// in it. Such a cutscene now plays for the partners too (Missions' TryLoadPendingCutscene), and their characters keep
+// out of it as before; a cutscene that comes on its own has them, as it always did.
+constexpr uint64_t kFollowUpMs = 5000;
+bool FollowUpCutscene() {
+    return g_hostCutscene || (g_hostCutsceneEndMs && NowMs() - g_hostCutsceneEndMs < kFollowUpMs);
+}
+
 void __cdecl HookLoadCutscene(const char* name) {
     if (Net().Online() && Net().IsHost() && name) {
+        bool followUp = FollowUpCutscene();
+        scene::AllowExtras(!followUp);
+        LOGI("Cutscene %s: the partners' characters %s", name, followUp ? "keep out of it (it follows the previous one)" : "take part");
         // a script that clears one cutscene and loads the next in the same frame (the prologue does): the end goes
         // out first, otherwise the partner takes it for the end of the one it is loading
         if (g_hostCutscene) {
             SendCutscene(CS_END);
             g_hostCutscene = false;
+            g_hostCutsceneEndMs = NowMs();
             LOGI("Cutscene ended (replicated before the next one)");
         }
         strncpy(g_cutsceneName, name, sizeof(g_cutsceneName) - 1);
@@ -1674,6 +1689,8 @@ public:
 private:
     static void Reset() {
         g_active = g_hostCutscene = false;
+        g_hostCutsceneEndMs = 0;
+        scene::AllowExtras(true);
         g_baseline.clear();
         g_sentBlips.clear();
         g_areas.clear();
@@ -1781,6 +1798,7 @@ private:
         bool cs = CutsceneRunning();
         if (g_hostCutscene && !cs) {
             SendCutscene(CS_END);
+            g_hostCutsceneEndMs = NowMs();
             LOGI("Cutscene ended (replicated)");
         }
         g_hostCutscene = cs;

@@ -32,6 +32,9 @@ void Prepare();
 void Analyse();
 // host: the partners in the scene, in the order they get places (call it before Analyse)
 void SetCast(const std::vector<uint8_t>& ids);
+// host, as a cutscene loads: whether the partners' characters take part in it at all. Off, every one keeps out of the
+// whole cutscene (as "NAME hidden" in coop\cutscenes.txt) and the partners watch it without them.
+void AllowExtras(bool on);
 // host: a spot just chosen for player id and the moment (the camera's clock, ms) its shot begins, once per shot and
 // player: call it until it says false
 bool TakeDecision(uint8_t& id, Spot& s, float& at);

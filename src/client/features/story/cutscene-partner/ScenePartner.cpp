@@ -645,6 +645,7 @@ struct Extra {
     std::deque<Decision> follow;   // a partner's game: the host's choices still to come
 };
 std::map<uint8_t, Extra> g_extras;  // by player
+bool g_extrasAllowed = true;        // host: the cutscene being played has the partners' characters in it (AllowExtras)
 std::vector<uint8_t> g_cast;        // host: who gets places this shot, in order
 struct {
     CVector cj;
@@ -1291,7 +1292,7 @@ void AddExtraToScene(Scene& sc, const Spot& s) {
 
 Spot Choose(const Scene& sc) {
     const Places* own = PlacesOf(g_cutscene);
-    bool may = !sc.cjInCar && !(own && own->hidden), before = may && g_havePrev && g_prev.pose != POSE_HIDDEN;
+    bool may = g_extrasAllowed && !sc.cjInCar && !(own && own->hidden), before = may && g_havePrev && g_prev.pose != POSE_HIDDEN;
     Track tr;
     bool track = TrackOf(CutsceneCj(), tr) && PathOf(tr).size() > 1;
     CEntity* cj = CutsceneCj();
@@ -1699,6 +1700,8 @@ void Analyse() {
 }
 
 void SetCast(const std::vector<uint8_t>& ids) { g_cast = ids; }
+
+void AllowExtras(bool on) { g_extrasAllowed = on; }
 
 bool TakeDecision(uint8_t& id, Spot& s, float& at) {
     for (auto& [pid, x] : g_extras)
