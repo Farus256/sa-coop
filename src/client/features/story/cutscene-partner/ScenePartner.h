@@ -1,11 +1,7 @@
 #pragma once
 // The partners' characters in the host's cutscenes: where each is in each shot and what it does there (up to three of
-// them; with more partners the rest keep out of the scene). The host's game picks the spots (the partners' follow)
-// from the cutscene camera, the actors and what is drawn
-// around CJ (cutscene sets often have no collision): a chair, sofa or steps (sits down), a wall behind it (leans on
-// it, maybe smoking) or free floor (stands about), always on CJ's floor, inside the frame, seen by the camera and
-// covering nobody, out of the way of the scene's people and cars, and so for the whole shot: the cutscene camera's
-// spline and the animation tracks tell how the shot goes on.
+// them; with more partners the rest keep out of the scene). Every game places them itself near CJ, inside the
+// picture, covering nobody, from the camera of the frame (ScenePartner.cpp says how).
 #include <cstdint>
 #include <string>
 #include <vector>

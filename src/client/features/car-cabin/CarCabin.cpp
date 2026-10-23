@@ -33,7 +33,15 @@ constexpr int TASK_SIMPLE_GANG_DRIVEBY = 1022;
 std::map<uint16_t, int8_t> g_stations;  // the station each player-driven car plays (by its net id)
 int8_t g_sentStation = -100;
 uint16_t g_sentCar = 0;
-uint64_t g_sentMs = 0, g_tunedMs = 0;
+uint64_t g_sentMs = 0;
+// the driver: what the radio says now and since when (a retune passes through no station: only a station held a
+// moment is sent, or the passengers chased each step and heard nothing but the retune's noise)
+int8_t g_seenStation = -100;
+uint64_t g_seenMs = 0;
+// a passenger: the station asked for last, in which car (asked once per change, never by comparing with what the radio
+// says: during a retune it says something else, and asking again restarted the retune for ever)
+int8_t g_appliedStation = -100;
+uint16_t g_appliedCar = 0;
 
 int8_t CurrentStation() {
     int32_t s = -1;
@@ -73,6 +81,8 @@ void SendStation(CPlayerPed* me) {
     if (!nv) return;
     int8_t s = CurrentStation();
     uint64_t now = NowMs();
+    if (s != g_seenStation) g_seenStation = s, g_seenMs = now;
+    if (s < 0 || now - g_seenMs < 800) return;  // retuning
     if (s == g_sentStation && nv->netId == g_sentCar && now - g_sentMs < 3000) return;
     if (s != g_sentStation || nv->netId != g_sentCar) LOGD("Radio: station %d in car %u", s, nv->netId);
     g_sentStation = s, g_sentCar = nv->netId, g_sentMs = now;
@@ -86,10 +96,15 @@ void SendStation(CPlayerPed* me) {
 void FollowStation(CPlayerPed* me) {
     CVehicle* v = PlayersCar(me);
     NetVehicle* nv = v ? Vehicles::Instance().Find(v) : nullptr;
-    if (!nv) return;
+    if (!nv) {
+        g_appliedCar = 0;
+        return;
+    }
     auto it = g_stations.find(nv->netId);
-    if (it == g_stations.end() || NowMs() - g_tunedMs < 1500 || it->second == CurrentStation()) return;
-    g_tunedMs = NowMs();  // a retune takes a moment: asked once, not every frame meanwhile
+    if (it == g_stations.end() || (g_appliedCar == nv->netId && g_appliedStation == it->second)) return;
+    g_appliedCar = nv->netId;
+    g_appliedStation = it->second;
+    if (it->second == CurrentStation()) return;  // already there
     Cmd(0x041E).I(it->second).Run();  // SET_RADIO_CHANNEL
     LOGI("Radio: tuned to the driver's station %d", it->second);
 }

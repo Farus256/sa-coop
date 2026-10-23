@@ -39,6 +39,7 @@ void LobbyStart();                // host
 void LobbySetReady(bool ready);   // partner
 bool LobbyReady(uint8_t id);      // what that partner said
 bool LobbyMyReady();
+bool LobbyHostNewGame();          // partner: the host starts a new game from the lobby (everyone starts over)
 
 std::vector<SaveSlotInfo> ListSaveSlots();
 void Update();             // per frame

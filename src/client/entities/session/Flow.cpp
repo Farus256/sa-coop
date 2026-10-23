@@ -60,6 +60,7 @@ bool g_lobbyStarted = false;   // host: the game is on (started from the lobby, 
 bool g_lobbyKnown = false;     // partner: the host answered whether the game is on
 uint64_t g_lobbyAskMs = 0;
 bool g_myReady = false;
+bool g_hostNewGame = false;    // partner: the host's lobby starts a new game
 std::map<uint8_t, bool> g_ready;  // what the partners said
 
 void SetPhase(Phase p) {
@@ -218,11 +219,12 @@ void HandleLobby(uint8_t from, Reader& r) {
     if (!r.Ok()) return;
     auto& net = Net();
     if (op == LOBBY_QUERY) {  // a newcomer: whether the game is on (the host), who is ready (everyone)
-        if (net.IsHost()) SendLobby(LOBBY_STATE, g_lobbyStarted || g_phase != Phase::Lobby, from);
+        if (net.IsHost()) SendLobby(LOBBY_STATE, (g_lobbyStarted || g_phase != Phase::Lobby ? 1 : 0) | (g_hostSlot < 0 ? 2 : 0), from);
         else SendLobby(LOBBY_READY, g_myReady, from);
     } else if (op == LOBBY_STATE && from == net.HostId() && !net.IsHost()) {
         g_lobbyKnown = true;
-        if (value && g_phase == Phase::Lobby) {
+        g_hostNewGame = (value & 2) != 0;
+        if ((value & 1) && g_phase == Phase::Lobby) {
             LOGI("The host started the game: its world comes");
             RequestWorld();
         }
@@ -250,6 +252,7 @@ void OnOnline() {
     } else {
         // the lobby first: the host says whether the game is on (whoever joins after its start goes straight in)
         g_lobbyKnown = false;
+        g_hostNewGame = false;
         g_lobbyAskMs = NowMs();
         SetPhase(Phase::Lobby);
         SendLobby(LOBBY_QUERY, 0);
@@ -604,7 +607,7 @@ bool InLobby() { return Net().Online() && g_phase == Phase::Lobby; }
 void LobbyStart() {
     if (!InLobby() || !Net().IsHost()) return;
     g_lobbyStarted = true;
-    SendLobby(LOBBY_STATE, 1);
+    SendLobby(LOBBY_STATE, 1 | (g_hostSlot < 0 ? 2 : 0));
     LOGI("Lobby: the host starts the game");
     StartHostGame();
 }
@@ -621,6 +624,7 @@ bool LobbyReady(uint8_t id) {
 }
 
 bool LobbyMyReady() { return g_myReady; }
+bool LobbyHostNewGame() { return g_hostNewGame; }
 
 // The story moved on in the host's game (a mission passed, the call that unlocks something after it): a new
 // snapshot goes to the partners already playing, who load it, staying where they are.

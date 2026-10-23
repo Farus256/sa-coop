@@ -7,6 +7,7 @@
 #include "common/config/version/Version.h"
 #include "common/lib/util/Util.h"
 #include "entities/session/Flow.h"
+#include "features/progress/SkinChoice.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
@@ -55,6 +56,35 @@ void RefreshSlots() {
     fresh.title = TR("Новая игра", "New game");
     g_slots.push_back(fresh);
     g_slotsTime = NowMs();
+}
+
+// A character's card in the lobby: a figure in its colours (the head, a cap, the shirt with the arms, the trousers,
+// the shoes) and its name; the chosen one framed in the menu's blue
+void CharacterCard(const char* id, float x, float y, float cw, float ch, const skin::Choice& c, bool chosen, int index) {
+    auto& g = Gfx();
+    float s = g.Scale();
+    if (w::Button(id, x, y, cw, ch, "", true, false)) skin::SetChoice(index);
+    g.Rect(x, y, cw, ch, chosen ? 0xFF16202B : 0xFF0B0F14);
+    g.RectOutline(x, y, cw, ch, chosen ? kSaBlue : kSaLine, std::max(1.0f, chosen ? 2 * s : s));
+    float mx = x + cw * 0.5f, unit = std::min(cw / 5.0f, (ch - g.LineHeight(FONT_SMALL) * 2.4f) / 9.0f);
+    float top = y + 10 * s;
+    const uint32_t skinTone = 0xFF5A3A28, shoes = 0xFF1A1A1A;
+    g.Rect(mx - unit * 0.6f, top, unit * 1.2f, unit * 1.3f, skinTone);                        // head
+    if (c.hat) g.Rect(mx - unit * 0.7f, top - unit * 0.1f, unit * 1.4f, unit * 0.45f, c.hat);  // cap / bandana
+    float body = top + unit * 1.45f;
+    g.Rect(mx - unit * 1.0f, body, unit * 2.0f, unit * 3.0f, c.shirt);                        // torso
+    g.Rect(mx - unit * 1.55f, body + unit * 0.1f, unit * 0.45f, unit * 2.6f, c.model ? c.shirt : skinTone);  // arms
+    g.Rect(mx + unit * 1.1f, body + unit * 0.1f, unit * 0.45f, unit * 2.6f, c.model ? c.shirt : skinTone);
+    float legs = body + unit * 3.0f;
+    g.Rect(mx - unit * 0.95f, legs, unit * 0.85f, unit * 3.2f, c.pants);                      // trousers
+    g.Rect(mx + unit * 0.1f, legs, unit * 0.85f, unit * 3.2f, c.pants);
+    g.Rect(mx - unit * 1.05f, legs + unit * 3.2f, unit * 0.95f, unit * 0.4f, shoes);
+    g.Rect(mx + unit * 0.1f, legs + unit * 3.2f, unit * 0.95f, unit * 0.4f, shoes);
+    float ty = y + ch - g.LineHeight(FONT_SMALL) * 2.2f;
+    for (const std::wstring& line : g.Wrap(FONT_SMALL, Widen(TR(c.name.ru, c.name.en)), cw - 8 * s)) {
+        g.TextW(FONT_SMALL, mx, ty, line, chosen ? 0xFFFFFFFF : kText, TEXT_CENTER | TEXT_SHADOW);
+        ty += g.LineHeight(FONT_SMALL);
+    }
 }
 
 void LoadFields() {
@@ -272,14 +302,26 @@ void RenderConnectMenu() {
                             ready, (int)net.Peers().size()),
                      kSaMuted, FONT_SMALL, true);
             } else {
+                // new to this world, or the host starts a new one: the character to play, on cards
+                if (skin::Newcomer() || flow::LobbyHostNewGame()) {
+                    caption(cx, TR("Ваш персонаж", "Your character"));
+                    cy += ch + 6 * s;
+                    int count = 0;
+                    const skin::Choice* list = skin::Choices(count);
+                    float gap = 10 * s, cardW = (cw - gap * (count - 1)) / count, cardH = std::min(170 * s, cardW * 1.25f);
+                    for (int i = 0; i < count; ++i) {
+                        char id[16];
+                        snprintf(id, sizeof id, "skin%d", i);
+                        CharacterCard(id, cx + i * (cardW + gap), cy, cardW, cardH, list[i], skin::ChosenIndex() == i, i);
+                    }
+                    cy += cardH + 10 * s;
+                }
                 bool me = flow::LobbyMyReady();
                 if (w::Button("ready", cx, cy, cw, bh + 10 * s, me ? TR("Не готов", "Not ready") : TR("Готов", "Ready"), true, !me, true))
                     flow::LobbySetReady(!me);
                 cy += bh + 16 * s;
-                para(TR("Игра начнётся, когда хост нажмёт «Начать игру». Если вы впервые в этом мире, персонажа выберете, "
-                        "когда он загрузится.",
-                        "The game starts when the host presses \"Start the game\". New to this world, you pick your character "
-                        "once it loads."),
+                para(TR("Игра начнётся, когда хост нажмёт «Начать игру».",
+                        "The game starts when the host presses \"Start the game\"."),
                      kSaMuted, FONT_SMALL, true);
             }
         }

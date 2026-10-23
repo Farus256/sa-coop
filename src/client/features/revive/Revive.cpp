@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <random>
+#include <set>
 
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
@@ -102,6 +104,7 @@ struct Npc {
     uint64_t since = 0, taskMs = 0;
     CVector spot{};
     int kind = 0;    // the helper: 0 a passer-by, 1 a paramedic, 2 a Families member, 3 a cop
+    bool rob = false;  // a cop who goes through the pockets instead (one in two)
     uint64_t kickMs = 0;
     CPed* Ped() const { return handle >= 0 ? GetPed(handle) : nullptr; }
 } g_medic, g_kicker;
@@ -112,8 +115,14 @@ bool Rival(CPed* p) {
     int t = p->PedType();
     return t == PED_TYPE_GANG1 || t == PED_TYPE_GANG3 || t == PED_TYPE_GANG4;  // Ballas, Vagos, Rifa
 }
-bool Helps(CPed* p) { return !Rival(p) && p->PedType() >= 4; }  // people (not the players, PED_TYPE_PLAYER1..3)
 constexpr int PED_TYPE_COP = 6;
+// who comes to a wounded player: a paramedic, a Families member, a cop (passers-by walk on)
+bool Helps(CPed* p) {
+    int t = p->PedType();
+    return t == PED_TYPE_MEDIC || t == PED_TYPE_GANG2 || t == PED_TYPE_COP;
+}
+std::set<int> g_usedHelpers;  // the people who came this time already (a cop who robbed it does not come back)
+constexpr uint64_t kRobMs = 2500;
 int KindOf(CPed* p) {
     int t = p->PedType();
     return t == PED_TYPE_MEDIC ? 1 : t == PED_TYPE_GANG2 ? 2 : t == PED_TYPE_COP ? 3 : 0;
@@ -136,7 +145,7 @@ CPed* NearestNpc(CPlayerPed* me, bool helper, CPed* except = nullptr) {
         if (pool->byteMap[i] < 0) continue;
         auto* p = (CPed*)(pool->objects + (size_t)i * kPedPoolElemSize);
         if (p == me || p == except || p->IsPlayer() || p->Health() <= 0.0f || p->InVehicle() || p->AreaCode() != me->AreaCode() ||
-            p->CreatedBy() == PED_MISSION || (helper ? !Helps(p) : !Rival(p)))
+            p->CreatedBy() == PED_MISSION || (helper ? !Helps(p) : !Rival(p)) || (helper && g_usedHelpers.count(GetPedRef(p))))
             continue;
         if (NetPed* np = Peds::Instance().Find(p); np && np->owner != Net().MyId()) continue;  // another game's
         if (Peds::Instance().IsLocalOnly(p)) continue;  // a shop's staff
@@ -188,6 +197,7 @@ void LeaveAlone(CPlayerPed* me, bool on);
 void GoDown(CPlayerPed* me) {
     g_wantDown = false;
     if (g_down) return;
+    g_usedHelpers.clear();
     if (me->AttachedTo()) DetachPed(me);
     g_down = true;
     g_downEnd = NowMs() + kDownMs;
@@ -359,6 +369,13 @@ void UpdateRescuer(CPlayerPed* me) {
     }
 }
 
+// the animation is there (a name the IFP has not would leave the task without one)
+bool HasAnim(const char* anim, const char* block) {
+    if (!EnsureBlock(block)) return false;
+    void* b = Call<0x4D3940, void*>(block);       // CAnimManager::GetAnimationBlock
+    return b && Call<0x4D42F0, void*>(anim, b);  // CAnimManager::GetAnimation(name, block)
+}
+
 void Face(int handle, CPed* p, const CVector& at) {
     CVector d = at - p->GetPosition();
     Cmd(0x0173).I(handle).F(std::atan2(-d.x, d.y) * 57.29578f).Run();  // SET_CHAR_HEADING
@@ -379,6 +396,9 @@ void Pick(Npc& n, CPed* p, CPlayerPed* me, float dist) {
     n.handle = GetPedRef(p);
     n.since = NowMs();
     n.kind = KindOf(p);
+    static std::mt19937 rng((uint32_t)NowMs());
+    n.rob = n.kind == 3 && (rng() & 1);
+    g_usedHelpers.insert(n.handle);
     CVector d = p->GetPosition() - me->GetPosition();
     float len = std::max(0.1f, std::sqrt(d.x * d.x + d.y * d.y));
     n.spot = me->GetPosition() + CVector{d.x / len * dist, d.y / len * dist, 0.0f};
@@ -406,7 +426,22 @@ void UpdateNpcs(CPlayerPed* me) {
             g_medic.stage = 1;
             g_medic.taskMs = now;
             Face(g_medic.handle, m, me->GetPosition());
-            if (EnsureBlock("MEDIC")) Cmd(0x0605).I(g_medic.handle).S("CPR").S("MEDIC").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
+            if (g_medic.rob && HasAnim("BOM_Plant_Loop", "BOMBER")) {  // down on one knee by the body: the pockets (an activity the others see)
+                Cmd(0x0605).I(g_medic.handle).S("BOM_Plant_Loop").S("BOMBER").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
+            } else if (EnsureBlock("MEDIC")) {
+                Cmd(0x0605).I(g_medic.handle).S("CPR").S("MEDIC").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
+            }
+        } else if (g_medic.stage == 1 && g_medic.rob) {
+            if (now - g_medic.taskMs >= kRobMs) {
+                CPlayerInfo& info = PlayerInfos()[0];
+                int taken = std::max(0, info.money) * 3 / 10;
+                info.money -= taken;
+                info.displayMoney = info.money;
+                ui::TheChat().AddSystem(Format(TR("Полицейский обчистил ваши карманы: -$%d.", "A cop went through your pockets: -$%d."), taken));
+                LOGI("Wounded: a cop took $%d", taken);
+                ReleaseNpc(g_medic);
+                return;
+            }
         } else if (g_medic.stage == 1) {
             g_downEnd = std::max(g_downEnd, now + 1500);  // not while it is being revived
             if (now - g_medic.taskMs >= kCprMs) {
@@ -451,6 +486,10 @@ void UpdateNpcs(CPlayerPed* me) {
 
 // ---- this player wounded, every frame
 void UpdateDowned(CPlayerPed* me) {
+    if (PlayerInfos()[0].playerState == 1 && !g_revives.empty()) {  // PLAYERSTATE_HASDIED: a new life, a new count
+        g_revives.clear();
+        LOGI("Wounded: died, the revives count from zero again");
+    }
     UpdateDying(me);
     if (g_dyingMs) g_wantDown = false;
     if (g_wantDown) GoDown(me);
@@ -561,8 +600,9 @@ std::string ReviveText(std::string& hint) {
             hint = Format(TR("%s откачивает вас", "%s is reviving you"), Name(g_rescuer).c_str());
         } else if (g_medic.handle >= 0) {
             std::string who = HelperName(g_medic.kind);
-            hint = g_medic.stage == 1 ? Format(TR("Вас откачивает %s", "%s is reviving you"), who.c_str())
-                                      : Format(TR("К вам бежит %s", "%s runs to you"), who.c_str());
+            hint = g_medic.stage != 1 ? Format(TR("К вам бежит %s", "%s runs to you"), who.c_str())
+                   : g_medic.rob      ? std::string(TR("Полицейский шарит по вашим карманам!", "A cop is going through your pockets!"))
+                                      : Format(TR("Вас откачивает %s", "%s is reviving you"), who.c_str());
         } else if (g_kicker.handle >= 0 && g_kicker.stage == 1) {
             hint = TR("Вас добивают ногами!", "You are being kicked to death!");
         } else {

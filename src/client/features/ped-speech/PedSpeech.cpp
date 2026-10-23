@@ -3,7 +3,7 @@
 // camera, so each game had its own lines and the other's copies stayed silent. The game of the ped's owner reports the
 // line its ped starts (sound bank and sound, CAEPedSpeechAudioEntity::LoadAndPlaySpeech), and the other game plays that
 // very line on its copy of the ped or of the player. The copies say nothing of their own: what makes the real one
-// talk happens in its owner's game.
+// talk happens in its owner's game. A player who plays a Grove Street homie (not CJ) says none of CJ's lines.
 #include <algorithm>
 
 #include "common/api/protocol/Protocol.h"
@@ -45,6 +45,8 @@ SayFn g_origSay = nullptr;
 int16_t __fastcall HookAddSayEvent(void* s, void* edx, int event, int16_t ctx, uint32_t delay, float probability,
                                    uint8_t overrideSilence, uint8_t forceAudible, uint8_t frontEnd) {
     if (Net().Online() && IsCopy(Field<CEntity*>(s, 0x04))) return -1;  // CAEAudioEntity::m_pEntity
+    // a player who plays a Grove Street homie (SkinChoice) is not CJ: CJ's voice lines are not his
+    if (auto* e = Field<CEntity*>(s, 0x04); e && e == (CEntity*)FindPlayerPed(0) && e->ModelIndex() != 0) return -1;
     return g_origSay(s, edx, event, ctx, delay, probability, overrideSilence, forceAudible, frontEnd);
 }
 
@@ -133,7 +135,7 @@ void Handle(uint8_t from, Reader& r) {
     CPed* ped = nullptr;
     if (by == BY_PLAYER) {
         RemotePlayer* rp = Players::Instance().Get(from);
-        ped = rp ? rp->ped : nullptr;
+        ped = rp && rp->ped && rp->ped->ModelIndex() == 0 ? rp->ped : nullptr;  // CJ's voice only on CJ
     } else {
         int h = Peds::Instance().HandleOf(id);
         ped = h >= 0 ? GetPed(h) : nullptr;

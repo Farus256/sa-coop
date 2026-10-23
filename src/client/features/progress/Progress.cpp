@@ -274,6 +274,7 @@ public:
             if (blob.empty() && p.m_profileReceived && (!p.m_profile.empty() || !flow::InHostWorld())) p.m_resetPending = true;
             p.m_profile = blob;
             p.m_profileReceived = true;
+            skin::OnProfile(blob.empty());
             p.m_applied = false;
         };
         Net().SetHandler(proto::G_PLAYER_LOOK, &HandleLook);
@@ -320,7 +321,7 @@ public:
                                                      "You are here for the first time. From now on your money, skills and look "
                                                      "are your own."));
                 m_reset = false;
-                skin::Begin();  // new to this world (or to the host's new game): its character first
+                if (skin::Newcomer()) skin::ApplyChoice();  // new to this world: the character picked in the lobby
             } else if (ApplyProfile(m_profile, own)) {
                 LOGI("Profile applied (%zu bytes)", m_profile.size());
                 m_quietUntil = now + 5000;

@@ -31,6 +31,19 @@ constexpr uintptr_t kFrameCounter = 0xB7CB4C;                    // CTimer::m_Fr
 float g_blend = 0.0f;      // 0: the game's camera, 1: over the shoulder
 CVector g_applied{};       // what was added to the source last frame (taken off before the game works it out again)
 void* g_appliedCam = nullptr;
+CVector g_gameSrc{}, g_gameFront{};  // what the game made of the camera last frame, before ours
+bool g_changed = false;
+// The camera between the following one and the aiming one: the game cuts from one to the other (another distance,
+// height and direction at once), it jumped. The picture goes from the last one to the new one in a fifth of a second,
+// its place relative to the player and its direction both.
+struct Snap {
+    CVector rel, front;
+    bool aim = false, valid = false;
+    uint32_t frame = 0;
+} g_last;
+CVector g_fromRel{}, g_fromFront{};
+uint32_t g_transMs = 0;
+constexpr uint32_t kTransMs = 220;
 uint32_t g_lastBlendMs = 0;
 bool g_mults = false;      // our crosshair place is on
 CVector g_followFront{0, 1, 0};  // where the following camera looked last
@@ -76,9 +89,40 @@ void Shift(void* cam) {
 }
 
 void Unshift(void* cam) {
-    if (cam == g_appliedCam) Field<CVector>(cam, kSource) = Field<CVector>(cam, kSource) - g_applied;
+    if (cam == g_appliedCam && g_changed) {  // the game goes on from its own camera, not ours
+        Field<CVector>(cam, kSource) = g_gameSrc;
+        Field<CVector>(cam, kFront) = g_gameFront;
+    }
     g_applied = {};
+    g_changed = false;
     g_appliedCam = cam;
+}
+
+void KeepGame(void* cam) {
+    g_gameSrc = Field<CVector>(cam, kSource);
+    g_gameFront = Field<CVector>(cam, kFront);
+    g_changed = true;
+}
+
+void Transition(void* cam, bool aim) {
+    CPlayerPed* me = FindPlayerPed(0);
+    if (!me) return;
+    CVector& src = Field<CVector>(cam, kSource);
+    CVector& front = Field<CVector>(cam, kFront);
+    uint32_t frame = Ref<uint32_t>(kFrameCounter), now = TimeMs();
+    CVector p = me->GetPosition();
+    if (g_last.valid && g_last.aim != aim && frame - g_last.frame <= 2 && Enabled()) {
+        g_fromRel = g_last.rel, g_fromFront = g_last.front, g_transMs = now;
+    }
+    if (g_transMs && now - g_transMs < kTransMs) {
+        float k = Ease((float)(now - g_transMs) / kTransMs);
+        CVector rel = src - p;
+        src = p + g_fromRel + (rel - g_fromRel) * k;
+        front = (g_fromFront + (front.Normalized() - g_fromFront) * k).Normalized();
+    } else {
+        g_transMs = 0;
+    }
+    g_last = {src - p, front.Normalized(), aim, true, frame};
 }
 
 void SetMults(bool on) {
@@ -115,9 +159,11 @@ void __fastcall HookAimWeapon(void* cam, void* edx, const CVector* target, float
         Field<float>(cam, kBeta) = beta;
         Field<float>(cam, kAlpha) = alpha;
     }
+    KeepGame(cam);
     SetMults(on);
     StepBlend(on);
     if (on) Shift(cam);
+    Transition(cam, on);
 }
 
 // leaving the aim, the following camera starts where the aiming one was and moves back
@@ -126,9 +172,11 @@ void __fastcall HookFollowPed(void* cam, void* edx, const CVector* target, float
     g_origFollow(cam, edx, target, a, b, c);
     g_followFront = Field<CVector>(cam, kFront);
     g_haveFollow = true;
+    KeepGame(cam);
     SetMults(false);
     StepBlend(false);
     if (Enabled()) Shift(cam);
+    Transition(cam, false);
 }
 
 // ---- drawing: one batch of triangles through RenderWare's immediate mode (one draw call for the whole scope)
