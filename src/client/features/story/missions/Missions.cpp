@@ -30,6 +30,7 @@
 #include "entities/session/Flow.h"
 #include "entities/vehicle/Vehicles.h"
 #include "features/story/cutscene-partner/ScenePartner.h"
+#include "features/story/mission-seats/MissionSeats.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
@@ -267,12 +268,12 @@ void __fastcall HookScriptProcess(void* script, void* edx) {
     float seconds = FadeDuration();
     CPlayerPed* cj = Field<uint8_t>(script, 0xDC) && Net().IsHost() && Replicating() ? FindPlayerPed(0) : nullptr;  // m_bIsMission
     WeaponSlots weapons;
-    if (cj) weapons.Take(cj);
+    if (cj) weapons.Take(cj), seats::BeforeScript(cj);
     bool save = !strncmp(Field<char[8]>(script, 0x08), "psave1", 8), flag = save && core::IsOnMission();
     g_origScriptProcess(script, edx);
     if (save && core::IsOnMission() != flag) g_saveFlag = !flag;
     g_currentScript = prev;
-    if (cj && FindPlayerPed(0) == cj) SendWeaponChanges(weapons, cj);
+    if (cj && FindPlayerPed(0) == cj) SendWeaponChanges(weapons, cj), seats::AfterScript(cj);
     // a fade that started during this script's commands is the script's (DO_FADE)
     if (Fading() && (!fading || FadeDirection() != dir || FadeDuration() != seconds)) ScriptFaded(FadeDirection(), FadeDuration());
 }

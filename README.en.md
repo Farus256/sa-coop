@@ -35,6 +35,10 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
   default, so ALT+TAB is instant (`exclusive_fullscreen = 1` in `coop\coop.ini` brings back the real full screen
   with the menu's resolution)
 - a longer draw distance than the game's (`draw_distance` and `lod_distance` in `coop\coop.ini`, `/draw` in the game)
+- the HUD in its own proportions on a wide screen: a round radar, icons and letters not stretched (`hud_widescreen`)
+- everyone's map waypoints for everyone: the host's crosshair is red, the others' green, yellow, blue, pink
+- a wounded player can be revived: it lies for 30 seconds while a partner presses `E` and gives it CPR
+- the host's mission seats the partners near it in its car, or stands them on the truck next to CJ
 - Linux and macOS builds, server tests
 
 Not compatible with the original 0.2.x versions, everyone has to update. Playing with three or more people has
@@ -92,6 +96,11 @@ searchlight, trailers, the tow truck and the airport tug all work. Explosions, r
 fire truck water, NPC drive-bys, trains and RC toys are seen by both players. Either player can leave a car in the
 garage at a safe house, and the host's world keeps it.
 
+`G` takes the nearest free passenger seat, whoever's car it is. When the host's mission puts CJ in a car, the
+partners within 200 m take its free seats. When it stands CJ in the back of a truck ("Robbing Uncle Sam"), the
+partners take the cab's seats and the rest stand next to CJ in the back and shoot at the chase (`F`/`Enter` gets
+off). CJ getting into a car by himself calls nobody. What the story asks of CJ stays the host's.
+
 ![The partner rides as a passenger in the host's car](docs/images/car.jpg)
 
 ### Your own progress
@@ -112,6 +121,14 @@ host saves the game, the friend's progress is saved on the host's side as well.
 Before creating the game, the host can allow friendly fire with a checkbox in the F9 window. Then the players can
 hurt and kill each other with bullets, fists, explosions, fire and cars. Without the checkbox they cannot harm
 each other.
+
+### Wounded, not dead
+
+With a living partner within 200 m, a player whose health runs out does not die: it falls and lies there for 30
+seconds, the time left shown over it. A partner comes up and presses `E`: 5 seconds of CPR, as the paramedics do,
+and the wounded one gets up with all its weapons and half its health. A player can be revived twice in 6 minutes;
+the third time it dies at once. Holding `E`, the wounded one gives up. In a car, in the water or with nobody near,
+death is as usual. The key is `revive` in `[keys]` of `coop\coop.ini`.
 
 | | |
 |---|---|
@@ -181,7 +198,8 @@ Radmin or ZeroTier (friends then connect to the VPN address).
 | F9 | the SA:COOP window |
 | T | chat: Enter sends a message, Esc closes the chat |
 | B | voice chat while the key is held |
-| G | get into the nearest car as a passenger |
+| G | take the nearest free passenger seat |
+| E | revive a wounded partner next to you; wounded: hold to give up |
 | Right mouse button | as a passenger: lean out of the window with the gun, fire with the left button |
 | F2 | the player list |
 | Enter / Esc | in a cutscene: offer to skip it, agree / refuse |

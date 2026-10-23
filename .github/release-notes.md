@@ -42,6 +42,21 @@
 - машины NPC реже врезаются друг в друга: торможение машин других игроков предсказывается, их состояние рядом с
   вами приходит вдвое чаще, а трафик вокруг близких игроков создаёт одна игра
 
+### 0.3.4
+
+- **ранение вместо смерти**: если рядом (до 200 м) есть напарник, игрок с нулём здоровья не умирает, а 30 секунд
+  лежит на месте. Напарник подходит и жмёт `E`: 5 секунд делает искусственное дыхание, как врач скорой, и раненый
+  встаёт со всем оружием и половиной здоровья. Возродить одного игрока можно 2 раза за 6 минут; раненый может
+  сдаться, удерживая `E`. В машине, в воде и без напарников рядом смерть обычная
+- **места в машине хоста по миссии**: когда миссия хоста сажает CJ в машину, напарники рядом (до 200 м) садятся на
+  свободные места. Когда миссия ставит CJ в кузов («Robbing Uncle Sam»), напарники садятся в кабину, а остальные
+  встают в кузове рядом с ним и могут стрелять; слезть - `F`/`Enter`. Сюжетные действия (коробки) остаются за хостом
+- `G` сажает на ближайшее свободное пассажирское место (по двери, к которой идти), а не на первое место ближайшей машины
+- HUD на широком экране больше не растянут: радар круглый, значки и шрифт в своих пропорциях (`hud_widescreen = 0`
+  в `coop\coop.ini` возвращает растянутый)
+- метки на карте у всех игроков: перекрестие хоста всегда красное, остальных - зелёное, жёлтое, синее, розовое
+- версия протокола 104: обновиться нужно всем
+
 С оригинальными 0.2.x не совместимо, обновиться нужно всем. Игра втроём и больше пока почти не тестировалась,
 если что-то не так, пришлите `coop\coop.log`.
 
@@ -51,4 +66,4 @@
 
 ## In English
 
-A fork of SA:COOP for GTA San Andreas 1.0 US: the story over the network for 2-16 players, based on the original 0.2.7. Up to 16 places, other games' cars and pedestrians only near you, connecting by IP with a specific reason when it fails, mission markers that wait only for nearby players (`/go` for the host), up to three partners in cutscenes, player colours, `/tp`, `/tphere`, `/go`, `/mute`. Not compatible with the original 0.2.x. Play with three or more people has barely been tested yet. 0.3.1: every screen resolution in the menu (1920x1080 too) and borderless windowed mode, a longer draw distance (`/draw`), the later cutscenes of a mission play for the partner again, interior shopkeepers and residents are each player's own so they can be dealt with, and no camera shake for a passenger aiming out of a car. Protocol 103: everyone has to update.
+A fork of SA:COOP for GTA San Andreas 1.0 US: the story over the network for 2-16 players, based on the original 0.2.7. Up to 16 places, other games' cars and pedestrians only near you, connecting by IP with a specific reason when it fails, mission markers that wait only for nearby players (`/go` for the host), up to three partners in cutscenes, player colours, `/tp`, `/tphere`, `/go`, `/mute`. Not compatible with the original 0.2.x. Play with three or more people has barely been tested yet. 0.3.1: every screen resolution in the menu (1920x1080 too) and borderless windowed mode, a longer draw distance (`/draw`), the later cutscenes of a mission play for the partner again, interior shopkeepers and residents are each player's own so they can be dealt with, and no camera shake for a passenger aiming out of a car. Protocol 103: everyone has to update. 0.3.4: a player whose health runs out with a partner near lies wounded for 30 seconds and can be revived with `E` (CPR, 5 seconds, all weapons and half health, twice in 6 minutes); partners near the host take the free seats of a car the host's mission puts CJ in, and the cab seats or places beside him when it stands him on a truck; `G` takes the nearest free passenger seat; an undistorted HUD on wide screens; everyone's map waypoints with a coloured crosshair (the host's red). Protocol 104: everyone has to update.

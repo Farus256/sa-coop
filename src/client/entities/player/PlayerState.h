@@ -76,7 +76,16 @@ struct OnFootState {
         F_DUCKING = 1, F_IN_AIR = 2, F_DEAD = 4, F_SWIMMING = 8, F_JETPACK = 16, F_IN_TRAIN = 32, F_PHONE = 64,
         F_POPULATION = 128,  // its game makes the people and traffic around it (not left to a nearby player's game)
         F_TRAINS = 256,      // its game makes random trains (not left to a nearby player's game)
+        F_ATTACHED = 512,    // a script stood it on a vehicle (ATTACH_CHAR_TO_CAR): attach* below
+        F_DOWNED = 1024,     // wounded, lying where it fell until someone revives it (downSeconds left)
+        F_REVIVING = 2048,   // it is reviving a wounded player
     };
+    // F_ATTACHED: the vehicle's net id, the place on it and the turret's angles (CPed::AttachPedToEntity)
+    uint16_t attachVeh = 0;
+    game::CVector attachOffset{};
+    uint16_t attachA = 0;
+    float attachB = 0;
+    uint8_t downSeconds = 0;  // F_DOWNED
 
     void Write(Writer& w) const;
     bool Read(Reader& r);

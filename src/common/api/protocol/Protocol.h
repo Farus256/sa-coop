@@ -157,6 +157,10 @@ enum MsgId : uint8_t {
                               // (state: model, holder, how it hangs, look, own animation; gone)
     G_PED_SPEECH = 146,       // reliable: u8 player/ped, u16 net id, the line it starts (context, bank, sound, delay,
                               // volume, forced)
+    G_SEAT_CALL = 147,        // reliable, host -> all: u8 kind (1 the host's mission put CJ in a car, 2 stood him on
+                              // one, 3 took him off), u16 vehicle; u8 n, {u8 player, i8 seat (-1: stand on it), vec3
+                              // place, u16 turret angle, f32 turret range}: where each partner near goes
+    G_REVIVE = 148,           // reliable, to one player: u8 op (1 started, 2 stopped, 3 done): the sender revives it
 
     G_VOICE = 200,            // unreliable: voice frame
     G_LAST = 255,

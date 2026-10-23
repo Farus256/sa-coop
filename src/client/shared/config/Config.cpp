@@ -60,6 +60,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     height = ini.GetInt("game", "height", 0);
     drawDistance = std::clamp(ini.GetFloat("game", "draw_distance", drawDistance), 0.5f, 4.0f);
     lodDistance = std::clamp(ini.GetFloat("game", "lod_distance", lodDistance), 0.5f, 3.0f);
+    hudWidescreen = ini.GetBool("game", "hud_widescreen", hudWidescreen);
     streamingMemoryMb = std::clamp(ini.GetInt("game", "streaming_memory", streamingMemoryMb), 0, 1024);
     multiInstance = ini.GetBool("game", "multi_instance", multiInstance);
     runInBackground = ini.GetBool("game", "run_in_background", runInBackground);
@@ -79,6 +80,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     chatKey = ini.GetInt("keys", "chat", chatKey);
     passengerKey = ini.GetInt("keys", "enter_as_passenger", passengerKey);
     playerListKey = ini.GetInt("keys", "player_list", playerListKey);
+    reviveKey = ini.GetInt("keys", "revive", reviveKey);
 
     debugOverlay = ini.GetBool("debug", "overlay", debugOverlay);
     verboseLog = ini.GetBool("debug", "verbose_log", verboseLog);

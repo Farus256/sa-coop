@@ -42,6 +42,8 @@ struct RemotePlayer {
     bool lookStale = false;     // a script here took its special character's slot: it went back to CJ, the look again
     uint64_t duckOffMs = 0;     // since when the copy's crouch differs from its owner's (a lost crouch press)
     bool muted = false;         // its voice is not played here (/mute)
+    bool downShown = false;     // it lies wounded here (F_DOWNED)
+    uint64_t downCheckMs = 0;
 
     // Its ped's own CPlayerPedData (wanted level, clothes, look pitch, gun spin...): every remote player is a ped of
     // player slot 1, and without a copy of their own they would all share the slot's.
@@ -70,10 +72,14 @@ public:
     // the copy's model as SET_PLAYER_MODEL changes a player's (0: CJ in his clothes); false if it cannot be loaded
     static bool SetModel(game::CPlayerPed* ped, int model);
     const std::map<uint8_t, RemotePlayer>& All() const { return m_remote; }
-    // "G": enter the nearest vehicle as a passenger (prefers the partner's car).
+    // "G": the nearest free passenger seat (by its door), whoever's car it is.
     void TryEnterAsPassenger();
     // the vehicle this game's player drove last, while it exists (by handle: a reused pool slot is another car)
     game::CVehicle* LastCar() const { return game::GetVehicle(m_lastCar); }
+    // this game's player lies wounded (Revive): its state says so, with the seconds it has left; it revives another one
+    void SetLocalDowned(bool on, uint8_t secondsLeft = 0) { m_downed = on, m_downSeconds = secondsLeft; }
+    bool LocalDowned() const { return m_downed; }
+    void SetLocalReviving(bool on) { m_reviving = on; }
 
     static Players& Instance();
 
@@ -95,6 +101,8 @@ private:
     void DrawNameTag(RemotePlayer& rp);
     void KeepApart(game::CPed* other);
     bool RideTrain(RemotePlayer& rp);
+    bool FollowAttach(RemotePlayer& rp);
+    void ShowDowned(RemotePlayer& rp);
     bool TagAnchor(RemotePlayer& rp, float& sx, float& sy, float& alpha);
     RemotePlayer& Touch(uint8_t from);
     // the players this game's player state goes to now: the near ones at its rate, everyone twice a second
@@ -108,9 +116,17 @@ private:
     uint64_t m_followAt = 0;
     game::CVehicle* m_bikeFor = nullptr;  // the host's bike the partner got one for
     int m_lastCar = -1;
+    bool m_downed = false, m_reviving = false;
+    uint8_t m_downSeconds = 0;
 };
 
 // helpers shared with other modules
+// the wounded lie as one shot from the front, held at its last frame (PED block); they get up with kGetUpAnim
+constexpr const char* kDownAnim = "KO_shot_front";
+constexpr const char* kGetUpAnim = "getup";
+// Takes a ped off what a script stood it on (DETACH_CHAR_FROM_CAR), the reference the attaching registered with it
+// too (CPed::AttachPedToEntity registers it, nothing ever cleans it up), and a player's collision back.
+void DetachPed(game::CPed* ped);
 int ActivePrimaryTaskType(game::CPed* ped, void** taskOut = nullptr);
 // The people on their way into v stop, before v is deleted: some of their tasks use it unchecked once it is gone (the
 // door opened from outside, MTA guards 0x646026).

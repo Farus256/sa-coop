@@ -16,6 +16,7 @@
 #include "entities/world-share/WorldShare.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
+#include "shared/game/HudScale.h"
 #include "shared/game/Script.h"
 #include "shared/lib/memory/Memory.h"
 #include "shared/ui/chat/Chat.h"
@@ -439,7 +440,9 @@ void DrawWantedStars(int level, float right, float midY, uint8_t alpha) {
 using HudDrawFn = void(__cdecl*)();
 HudDrawFn g_origHudDraw = nullptr;
 void __cdecl HookHudDraw() {
+    hud::Begin();  // the HUD in its own proportions (HudScale); the icons over heads are the world's places, after it
     g_origHudDraw();
+    hud::End();
     if (Net().Online()) Players::Instance().DrawWeaponIcons();
 }
 
@@ -728,6 +731,15 @@ int SeatOfTargetDoor(int door) {
 
 int SeatOrAny(CVehicle* v, int seat) { return v && seat >= 0 && seat < v->MaxPassengers() ? seat : -1; }
 
+void DetachPed(CPed* ped) {
+    CPhysical* to = ped ? ped->AttachedTo() : nullptr;
+    if (!to) return;
+    CallMethod<0x571A00>(to, (CEntity**)&ped->AttachedTo());  // CEntity::CleanUpOldReference
+    Cmd(0x0465).I(GetPedRef(ped)).Run();                      // DETACH_CHAR_FROM_CAR
+    ped->AttachedTo() = nullptr;
+    if (ped->IsPlayer()) ped->Flags() |= 1;  // bUsesCollision: attaching a player turns it off, detaching never back
+}
+
 float RemoteDistance(const CVector& p, int8_t area, uint8_t* who) {
     float best = 1e9f;
     for (auto& [id, rp] : Players::Instance().All())
@@ -973,6 +985,7 @@ void Players::DestroyRemote(RemotePlayer& rp) {
     }
     if (rp.ped && IsPedValid(rp.ped)) {
         CPed* ped = rp.ped;
+        DetachPed(ped);  // the vehicle keeps a reference to it otherwise
         if (ped->InVehicle()) {  // the car kept it in its seat count (CTheScripts::RemoveThisPed takes it out first too)
             CVector p = ped->GetPosition();
             Cmd(0x0362).I(rp.pedHandle).F(p.x).F(p.y).F(p.z + 1.0f).Run();  // WARP_CHAR_FROM_CAR_TO_COORD
@@ -986,6 +999,7 @@ void Players::DestroyRemote(RemotePlayer& rp) {
     }
     rp.ped = nullptr;
     rp.pedHandle = -1;
+    rp.downShown = false;
     ReleaseOwnData(rp);  // after the ped: its destructor may still read it
 }
 
@@ -1193,7 +1207,14 @@ void Players::ApplyState(RemotePlayer& rp) {
     }
 
     if (rp.mode != RemotePlayer::Mode::OnFoot) {
+        if (ped->AttachedTo()) DetachPed(ped);
         ApplyVehicleSeat(rp);
+        return;
+    }
+    ShowDowned(rp);
+    if (FollowAttach(rp)) {
+        float r = LerpAngle(ped->CurrentRotation(), st.rotation, 0.6f);
+        ped->CurrentRotation() = ped->AimingRotation() = r;
         return;
     }
     // in its cab here; a train this game has no copy of (far away): it goes along as on foot, for its blip
@@ -1245,6 +1266,51 @@ void Players::ApplyState(RemotePlayer& rp) {
     }
 }
 
+// Wounded (Revive): its owner's game holds it on the ground with its controls off, so its pad is still here and only
+// the pose needs showing: it falls as its owner did, lies there, gets up when it is revived (a death is F_DEAD).
+void Players::ShowDowned(RemotePlayer& rp) {
+    bool down = (rp.state.flags & OnFootState::F_DOWNED) != 0;
+    if (down) {
+        if (rp.downShown && NowMs() - rp.downCheckMs < 1000) return;
+        rp.downCheckMs = NowMs();
+        if (rp.downShown && Cmd(0x0611).I(rp.pedHandle).S(kDownAnim).Run()) return;  // IS_CHAR_PLAYING_ANIM
+        if (rp.ped->InVehicle()) return;
+        Cmd(0x0605).I(rp.pedHandle).S(kDownAnim).S("PED").F(4.0f).I(0).I(0).I(0).I(1).I(-1).Run();  // TASK_PLAY_ANIM, held
+        if (!rp.downShown) LOGI("Remote player %d is wounded", rp.id);
+        rp.downShown = true;
+    } else if (rp.downShown) {
+        rp.downShown = false;
+        Cmd(0x0792).I(rp.pedHandle).Run();  // CLEAR_CHAR_TASKS_IMMEDIATELY
+        Cmd(0x0605).I(rp.pedHandle).S(kGetUpAnim).S("PED").F(4.0f).I(0).I(0).I(0).I(0).I(-1).Run();  // TASK_PLAY_ANIM, once
+        LOGI("Remote player %d got up", rp.id);
+    }
+}
+
+// A script of its owner's game stood it on a vehicle (the back of a truck, a bike's pillion): here it stands on that
+// vehicle's copy the same way, where the pull to its sent place made it shake and fall behind a moving car. Attaching a
+// player sets the camera's weapon mode (the turret's) for this game's player: ours is put back.
+bool Players::FollowAttach(RemotePlayer& rp) {
+    const OnFootState& st = rp.state;
+    CPed* ped = rp.ped;
+    NetVehicle* nv = (st.flags & OnFootState::F_ATTACHED) ? Vehicles::Instance().Find(st.attachVeh) : nullptr;
+    CVehicle* veh = nv && Vehicles::Alive(*nv) && !ped->InVehicle() ? nv->veh : nullptr;
+    if (ped->AttachedTo() && ped->AttachedTo() != veh) {
+        DetachPed(ped);
+        LOGI("Remote player %d: off the vehicle", rp.id);
+    }
+    if (!veh) return false;
+    if (ped->AttachedTo() != veh) {
+        uint8_t mode[12];
+        memcpy(mode, (void*)(addr::TheCamera + 0x830), sizeof mode);  // CCamera::m_PlayerWeaponMode
+        const CVector& o = st.attachOffset;
+        int weapon = st.weapon <= kLastWeapon ? st.weapon : 0;
+        Cmd(0x0464).I(rp.pedHandle).I(nv->handle).F(o.x).F(o.y).F(o.z).I(st.attachA).F(st.attachB * 57.29578f).I(weapon).Run();  // ATTACH_CHAR_TO_CAR
+        memcpy((void*)(addr::TheCamera + 0x830), mode, sizeof mode);
+        LOGI("Remote player %d stands on vehicle %u (%.1f %.1f %.1f)", rp.id, st.attachVeh, o.x, o.y, o.z);
+    }
+    return ped->AttachedTo() == veh;
+}
+
 // Trains are not networked as vehicles (Trains.cpp copies them): the player riding one sits in the cab of the train
 // here nearest to its place. False: no train here near its place.
 bool Players::RideTrain(RemotePlayer& rp) {
@@ -1292,6 +1358,9 @@ void Players::ApplyVehicleSeat(RemotePlayer& rp) {
     rp.enterTaskMs = NowMs() - kEnterGraceMs + 1500;  // retry no more often than every 1.5 s
 }
 
+// The nearest free seat by where one gets in to it: the door of that seat (CCarEnterExit::GetPositionToOpenCarDoor of
+// ComputeTargetDoorToEnterAsPassenger), whoever's car it is. It used to be the nearest car's first free seat, and the
+// partner's car over any other: the player walked round to the far door, or past a car to the partner's.
 void Players::TryEnterAsPassenger() {
     if (!core::IsPlayerReady()) return;
     CPlayerPed* me = FindPlayerPed(0);
@@ -1301,28 +1370,26 @@ void Players::TryEnterAsPassenger() {
     CVector mp = me->GetPosition();
     CVehicle* best = nullptr;
     int bestSeat = -1;
-    float bestScore = 1e9f;
+    float bestDist = 1e9f;
     for (int i = 0; i < pool->size; ++i) {
         if (pool->byteMap[i] < 0) continue;
         auto* v = (CVehicle*)(pool->objects + (size_t)i * kVehiclePoolElemSize);
-        float d = (v->GetPosition() - mp).Length();
-        if (d > 10.0f || v->Status() == 5 /* wrecked */ || v->IsTrain()) continue;  // a train's copy is locked (Trains)
-        int freeSeat = -1;
-        for (int s = 0; s < v->MaxPassengers() && s < 8; ++s)
-            if (!v->Passengers()[s]) {
-                freeSeat = s;
-                break;
+        if ((v->GetPosition() - mp).Length() > 12.0f || v->Status() == 5 /* wrecked */ || v->IsTrain()) continue;  // a train's copy is locked (Trains)
+        for (int s = 0; s < v->MaxPassengers() && s < 8; ++s) {
+            if (v->Passengers()[s]) continue;
+            int door = Call<0x64F190, int>(v, s);  // CCarEnterExit::ComputeTargetDoorToEnterAsPassenger
+            if (door < 0) continue;
+            CVector at;
+            Call<0x64E740, CVector*>(&at, v, door);  // CCarEnterExit::GetPositionToOpenCarDoor
+            float d = (at - mp).Length();
+            if (d < bestDist) {
+                bestDist = d;
+                best = v;
+                bestSeat = s;
             }
-        if (freeSeat < 0) continue;
-        bool partnerDrives = v->Driver() && FindByPed(v->Driver());
-        float score = d - (partnerDrives ? 100.0f : 0.0f);
-        if (score < bestScore) {
-            bestScore = score;
-            best = v;
-            bestSeat = freeSeat;
         }
     }
-    if (!best) return;
+    if (!best || bestDist > 8.0f) return;
     Cmd(0x05CA).I(GetPedRef(me)).I(GetVehicleRef(best)).I(10000).I(bestSeat).Run();  // TASK_ENTER_CAR_AS_PASSENGER
 }
 
@@ -1471,6 +1538,17 @@ void Players::SendLocalState() {
                (me->Health() <= 0.0f ? OnFootState::F_DEAD : 0) |
                (me->InVehicle() && me->Vehicle() && me->Vehicle()->IsTrain() ? OnFootState::F_IN_TRAIN : 0) |
                (Field<int32_t>(me, 0x740) == kCellphone ? OnFootState::F_PHONE : 0) | MakesFlags();  // CPed::m_nWeaponModelId
+    if (m_downed) st.flags |= OnFootState::F_DOWNED, st.downSeconds = m_downSeconds;
+    if (m_reviving) st.flags |= OnFootState::F_REVIVING;
+    if (CPhysical* to = me->AttachedTo(); to && to->IsVehicle()) {
+        if (NetVehicle* nv = Vehicles::Instance().Find((CVehicle*)to)) {
+            st.flags |= OnFootState::F_ATTACHED;
+            st.attachVeh = nv->netId;
+            st.attachOffset = Field<CVector>(me, 0x76C);  // CPed::m_vecTurretOffset
+            st.attachA = Field<uint16_t>(me, 0x778);      // m_fTurretAngleA (the side it faces)
+            st.attachB = Field<float>(me, 0x77C);         // m_fTurretAngleB (how far it turns, radians)
+        }
+    }
     st.area = me->AreaCode();
     st.moveState = (uint8_t)me->MoveState();
     st.wanted = WantedLevel(me);
@@ -1601,6 +1679,10 @@ void Players::DrawNameTag(RemotePlayer& rp) {
     if (NowMs() - rp.heardMs < 300)  // talking right now
         name = Format("{FFDC50}((•)){%06X} ", (unsigned)(nameColor & 0xFFFFFF)) + name;
     float lh = g.LineHeight(ui::FONT_SMALL);
+    if (rp.state.flags & OnFootState::F_DOWNED) {  // wounded: how long it can still be revived
+        std::string line = Format(TR("РАНЕН · %d с", "WOUNDED · %d s"), (int)rp.state.downSeconds);
+        g.Text(ui::FONT_SMALL, sx, sy - 2 * lh - 10 * s, line, ui::WithAlpha(0xFFFF5050, alpha), ui::TEXT_CENTER | ui::TEXT_OUTLINE);
+    }
     g.Text(ui::FONT_SMALL, sx, sy - lh - 8 * s, name, ui::WithAlpha(nameColor, alpha), ui::TEXT_CENTER | ui::TEXT_OUTLINE);
     float bw = 64 * s, bh = 6 * s;
     float bx = sx - bw / 2, by = sy - 6 * s;

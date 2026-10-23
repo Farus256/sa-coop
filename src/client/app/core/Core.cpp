@@ -13,6 +13,7 @@
 #include "common/lib/util/Util.h"
 #include "entities/player/Players.h"
 #include "entities/session/Flow.h"
+#include "features/revive/Revive.h"
 #include "features/story/missions/Missions.h"
 #include "pages/connect-menu/ConnectMenu.h"
 #include "shared/api/net-session/Session.h"
@@ -299,6 +300,8 @@ void WriteDefaultConfig(const std::wstring& path) {
         "; (лес, центр города), дальность сама уменьшается до обычной, а потом плавно возвращается.\r\n"
         "draw_distance = 2.0\r\n"
         "lod_distance = 1.0\r\n"
+        "; HUD в своих пропорциях на широком экране (радар круглый, буквы не растянуты). 0 — растянутый, как в игре.\r\n"
+        "hud_widescreen = 1\r\n"
         "; Память для подгрузки моделей, МБ (у игры 50): с большой дальностью прорисовки нужно больше.\r\n"
         "streaming_memory = 256\r\n"
         "; Игра не встаёт на паузу, когда окно не в фокусе. Для совместной игры это нужно.\r\n"
@@ -320,10 +323,12 @@ void WriteDefaultConfig(const std::wstring& path) {
         "proximity = 1\r\n"
         "\r\n"
         "[keys]\r\n"
-        "; Коды клавиш Windows: чат (84 = T), сесть пассажиром (71 = G), список игроков (113 = F2)\r\n"
+        "; Коды клавиш Windows: чат (84 = T), сесть пассажиром (71 = G), список игроков (113 = F2),\r\n"
+        "; откачать раненого напарника (69 = E; раненому: удерживать, чтобы сдаться)\r\n"
         "chat = 84\r\n"
         "enter_as_passenger = 71\r\n"
         "player_list = 113\r\n"
+        "revive = 69\r\n"
         "\r\n"
         "[debug]\r\n"
         "; Отладочная информация на экране и подробный лог. Включайте, если вас попросили прислать лог.\r\n"
@@ -391,6 +396,7 @@ bool OnKeyDown(int vk, bool repeat) {
         ui::TogglePlayerList();
         return true;
     }
+    if (vk == cfg.reviveKey && !inMenu && ReviveKeyPressed()) return true;  // otherwise E goes on (the next weapon)
     if (vk == cfg.passengerKey && !inMenu && IsPlayerReady()) {
         Players::Instance().TryEnterAsPassenger();
         return false;  // G still reaches the game (gang recruiting)

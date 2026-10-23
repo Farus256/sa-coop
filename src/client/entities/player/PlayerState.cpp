@@ -128,6 +128,13 @@ void OnFootState::Write(Writer& w) const {
     w.U8(wanted);
     pad.Write(w);
     cam.Write(w);
+    if (flags & F_ATTACHED) {
+        w.U16(attachVeh);
+        w.Vec(V(attachOffset));
+        w.U16(attachA);
+        w.F32(attachB);
+    }
+    if (flags & F_DOWNED) w.U8(downSeconds);
 }
 
 bool OnFootState::Read(Reader& r) {
@@ -146,6 +153,13 @@ bool OnFootState::Read(Reader& r) {
     wanted = r.U8();
     pad.Read(r);
     cam.Read(r);
+    if (flags & F_ATTACHED) {
+        attachVeh = r.U16();
+        attachOffset = G(r.Vec());
+        attachA = r.U16();
+        attachB = r.F32();
+    }
+    if (flags & F_DOWNED) downSeconds = r.U8();
     return r.Ok();
 }
 
