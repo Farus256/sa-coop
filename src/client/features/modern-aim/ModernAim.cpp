@@ -1,15 +1,15 @@
-// Aiming over the shoulder, as in the newer games. On foot with the mouse, a gun aimed in the third person
-// (MODE_AIMWEAPON: pistols, SMGs, shotguns, rifles) put the camera far behind CJ with the crosshair off the centre
-// (CCamera::m_f3rdPersonCHairMultX/Y 0.53, 0.4). Now the camera comes closer and over his right shoulder, the crosshair
-// is a dot in the middle of the screen and the shots go there (CCamera::Find3rdPersonCamTargetVector aims through the
-// crosshair's point), and the camera moves there and back smoothly. It never goes through a wall: the shift is cut
-// short where the line from his head to it is blocked. The other players' games aim his copy with the camera and the
-// crosshair he sends (Players), so they see the same shots. [game] modern_aim = 0 turns it off.
+// The camera on foot over the shoulder, as in the newer games (with the mouse; [game] modern_aim = 0 turns it off). It
+// stands behind CJ and to his right all the time; aiming a gun in the third person (MODE_AIMWEAPON: pistols, SMGs,
+// shotguns, rifles) it only comes closer, the crosshair is a dot in the middle of the screen and the shots go there
+// (CCamera::Find3rdPersonCamTargetVector aims through the crosshair's point). The game aimed with the camera far
+// behind CJ and the crosshair off the centre (CCamera::m_f3rdPersonCHairMultX/Y 0.53, 0.4). The other players' games
+// aim his copy with the camera and the crosshair he sends (Players), so they see the same shots.
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
 #include "common/lib/log/Log.h"
+#include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
@@ -21,37 +21,40 @@ namespace {
 using namespace game;
 
 constexpr uint16_t MODE_AIMWEAPON = 53;
-// the shift over the shoulder (m): far enough behind that CJ stands whole in the left third of the picture
-constexpr float kRight = 0.55f, kForward = 0.45f, kDown = -0.05f;
-constexpr float kBlendPerSecond = 6.0f;                          // in and out in about a sixth of a second
-constexpr int kFront = 0x190, kSource = 0x19C;                   // CCam::m_vecFront, m_vecSource
+constexpr int kFront = 0x190, kSource = 0x19C, kFov = 0xB4;      // CCam::m_vecFront, m_vecSource, m_fFOV
 constexpr int kAlpha = 0xAC, kBeta = 0xBC;                       // CCam::m_fVerticalAngle, m_fHorizontalAngle
 constexpr uintptr_t kFrameCounter = 0xB7CB4C;                    // CTimer::m_FrameCounter
 
-float g_blend = 0.0f;      // 0: the game's camera, 1: over the shoulder
-CVector g_applied{};       // what was added to the source last frame (taken off before the game works it out again)
-void* g_appliedCam = nullptr;
-CVector g_gameSrc{}, g_gameFront{};  // what the game made of the camera last frame, before ours
-bool g_changed = false;
-// The camera between the following one and the aiming one: the game cuts from one to the other (another distance,
-// height and direction at once), it jumped. The picture goes from the last one to the new one in a fifth of a second,
-// its place relative to the player and its direction both.
-struct Snap {
-    CVector rel, front;
-    bool aim = false, valid = false;
-    uint32_t frame = 0;
-} g_last;
-CVector g_fromRel{}, g_fromFront{};
-uint32_t g_transMs = 0;
-constexpr uint32_t kTransMs = 220;
+// One camera on foot, the way the newer games have it. Walking about it already stands behind CJ and over his right
+// shoulder, looking past him the way the mouse turns it; aiming it only comes closer (and a little lower, the picture a
+// little narrower), in a sixth of a second. The game's own two cameras, the following one and the aiming one, stood in
+// different places with different heights and directions, and the cut between them jumped. The game still works out
+// its cameras (the direction from the mouse, the aim, what the camera does in a car): only the place they stand at is
+// ours, and each frame the game gets its own back before it goes on from it.
+struct Rig {
+    float dist, side, height, fov;
+};
+constexpr Rig kWalk{3.4f, 0.55f, 0.30f, 70.0f};   // walking about
+constexpr Rig kAim{1.9f, 0.60f, 0.18f, 60.0f};    // aiming
+constexpr float kBlendPerSecond = 6.0f;           // 0..1 in a sixth of a second
+
+float g_blend = 0.0f;      // 0: walking, 1: aiming
 uint32_t g_lastBlendMs = 0;
 bool g_mults = false;      // our crosshair place is on
-CVector g_followFront{0, 1, 0};  // where the following camera looked last
-bool g_haveFollow = false;
-uint32_t g_aimFrame = 0;         // the last frame the aiming camera ran
 float g_multX = 0.53f, g_multY = 0.4f;
+// the game's own camera of last frame, before ours (given back before it works the next one out)
+void* g_ourCam = nullptr;
+CVector g_gameSrc{}, g_gameFront{};
+float g_gameFov = 70.0f;
+bool g_changed = false;
+// where each camera looked last: the other one starts looking there (the game's aiming camera started behind CJ's
+// back, its following one where it had been before the aim)
+CVector g_lookFront{0, 1, 0};
+bool g_haveLook = false;
+uint32_t g_aimFrame = 0, g_followFrame = 0;
 
 bool Enabled() { return Cfg().modernAim && cam::UseMouse3rdPerson(); }
+float Ease(float t) { return t * t * (3.0f - 2.0f * t); }
 
 void StepBlend(bool aiming) {
     uint32_t now = TimeMs();
@@ -61,68 +64,54 @@ void StepBlend(bool aiming) {
     g_blend = g_blend < target ? std::min(target, g_blend + dt * kBlendPerSecond) : std::max(target, g_blend - dt * kBlendPerSecond);
 }
 
-float Ease(float t) { return t * t * (3.0f - 2.0f * t); }
-
-void Shift(void* cam) {
-    CVector& src = Field<CVector>(cam, kSource);
-    if (g_blend <= 0.0f) {
-        g_applied = {};
-        return;
-    }
-    CPlayerPed* me = FindPlayerPed(0);
-    if (!me) return;
-    CVector front = Field<CVector>(cam, kFront).Normalized();
-    CVector right = front.Cross(CVector{0, 0, 1}).Normalized();
-    float k = Ease(g_blend);
-    CVector want = right * kRight + front * kForward - CVector{0, 0, kDown};
-    CVector head = me->GetPosition() + CVector{0, 0, 0.6f};
-    // as far as nothing is in the way, from his head and from where the game put the camera
-    float part = 1.0f;
-    for (; part > 0.0f; part -= 0.25f) {
-        CVector at = src + want * (k * part);
-        if (Call<0x56A490, bool>(&head, &at, true, true, false, true, false, false, true) &&  // CWorld::GetIsLineOfSightClear
-            Call<0x56A490, bool>(&src, &at, true, true, false, true, false, false, true))
-            break;
-    }
-    g_applied = want * (k * std::max(0.0f, part));
-    src += g_applied;
-}
-
-void Unshift(void* cam) {
-    if (cam == g_appliedCam && g_changed) {  // the game goes on from its own camera, not ours
+void GiveBack(void* cam) {
+    if (cam == g_ourCam && g_changed) {
         Field<CVector>(cam, kSource) = g_gameSrc;
         Field<CVector>(cam, kFront) = g_gameFront;
+        Field<float>(cam, kFov) = g_gameFov;
     }
-    g_applied = {};
     g_changed = false;
-    g_appliedCam = cam;
+    g_ourCam = cam;
 }
 
 void KeepGame(void* cam) {
     g_gameSrc = Field<CVector>(cam, kSource);
     g_gameFront = Field<CVector>(cam, kFront);
+    g_gameFov = Field<float>(cam, kFov);
     g_changed = true;
 }
 
-void Transition(void* cam, bool aim) {
+// the camera where the rig puts it: behind the pivot along the look, to the right, a little up; pulled in where a wall
+// stands between it and CJ's head
+void Place(void* cam) {
     CPlayerPed* me = FindPlayerPed(0);
-    if (!me) return;
-    CVector& src = Field<CVector>(cam, kSource);
-    CVector& front = Field<CVector>(cam, kFront);
-    uint32_t frame = Ref<uint32_t>(kFrameCounter), now = TimeMs();
-    CVector p = me->GetPosition();
-    if (g_last.valid && g_last.aim != aim && frame - g_last.frame <= 2 && Enabled()) {
-        g_fromRel = g_last.rel, g_fromFront = g_last.front, g_transMs = now;
+    if (!me || me->InVehicle()) return;
+    float k = Ease(g_blend);
+    Rig r{kWalk.dist + (kAim.dist - kWalk.dist) * k, kWalk.side + (kAim.side - kWalk.side) * k,
+          kWalk.height + (kAim.height - kWalk.height) * k, kWalk.fov + (kAim.fov - kWalk.fov) * k};
+    CVector front = Field<CVector>(cam, kFront).Normalized();
+    CVector right = front.Cross(CVector{0, 0, 1}).Normalized();
+    CVector pivot = me->GetPosition() + CVector{0, 0, 0.55f};
+    CVector shoulder = pivot + right * r.side + CVector{0, 0, r.height};
+    // the shoulder itself must be free (a wall at the right hand): the side shrinks first
+    float side = r.side;
+    for (int i = 0; i < 4; ++i) {
+        CVector at = pivot + right * side + CVector{0, 0, r.height};
+        if (Call<0x56A490, bool>(&pivot, &at, true, true, false, true, false, false, true)) {  // CWorld::GetIsLineOfSightClear
+            shoulder = at;
+            break;
+        }
+        side *= 0.5f;
+        shoulder = pivot + CVector{0, 0, r.height};
     }
-    if (g_transMs && now - g_transMs < kTransMs) {
-        float k = Ease((float)(now - g_transMs) / kTransMs);
-        CVector rel = src - p;
-        src = p + g_fromRel + (rel - g_fromRel) * k;
-        front = (g_fromFront + (front.Normalized() - g_fromFront) * k).Normalized();
-    } else {
-        g_transMs = 0;
+    float dist = r.dist;
+    for (int i = 0; i < 6; ++i) {  // behind: as far as nothing is in the way
+        CVector at = shoulder - front * dist;
+        if (Call<0x56A490, bool>(&shoulder, &at, true, true, false, true, false, false, true)) break;
+        dist *= 0.7f;
     }
-    g_last = {src - p, front.Normalized(), aim, true, frame};
+    Field<CVector>(cam, kSource) = shoulder - front * std::max(dist, 0.6f);
+    Field<float>(cam, kFov) = r.fov;
 }
 
 void SetMults(bool on) {
@@ -136,47 +125,115 @@ void SetMults(bool on) {
     g_mults = on;
 }
 
+// the camera that starts now looks where the other one looked: its angles from that direction, and again
+template <typename Fn>
+void StartLooking(void* cam, Fn again, bool turnPlayer) {
+    if (!g_haveLook) return;
+    CVector f = g_lookFront.Normalized();
+    float beta = std::atan2(-f.y, -f.x), alpha = std::asin(std::clamp(f.z, -0.99f, 0.99f));
+    Field<float>(cam, kBeta) = beta;
+    Field<float>(cam, kAlpha) = alpha;
+    if (turnPlayer)
+        if (CPlayerPed* me = FindPlayerPed(0)) me->CurrentRotation() = me->AimingRotation() = WrapAngle(beta - 1.5707963f);
+    again();
+    Field<float>(cam, kBeta) = beta;
+    Field<float>(cam, kAlpha) = alpha;
+}
+
 using ProcessFn = void(__fastcall*)(void*, void*, const CVector*, float, float, float);
 ProcessFn g_origAim = nullptr, g_origFollow = nullptr;
 
 void __fastcall HookAimWeapon(void* cam, void* edx, const CVector* target, float a, float b, float c) {
-    Unshift(cam);
+    GiveBack(cam);
     uint32_t frame = Ref<uint32_t>(kFrameCounter);
     bool entering = frame - g_aimFrame > 2;
     g_aimFrame = frame;
     g_origAim(cam, edx, target, a, b, c);
     bool on = Enabled() && Field<uint16_t>(cam, 0x0C) == MODE_AIMWEAPON;  // CCam::m_nMode
-    // The aiming camera starts behind the way CJ faces (its first frame sets m_fHorizontalAngle from his heading): the
-    // picture swung round whenever he faced elsewhere than the camera looked. It starts where the following camera
-    // looked instead, CJ turns that way, and the frame is worked out again from there.
-    if (on && entering && g_haveFollow) {
-        CVector f = g_followFront.Normalized();
-        float beta = std::atan2(-f.y, -f.x), alpha = std::asin(std::clamp(f.z, -0.99f, 0.99f));
-        Field<float>(cam, kBeta) = beta;
-        Field<float>(cam, kAlpha) = alpha;
-        if (CPlayerPed* me = FindPlayerPed(0)) me->CurrentRotation() = me->AimingRotation() = WrapAngle(beta - 1.5707963f);
-        g_origAim(cam, edx, target, a, b, c);
-        Field<float>(cam, kBeta) = beta;
-        Field<float>(cam, kAlpha) = alpha;
-    }
-    KeepGame(cam);
+    if (on && entering) StartLooking(cam, [&] { g_origAim(cam, edx, target, a, b, c); }, true);
+    g_lookFront = Field<CVector>(cam, kFront);
+    g_haveLook = true;
     SetMults(on);
-    StepBlend(on);
-    if (on) Shift(cam);
-    Transition(cam, on);
+    if (!on) return;
+    KeepGame(cam);
+    StepBlend(true);
+    Place(cam);
 }
 
-// leaving the aim, the following camera starts where the aiming one was and moves back
+// In a car, a passenger looks where it likes: aiming out of the window turns the camera with the mouse (the look button
+// held, CPad::m_bVehicleMouseLook, or the aiming camera of MODE_AIMWEAPON_FROMCAR), and letting go the car's camera
+// swung back behind the car, losing where the player had looked. For a passenger the car's camera stays turned where
+// it was, relative to the car, and the mouse turns it on from there (as CCam's free mouse look does: 3 x the mouse's
+// move x FOV/80 x the camera's mouse speed). The game's camera works out its frame and is turned round the car by
+// what is between its angle and ours; the next frame it starts from ours.
+using FollowCarFn = void(__fastcall*)(void*, void*, const CVector*, float, float, float, bool);
+FollowCarFn g_origFollowCar = nullptr;
+uint32_t g_carFrame = 0;
+constexpr uintptr_t kMouseMoved = 0xB73418 + 0x0C;  // CPad::NewMouseControllerState.m_AmountMoved
+constexpr uintptr_t kMouseAccelH = 0xB6EC1C;        // CCamera::m_fMouseAccelHorzntl
+bool g_passLook = false;   // the passenger's own look holds
+float g_passRel = 0;       // its angle from the car's heading
+CVehicle* g_passCar = nullptr;
+
+float CarAngle(CVehicle* v) {
+    CMatrix* m = v->Matrix();
+    return m ? std::atan2(m->forward.y, m->forward.x) : 0.0f;
+}
+
+void __fastcall HookFollowCar(void* cam, void* edx, const CVector* target, float a, float b, float c, bool d) {
+    uint32_t frame = Ref<uint32_t>(kFrameCounter);
+    bool afterAim = frame - g_carFrame > 2 && frame - g_aimFrame <= 3;
+    g_carFrame = frame;
+    g_origFollowCar(cam, edx, target, a, b, c, d);
+    CPlayerPed* me = FindPlayerPed(0);
+    CVehicle* v = me ? me->VehicleIfIn() : nullptr;
+    if (!Net().Online() || !v || v->Driver() == me || !cam::UseMouse3rdPerson()) {
+        g_passLook = false;
+        return;
+    }
+    if (v != g_passCar) g_passLook = false, g_passCar = v;
+    float& beta = Field<float>(cam, kBeta);
+    bool held = GetPad(0)->NewState.m_bVehicleMouseLook;
+    if (afterAim && g_haveLook) {  // from the aiming camera: where it looked
+        CVector f = g_lookFront.Normalized();
+        g_passRel = WrapAngle(std::atan2(-f.y, -f.x) - CarAngle(v));
+        g_passLook = true;
+    } else if (held) {  // turning with the look button: the game's turn is the passenger's
+        g_passRel = WrapAngle(beta - CarAngle(v));
+        g_passLook = true;
+        return;
+    }
+    if (!g_passLook) return;
+    float fov = Field<float>(cam, kFov) / 80.0f;
+    g_passRel = WrapAngle(g_passRel - 3.0f * Ref<float>(kMouseMoved) * fov * Ref<float>(kMouseAccelH));
+    float want = CarAngle(v) + g_passRel, turn = WrapAngle(want - beta);
+    if (std::fabs(turn) < 1e-4f) return;
+    // the frame turned round the car by the difference
+    CVector pivot = v->GetPosition();
+    CVector& src = Field<CVector>(cam, kSource);
+    CVector& front = Field<CVector>(cam, kFront);
+    float cs = std::cos(turn), sn = std::sin(turn);
+    auto rot = [&](const CVector& p) { return CVector{p.x * cs - p.y * sn, p.x * sn + p.y * cs, p.z}; };
+    src = pivot + rot(src - pivot);
+    front = rot(front);
+    beta = WrapAngle(want);
+}
+
 void __fastcall HookFollowPed(void* cam, void* edx, const CVector* target, float a, float b, float c) {
-    Unshift(cam);
+    GiveBack(cam);
+    uint32_t frame = Ref<uint32_t>(kFrameCounter);
+    bool entering = frame - g_followFrame > 2;
+    g_followFrame = frame;
     g_origFollow(cam, edx, target, a, b, c);
-    g_followFront = Field<CVector>(cam, kFront);
-    g_haveFollow = true;
-    KeepGame(cam);
+    bool on = Enabled();
+    if (on && entering) StartLooking(cam, [&] { g_origFollow(cam, edx, target, a, b, c); }, false);
+    g_lookFront = Field<CVector>(cam, kFront);
+    g_haveLook = true;
     SetMults(false);
+    if (!on) return;
+    KeepGame(cam);
     StepBlend(false);
-    if (Enabled()) Shift(cam);
-    Transition(cam, false);
+    Place(cam);
 }
 
 // ---- drawing: one batch of triangles through RenderWare's immediate mode (one draw call for the whole scope)
@@ -276,14 +333,16 @@ public:
     void OnInstallHooks() override {
         mem::HookFn(0x521500, &HookAimWeapon, &g_origAim, "CCam::Process_AimWeapon");
         mem::HookFn(0x50F970, &HookFollowPed, &g_origFollow, "CCam::Process_FollowPedWithMouse");
+        mem::HookFn(0x5245B0, &HookFollowCar, &g_origFollowCar, "CCam::Process_FollowCar_SA");
         mem::HookFn(0x58E020, &HookCrossHairs, &g_origCrossHairs, "CHud::DrawCrossHairs");
         LOGI("Over-the-shoulder aiming: %s", Cfg().modernAim ? "on" : "off");
     }
     void OnGameShutdown() override {
         SetMults(false);
         g_blend = 0.0f;
-        g_applied = {};
-        g_appliedCam = nullptr;
+        g_changed = false;
+        g_ourCam = nullptr;
+        g_haveLook = false;
     }
 };
 

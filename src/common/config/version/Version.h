@@ -2,7 +2,7 @@
 #include <cstdint>
 
 #define COOP_NAME "SA:COOP"
-#define COOP_VERSION_STR "0.3.8"
+#define COOP_VERSION_STR "0.3.9"
 
 namespace coop {
 // Bumped on any incompatible change of the network protocol. The multi-player fork counts from 100: a game or a server
