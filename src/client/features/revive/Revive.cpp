@@ -43,6 +43,10 @@ enum : uint8_t { OP_START = 1, OP_STOP = 2, OP_DONE = 3 };
 // ---- this player wounded
 bool g_wantDown = false;   // its health ran out in the damage processing: it falls right after it
 bool g_down = false;
+// It bled out or gave up: it dies for real now. Until the game has it wasted no hit puts it down again (a shot at the
+// body on the ground went through ComputeWillKillPed, the hook took it for a new wound, and the 30 seconds started over)
+uint64_t g_dyingMs = 0, g_dieTaskMs = 0;
+constexpr int PEDSTATE_DIE = 54, PEDSTATE_DEAD = 55;
 uint64_t g_downEnd = 0;
 uint32_t g_savedProofs = 0;
 int g_rescuer = -1;        // who gives it CPR now
@@ -155,7 +159,7 @@ using WillKillFn = void(__fastcall*)(void*, void*, CPed*, uint8_t*, bool);
 WillKillFn g_origWillKill = nullptr;
 void __fastcall HookWillKill(void* calc, void* edx, CPed* ped, uint8_t* rsp, bool speak) {
     g_origWillKill(calc, edx, ped, rsp, speak);
-    if (!rsp[8] || !Net().Online()) return;
+    if (!rsp[8] || !Net().Online() || g_dyingMs) return;
     CPlayerPed* me = FindPlayerPed(0);
     if (ped != me) return;
     if (!g_down && !g_wantDown && !CanGoDown(me, Field<int32_t>(calc, 0x0C))) return;
@@ -219,11 +223,39 @@ void EndDown(CPlayerPed* me) {
     Players::Instance().SetLocalDowned(false);
 }
 
+void KillNow(CPlayerPed* me) {
+    int h = GetPedRef(me);
+    Cmd(0x0792).I(h).Run();          // CLEAR_CHAR_TASKS_IMMEDIATELY: the held fall lets go
+    me->Health() = 0.0f;
+    Cmd(0x05BE).I(h).Run();          // TASK_DIE: dead now, no event that a hit could beat
+    Cmd(0x0223).I(h).I(0).Run();     // SET_CHAR_HEALTH 0: and the game's own death after it if that one did not take
+    g_dieTaskMs = NowMs();
+}
+
 void Die(CPlayerPed* me, const char* why) {
     EndDown(me);
-    Cmd(0x0223).I(GetPedRef(me)).I(0).Run();  // SET_CHAR_HEALTH 0: the death task
-    me->Health() = 0.0f;
+    g_dyingMs = NowMs();
+    KillNow(me);
     LOGI("Wounded: died (%s)", why);
+}
+
+// until the game has it wasted: dead it stays (health 0, the death task again if something cut into it)
+void UpdateDying(CPlayerPed* me) {
+    if (!g_dyingMs) return;
+    if (PlayerInfos()[0].playerState != 0 || NowMs() - g_dyingMs > 20000) {  // wasted: the hospital takes it from here
+        g_dyingMs = 0;
+        return;
+    }
+    if (me->Health() > 1.0f && NowMs() - g_dyingMs > 3000) {  // put back on its feet by the game (a respawn): done
+        g_dyingMs = 0;
+        return;
+    }
+    me->Health() = 0.0f;
+    int state = me->PedState();
+    if (state != PEDSTATE_DIE && state != PEDSTATE_DEAD && NowMs() - g_dieTaskMs > 1500) {
+        LOGW("Wounded: the death did not take (ped state %d), again", state);
+        KillNow(me);
+    }
 }
 
 void Revive(CPlayerPed* me, const std::string& who) {
@@ -400,6 +432,8 @@ void UpdateNpcs(CPlayerPed* me) {
 
 // ---- this player wounded, every frame
 void UpdateDowned(CPlayerPed* me) {
+    UpdateDying(me);
+    if (g_dyingMs) g_wantDown = false;
     if (g_wantDown) GoDown(me);
     if (!g_down) return;
     if (PlayerInfos()[0].playerState != 0) {  // CPlayerInfo::m_nPlayerState: wasted or busted after all
@@ -431,6 +465,7 @@ void UpdateDowned(CPlayerPed* me) {
     // giving up: the key held
     bool held = IsForeground() && !ui::TheChat().IsOpen() && (GetAsyncKeyState(Cfg().reviveKey) & 0x8000);
     g_holdMs = held ? (g_holdMs ? g_holdMs : now) : 0;
+    if (held && now - (g_downEnd - kDownMs) < 500) g_holdMs = now;  // held since before the fall: counts from now
     if (g_holdMs && now - g_holdMs >= kGiveUpHoldMs) {
         Die(me, "gave up");
         return;
@@ -458,6 +493,7 @@ void HandleRevive(uint8_t from, Reader& r) {
 }
 
 void ResetAll() {
+    g_dyingMs = 0;
     if (g_down || g_wantDown) EndDown(core::IsPlayerReady() ? FindPlayerPed(0) : nullptr);
     if (g_target >= 0) StopCpr(nullptr, false);
     g_candidate = -1;

@@ -26,6 +26,7 @@ struct ClientConfig {
     // monitor: ALT+TAB goes to the desktop at once, with no black screen while the display mode switches back
     bool exclusiveFullscreen = false;
     bool modernAim = true;            // aiming over the shoulder, a dot in the middle of the screen
+    bool betterScope = true;          // the sniper rifle's scope drawn sharp and round
     bool windowedStrict = false;      // test setups: quit at once if windowed mode could not be applied
     int windowX = -1, windowY = -1;   // -1 = centre
     int width = 0, height = 0;        // 0 = use the game's video mode

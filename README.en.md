@@ -44,6 +44,8 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
 - cheats can be typed in the chat (`/code HESOYAM`), and everyone sees who entered which code and what it does
 - the in-game scenes of missions (script cameras) show for the partners as for the host, and bring them next to him
 - the Las Venturas casinos take any bet up to $1,000,000 from the first visit
+- the car radio is the driver's, its passengers hear the same station; a passenger's mouse wheel picks the gun
+- a new sniper scope; the more players, the sharper and more numerous the enemies
 - Linux and macOS builds, server tests
 
 Not compatible with the original 0.2.x versions, everyone has to update. Playing with three or more people has

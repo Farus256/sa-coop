@@ -165,6 +165,7 @@ enum MsgId : uint8_t {
                               // (a fixed place, a point, an entity, a move, a zoom) or gave it back
     G_LOBBY = 150,            // reliable: u8 op, u8 value: a newcomer asks (1), the host says whether the game is on
                               // (2), a partner is ready or not (3)
+    G_RADIO = 151,            // reliable: u16 vehicle, i8 station: the radio its driver plays (its passengers tune to it)
 
     G_VOICE = 200,            // unreliable: voice frame
     G_LAST = 255,
