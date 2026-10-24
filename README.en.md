@@ -31,17 +31,22 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
 - every screen resolution in the menu, 1920x1080 included; full screen is a borderless window over the monitor by
   default, so ALT+TAB is instant (`exclusive_fullscreen = 1` in `coop\coop.ini` brings back the real full screen
   with the menu's resolution)
-- a longer draw distance than the game's (`draw_distance` and `lod_distance` in `coop\coop.ini`, `/draw` in the game)
-- everyone's map waypoints for everyone: the host's crosshair is red, the others' green, yellow, blue, pink
+- the longest draw distance by default (`draw_distance` and `lod_distance` in `coop\coop.ini`, `/draw` in the game)
+- everyone's map waypoints for everyone, drawn like the game's own (a black disc with a crosshair): the host's
+  crosshair is red, the others' green, yellow, blue, pink
 - a wounded player can be revived: it lies for 30 seconds while a partner presses `E` and gives it CPR
 - the host's mission seats the partners near it in its car, or stands them on the truck next to CJ
-- a lobby: friends join beforehand and press "Ready", the host presses "Start the game"; a newcomer to the world
-  picks a character: CJ or a Grove Street homie
+- a lobby: friends join beforehand and press "Ready", the host presses "Start the game"; every partner picks a
+  character there: CJ or a Grove Street homie
 - cheats can be typed in the chat (`/code HESOYAM`), and everyone sees who entered which code and what it does
 - the in-game scenes of missions (script cameras) show for the partners as for the host, and bring them next to him
 - the Las Venturas casinos take any bet up to $1,000,000 from the first visit
 - the car radio is the driver's, its passengers hear the same station; a passenger's mouse wheel picks the gun
 - a new sniper scope; the more players, the sharper and more numerous the enemies
+- gambling dens in Las Venturas, toy car races in San Fierro
+- goods at the 24/7 counter and at the bar with effects that last a while
+- tank battles (`/tanks`): shells fly, armour has a front and a rear, the game's tank crews fire, soldiers carry RPGs
+- ground battles (`/arena yakuza random 5`): waves of enemies in the missions' interiors and a boss at the end
 - Linux and macOS builds, server tests
 
 Not compatible with the original 0.2.x versions, everyone has to update. Playing with three or more people has
@@ -131,11 +136,74 @@ With a living partner within 200 m, a player whose health runs out does not die:
 seconds, the time left shown over it. A partner comes up and presses `E`: 5 seconds of CPR, as the paramedics do,
 and the wounded one gets up with all its weapons and half its health. A player can be revived twice in 6 minutes;
 the third time it dies at once. Holding `E`, the wounded one gives up. In a car, in the water or with nobody near,
-death is as usual. The key is `revive` in `[keys]` of `coop\coop.ini`.
+death is as usual. The key is `revive` in `[keys]` of `coop\coop.ini`. Lying there, you can still turn the camera
+with the mouse, and the host's mission goes on until the host really dies. Only a player revives; a rival gangster
+(Ballas, Vagos, Rifa) within 30 m comes and kicks the wounded one, 3 seconds off each kick.
 
 | | |
 |---|---|
 | ![The host swings a baseball bat at the partner](docs/images/friendly-fire-1.jpg) | ![The partner is knocked down, and the host stands over them with the bat](docs/images/friendly-fire-2.jpg) |
+
+### The city
+
+The game's own 24/7s and bars sell more (`E` at the counter, then `1`-`4`); every player buys for itself, whoever
+came in first:
+
+| Goods | Price | What it does |
+|---|---|---|
+| A drink | $50 | for 20 minutes one of: steadier aim, quicker feet or more health; every 4 minutes a 32% chance of a minute drunk |
+| Food | $25 | full health (a snack at the bar) |
+| A soda | $150 | for 30 minutes: more stamina and a slightly faster run (24/7s only) |
+| Cigarettes | $250 | for 30 minutes: steadier aim (24/7s only) |
+
+The time each effect has left shows on the right of the screen.
+
+Las Venturas has two underground gambling dens with their icons on the radar and the map. Each door is put by the
+nearest fitting shop front when a player first comes near.
+
+In San Fierro, by Zero's RC shop (the flag on the radar), there are toy car races: `E` at the start, and everyone
+who pressed it there within 8 seconds races round the blocks of Garcia through the checkpoints. Everyone sees the
+times and places; a finish pays $400-$1000.
+
+A blown-up security van spills $1000-$10000, and they are rarer. Going into shops and houses and out is quicker.
+
+A Grove Street homie another player's game made joins the gang of whoever called him (`G`), not the host's. When a
+player goes into a building, the people and cars of its game near the other players do not vanish for them: they
+go over to those players' games.
+
+### Tanks
+
+A Rhino's gun fires a shell that flies (250 m/s, dropping a little, up to 750 m) and bursts where it hits; it can be
+seen in flight. The gun takes 4 seconds to load; the bottom of the screen shows whether it is loaded and how much
+armour is left. The turret lays itself where the camera looks, allowing for the shell's drop, and a sight on the
+screen marks where the shell will land (red: on a tank). Bullets and blasts still do nothing to a tank, but a shell goes through: about 18% of its strength
+in the front, 30% in a side, 45% in the rear. Tanks driven by the army or the police lay their guns and fire at a
+player with four wanted stars or more. Without friendly fire the players' tanks do not hurt each other.
+
+**A tank battle**: the host types `/tanks`. Every player within 400 m of the host gets a Rhino by the road, and 12
+seconds later three waves of enemy tanks come from 250-350 m away (as many as the players, one more each wave; they
+drive in to 140 m and fight from there, marked on the radar). Soldiers with rocket launchers come on foot with each
+wave (2, 3, 4): a rocket takes 30% of a tank's armour. The next wave comes only when every tank and soldier of this
+one is down. All three waves destroyed: $5000 to everyone in the
+battle. Everyone in it dead, or 15 minutes: lost. `/tanks join` joins it later, `/tanks stop` (the host) ends it.
+
+### Ground battles
+
+The host types `/arena <enemies> <place> <waves>`, e.g. `/arena yakuza random 5` or `/arena ballas crack 3`
+(`/arena list` lists them all). Every player is taken into an interior of the story's missions: Big Smoke's crack
+palace, Madd Dogg's mansion, Caligula's and the Four Dragons casinos, the meat factory, a warehouse, the Jefferson
+motel, the atrium, Woozie's office, Liberty City, the police station, the Sherman dam, the Bloodbowl and Kickstart
+stadiums (`random`: any). Enemies: yakuza, ballas, vagos, aztecas, triads, mafia, rifa, bikers, police, swat, army.
+1 to 10 waves, each bigger, better armed and better aimed. The next wave comes 6 seconds after the last of this one
+falls. The last wave brings a boss: Tenpenny, Pulaski, Hernandez, Big Smoke, Ryder, OG Loc, T-Bone Mendez, Jizzy B
+or Mike Toreno, with an AK-47 (a gang's) or an M4 (the police's and Toreno), and with him, unannounced, his silent
+men working round the players. Enemies come in squads of 3-4 from different sides: one straight on, the others to
+the players' backs; squads have grenadiers and knifemen (a knife kills silently from behind), and more armour each
+wave. No wanted stars in an arena or a tank battle, and weapons taken up there are not kept after it.
+Weapons and body armour lie about the place before each wave (better each wave; less armour where drinks machines
+stand), and big places give 30 seconds between waves.
+A win pays everyone $1000 a wave, then takes everyone back where it stood. Everyone dead
+or gone: lost. `/arena stop` ends it. Offline, one can play an arena alone.
 
 ### Russian and English
 
@@ -201,8 +269,10 @@ Radmin or ZeroTier (friends then connect to the VPN address).
 | F9 | the SA:COOP window |
 | T | chat: Enter sends a message, Esc closes the chat |
 | B | voice chat while the key is held |
-| G | take the nearest free passenger seat |
-| E | revive a wounded partner next to you; wounded: hold to give up |
+| G | take the nearest free passenger seat; by a Grove Street homie (another game's too): call him into your gang |
+| E | revive a wounded partner next to you; wounded: hold to give up; by a clerk or a barman: the menu, `1`-`4` to buy; by Zero's shop: a race |
+| Left mouse button in a tank | fire (4 s to reload) |
+| Mouse wheel | as a passenger: pick the gun to shoot out of the window |
 | Right mouse button | as a passenger: lean out of the window with the gun, fire with the left button |
 | F2 | the player list |
 | Enter / Esc | in a cutscene: offer to skip it, agree / refuse |
@@ -216,7 +286,12 @@ Chat commands:
 | `/tphere [nick]` | bring a player over; `/tphere all` brings everyone (host only) |
 | `/go` | host: start the mission without waiting for the missing ones |
 | `/mute <nick>`, `/unmute <nick>` | stop / start hearing a player's voice (for you only) |
-| `/draw [0.5-4] [detail]` | draw distance (2 by default, 1 is the game's own) |
+| `/draw [0.5-4] [detail]` | draw distance (4 by default, 1 is the game's own) |
+| `/tanks` | host: a tank battle; `/tanks join` joins it, `/tanks stop` ends it |
+| `/arena` | host: a ground battle, `/arena yakuza random 5`; `/arena list` lists, `/arena stop` ends it |
+| `/fp`, F7 | first-person view on and off |
+| `/cheats off`, `/cheats on` | host: turn cheat codes off or on for everyone |
+| `/sync` | the sync's state: ping, the delay to each player, how many people and cars your game runs |
 | `/code <cheat>` | enter a cheat, for example `/code HESOYAM` |
 | `/pm <nick> <text>` | private message |
 | `/kick <nick> [reason]` | host: kick a player |
@@ -231,15 +306,15 @@ A unique beginning of a nickname is enough.
 - Only the host can start story missions, Cesar's races and turf wars. When a mission has CJ carry something, like
   the crates in the house robbery with Ryder, the host does it.
 - You see the other player's train but cannot get into it: it is driven by the player whose game made it.
-- The other player's parachute canopy is not shown, only their animations. Each player hears their own
-  pedestrians' chatter outside missions.
 - The partner gets story progress (new areas, gyms, mission markers) by loading the host's world after every
   mission the host passes. Loading takes a few seconds, and the partner keeps their position, weapons and
   progress.
 - The host keeps the partner's profile under the partner's nickname. With a different nickname, money and skills
   start over.
-- Whatever gets knocked down or broken on the streets stays that way for a few minutes, then the map puts
+- Whatever gets knocked down or broken on the streets stays that way for half an hour, then the map puts
   everything back, as in the normal game.
+- The gambling dens are put by shop fronts automatically: a door may not be where you would expect it. When no
+  spot for a door is found near, that den is missing (a "Venue" line in `coop\coop.log` says so).
 - The host needs an open UDP port, through UPnP or forwarded on the router. Hosting over mobile internet or behind
   CGNAT does not work without a VPN.
 - Only `gta_sa.exe` version 1.0 US is supported. The players' builds may differ, but mods that change the story or
@@ -257,6 +332,8 @@ English. A [Telegram group](https://t.me/+GNKZb83LqBQyMGEy) is also available if
 With a bug report, attach `coop\coop.log` from the game folder of the player who had the problem. If the game
 crashed, also attach `coop\crash.log`, and if you cannot connect, attach the host's `coop\server-data\server.log`.
 The log of the previous run is kept as `coop\coop.old.log`: send it if the game was started again after a crash.
+When something is out of step between the players, type `/sync` in the game on both sides at that moment: the lines
+go to the chat and to the log.
 
 ## Building from source
 

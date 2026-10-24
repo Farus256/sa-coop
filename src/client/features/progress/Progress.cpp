@@ -22,6 +22,7 @@
 #include "entities/player/Players.h"
 #include "entities/profile/Profile.h"
 #include "entities/session/Flow.h"
+#include "entities/buffs/Buffs.h"
 #include "features/progress/SkinChoice.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
@@ -122,7 +123,11 @@ std::vector<uint8_t> CaptureProfile() {
     w.U32(kProfileMagic);
     w.U16(kProfileVersion);
     w.I32(info.money);
-    w.Bytes((void*)kStatsBlock, kStatsSize);
+    uint8_t stats[kStatsSize];
+    uint8_t maxHealth = info.maxHealth;
+    memcpy(stats, (void*)kStatsBlock, kStatsSize);
+    buffs::Undo(stats, maxHealth);  // what was eaten and drunk lasts a while only
+    w.Bytes(stats, kStatsSize);
     w.Bytes(me->ClothesDesc(), kClothesSize);
     w.U8(NUM_WEAPON_SLOTS);
     for (int i = 0; i < NUM_WEAPON_SLOTS; ++i) {
@@ -131,7 +136,7 @@ std::vector<uint8_t> CaptureProfile() {
         w.I32(wpn.ammoTotal);
     }
     w.U8(me->FightingStyle());
-    w.U8(info.maxHealth);
+    w.U8(maxHealth);
     w.U8(info.maxArmour);
     const uint8_t* perks = (const uint8_t*)&info + 0x14C;  // m_bDoesNotGetTired, m_bFastReload, m_bFireProof
     w.U8(perks[0]);
@@ -142,6 +147,13 @@ std::vector<uint8_t> CaptureProfile() {
     w.U8(LookIsOwn());
     w.U16(skin::Worn());
     return w.Buffer();
+}
+
+// the character a profile keeps (its last field since version 4; 0: CJ)
+uint16_t ProfileCharacter(const std::vector<uint8_t>& blob) {
+    Reader r(blob.data(), blob.size());
+    if (blob.size() < 8 || r.U32() != kProfileMagic || r.U16() < 4) return 0;
+    return (uint16_t)(blob[blob.size() - 2] | blob[blob.size() - 1] << 8);
 }
 
 bool ApplyProfile(const std::vector<uint8_t>& blob, bool& lookOwn) {
@@ -274,7 +286,7 @@ public:
             if (blob.empty() && p.m_profileReceived && (!p.m_profile.empty() || !flow::InHostWorld())) p.m_resetPending = true;
             p.m_profile = blob;
             p.m_profileReceived = true;
-            skin::OnProfile(blob.empty());
+            skin::OnProfile(blob.empty(), ProfileCharacter(blob));
             p.m_applied = false;
         };
         Net().SetHandler(proto::G_PLAYER_LOOK, &HandleLook);
@@ -326,6 +338,7 @@ public:
                 LOGI("Profile applied (%zu bytes)", m_profile.size());
                 m_quietUntil = now + 5000;
                 ui::TheChat().AddSystem(TR("Загружены ваши деньги, навыки и внешность.", "Your money, skills and look are loaded."));
+                if (skin::Picked()) skin::ApplyChoice();  // another character picked in the lobby: over the profile's
             } else {
                 LOGW("Profile rejected (bad format), starting from the world's state");
             }
@@ -334,6 +347,9 @@ public:
             m_saved = m_profile;
             m_lastSaveMs = now;
         }
+
+        // the host's own pick in the lobby (to try the characters): on its CJ once its world is up
+        if (Net().IsHost() && skin::Picked() && !Ref<uint8_t>(0xB5F851) && !me->InVehicle()) skin::ApplyChoice();
 
         if (m_quietUntil && Ref<uint8_t>(0xB5F851)) m_quietUntil = std::max(m_quietUntil, now + 3000);  // a cutscene: later
         if (now < m_quietUntil && ShowsRespectUpgrade()) {

@@ -1,7 +1,7 @@
 // Map waypoints. Each game sends its player's waypoint (the target set on the pause menu map) and draws the other
 // players' ones on its radar and map. They are drawn rather than added as script blips, so they never get into a save.
-// Each is a crosshair in its player's colour, so whose one it is shows at a glance: the host's always red, the others
-// green, yellow, blue and pink in the order of their numbers.
+// Each looks like the game's own waypoint, a black disc with a crosshair on it, the crosshair in its player's colour so
+// whose one it is shows at a glance: the host's always red, the others green, yellow, blue and pink by their numbers.
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -9,8 +9,10 @@
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "entities/radar-icons/RadarIcons.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/game/Game.h"
+#include "shared/game/Im2D.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
 
@@ -47,40 +49,29 @@ CRGBA WaypointColor(uint8_t id) {
     return kOthers[order % 4];
 }
 
-void Rect(float left, float top, float right, float bottom, const CRGBA& c) {
-    float r[4] = {left, bottom, right, top};  // CRect: left, bottom, right, top
-    Call<0x727B60>((void*)r, &c);             // CSprite2d::DrawRect
-}
-
-// a crosshair the size of a blip: four arms with a gap in the middle, outlined in black
+// the game's own waypoint look: a black disc the size of a blip with a crosshair on it, here in its player's colour
 void DrawCrosshair(float x, float y, const CRGBA& c) {
-    float w = std::floor(ScreenWidth() / 640.0f * 8.0f), h = std::floor(ScreenHeight() / 448.0f * 8.0f);  // as a blip
-    float tx = std::max(1.0f, std::floor(w * 0.22f)), ty = std::max(1.0f, std::floor(h * 0.22f));  // arm thickness
-    float gx = w * 0.3f, gy = h * 0.3f, ox = std::max(1.0f, tx * 0.5f), oy = std::max(1.0f, ty * 0.5f);
-    CRGBA black{0, 0, 0, 255};
-    for (int pass = 0; pass < 2; ++pass) {
-        float ex = pass ? 0.0f : ox, ey = pass ? 0.0f : oy;
-        const CRGBA& col = pass ? c : black;
-        Rect(x - w - ex, y - ty / 2 - ey, x - gx + ex, y + ty / 2 + ey, col);  // left arm
-        Rect(x + gx - ex, y - ty / 2 - ey, x + w + ex, y + ty / 2 + ey, col);  // right arm
-        Rect(x - tx / 2 - ex, y - h - ey, x + tx / 2 + ex, y - gy + ey, col);  // top arm
-        Rect(x - tx / 2 - ex, y + gy - ey, x + tx / 2 + ex, y + h + ey, col);  // bottom arm
-    }
+    using namespace im2d;
+    float r = std::floor(ScreenHeight() / 448.0f * 8.0f);  // as a blip
+    uint32_t col = Argb(255, c.r, c.g, c.b), black = Argb(255, 0, 0, 0);
+    Ring(x, y, 0.0f, r, black, black, 32);                  // the disc
+    Ring(x, y, r, r + 1.5f, black, Argb(0, 0, 0, 0), 32);    // its edge, smooth
+    float t = std::max(1.0f, std::floor(r * 0.16f)), arm = r * 0.78f, gap = r * 0.22f;
+    Quad(x - arm, y - t, x - gap, y + t, col);  // the cross with a gap in the middle
+    Quad(x + gap, y - t, x + arm, y + t, col);
+    Quad(x - t, y - arm, x + t, y - gap, col);
+    Quad(x - t, y + gap, x + t, y + arm, col);
+    Ring(x, y, r * 0.5f - t * 0.5f, r * 0.5f + t * 0.5f, col, col, 32);  // and a ring through it
 }
 
-// both the radar (a tail jump from CRadar::DrawRadar) and the menu map draw their blips here
-using DrawBlipsFn = void(__cdecl*)();
-DrawBlipsFn g_origDrawBlips = nullptr;
-void __cdecl HookDrawBlips() {
-    g_origDrawBlips();
+// after the game's blips, on the radar and on the menu map
+void DrawRemoteWaypoints() {
     for (auto& [id, pos] : g_remote) {
-        CVector2D radar, screen;
-        Call<0x583530>(&radar, &pos);     // CRadar::TransformRealWorldPointToRadarSpace
-        Call<0x5832F0, float>(&radar);    // CRadar::LimitRadarPoint: onto the radar's edge
-        Call<0x583480>(&screen, &radar);  // CRadar::TransformRadarPointToScreenSpace
-        if (Ref<uint8_t>(addr::MenuManager + 0x59)) Call<0x583350>(&screen.x, &screen.y);  // m_bDrawingMap: CRadar::LimitToMap
-        DrawCrosshair(screen.x, screen.y, WaypointColor(id));
+        float x, y;
+        radar::ToScreen(pos, x, y);  // onto the radar's edge when farther
+        DrawCrosshair(x, y, WaypointColor(id));
     }
+    im2d::Flush();
 }
 
 class Waypoints : public Module {
@@ -88,7 +79,7 @@ public:
     const char* Name() const override { return "Waypoints"; }
 
     void OnInstallHooks() override {
-        mem::HookFn(0x588050, &HookDrawBlips, &g_origDrawBlips, "CRadar::DrawBlips");
+        radar::AddDrawer(&DrawRemoteWaypoints);
         Net().SetHandler(proto::G_WAYPOINT, [](uint8_t from, Reader& r) {
             bool on = r.U8() != 0;
             CVector2D p{r.F32(), r.F32()};

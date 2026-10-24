@@ -166,6 +166,15 @@ enum MsgId : uint8_t {
     G_LOBBY = 150,            // reliable: u8 op, u8 value: a newcomer asks (1), the host says whether the game is on
                               // (2), a partner is ready or not (3)
     G_RADIO = 151,            // reliable: u16 vehicle, i8 station: the radio its driver plays (its passengers tune to it)
+    G_RC_RACE = 153,          // reliable: u8 op and its data: a toy car race in San Fierro (join, start, a lap time)
+    G_TANK_SHOT = 155,        // reliable: u16 vehicle, vec3 muzzle, vec3 velocity: a Rhino fired a shell (seen here,
+                              // its blast comes as an explosion of the shooter's game)
+    G_TANK_HIT = 156,         // reliable, to the owner: u16 vehicle, f32 damage, vec3 from: a shell hit its tank
+    G_TANK_BATTLE = 157,      // reliable: u8 op and its data: the host's tank battle (start, a wave, the end)
+    G_PED_ASK = 158,          // reliable, to the owner: u16 ped, u8 why (1 to recruit it): hand it over
+    G_ARENA = 159,            // reliable: u8 op and its data: the host's ground battle (/arena: start, a wave, left, the boss, the end)
+    G_KNIFE = 160,            // reliable, to the victim: u16 ped: a knifeman of the sender's game killed you from behind
+    G_CHEAT_RULE = 161,       // reliable, from the host: u8 1 when cheat codes do not work in its game
 
     G_VOICE = 200,            // unreliable: voice frame
     G_LAST = 255,

@@ -3,8 +3,9 @@
 // What a player does to one, the other games repeat: it breaks (CObject::ObjectDamage: smashed, in pieces, its damaged
 // model), its window cracks or shatters, or it is knocked loose and moves. The game of the player nearest to it sends
 // its pose until it lies still (to the players near it), and the other games' copies follow. A game that meets such an
-// object later (it was not streamed in then, or it streamed out and in again) gets it as it was left, for a few
-// minutes; after that the map puts it back as it always does.
+// object later (it was not streamed in then, or it streamed out and in again) gets it as it was left, at once and
+// without breaking it again before the player's eyes (a smashed lamp post is simply gone, a bent sign already bent),
+// for half an hour; after that the map puts it back as it always does.
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -24,7 +25,8 @@ namespace {
 using namespace game;
 
 constexpr float kRange = 150.0f;               // objects this far from our player are looked at
-constexpr uint64_t kKeepMs = 5 * 60 * 1000;    // a record still applies to objects made again this long
+constexpr uint64_t kKeepMs = 30 * 60 * 1000;   // a record still applies to objects made again this long
+constexpr uint64_t kFreshMs = 3000;             // a change this new is shown happening; an older one is just so
 constexpr uint64_t kFollowMs = 1500;           // the other game's moves stop: it lies still (or the message got lost)
 constexpr int kMaxSendsPerScan = 16;           // an explosion knocks dozens loose at once
 enum : uint8_t { F_MOVED = 1, F_MOVING = 2 };  // not where the map put it; still moving
@@ -132,10 +134,25 @@ void Break(CObject* o, uint8_t stage, uint8_t weapon) {
     if (stage >= 2 && StageOf(o) < 2) o->Flags() &= ~(1u | 0x80u);  // nothing to break into (or proof here): just gone
 }
 
+// the state of a thing broken a while ago, put on an object the map has just made again: no pieces flying, no glass
+// falling, no second fall of the lamp post
+void BreakQuietly(CObject* o, uint8_t stage) {
+    if (stage >= 2) {
+        o->Flags() &= ~(1u | 0x80u);  // bUsesCollision, bIsVisible: smashed, its pieces long gone
+    } else if (Call<0x46A760, bool>(o)) {  // CGlass::IsObjectGlass
+        Field<uint32_t>(o, 0x140) |= 0x10;  // bHasBrokenGlass: cracked
+    } else {
+        o->Flags() |= 0x200;  // m_bRenderDamaged: its damaged model
+    }
+}
+
 // a copy here in the state the record has (it was made after the change, or the change is the other game's); while
 // the other game moves it, our physics carries it on between its poses
 void CatchUp(CObject* o, Thing& t, bool driven) {
-    if (StageOf(o) < t.stage) Break(o, t.stage, t.weapon);
+    if (StageOf(o) < t.stage) {
+        if (NowMs() - t.updatedMs > kFreshMs && !driven) BreakQuietly(o, t.stage);
+        else Break(o, t.stage, t.weapon);
+    }
     if (!t.moved || StageOf(o) >= 2) return;
     if (driven) {
         if (t.appliedMs != t.updatedMs || !t.following) Place(o, t.pos, t.rot, true, t.speed, t.turn);
@@ -156,7 +173,15 @@ void Scan() {
     for (int i = 0; i < pool->size; ++i) {
         if (pool->byteMap[i] < 0) continue;
         auto* o = (CObject*)(pool->objects + (size_t)i * kObjectPoolElemSize);
-        if (!Shared(o) || (o->GetPosition() - mp).Length2D() > kRange) continue;
+        if (!Shared(o)) continue;
+        if ((o->GetPosition() - mp).Length2D() > kRange) {
+            // made again far off (the map streams objects in farther than we look): as it was left before it is near
+            if (g_things.empty() || Moving(o)) continue;
+            Thing* far = Find(o->ModelIndex(), Dummy(o)->GetPosition());
+            if (far && !far->moving && (StageOf(o) < far->stage || (far->moved && (o->GetPosition() - far->pos).Length() > 0.1f)))
+                CatchUp(o, *far, false);
+            continue;
+        }
         CEntity* d = Dummy(o);
         CVector at = o->GetPosition(), origin = d->GetPosition();
         Thing* t = Find(o->ModelIndex(), origin);

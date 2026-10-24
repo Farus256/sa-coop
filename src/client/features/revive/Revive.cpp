@@ -5,8 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
-#include <random>
-#include <set>
 
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
@@ -87,14 +85,13 @@ bool HelpNear(CPlayerPed* me) {
     return false;
 }
 
-// ---- the people of this game near a wounded player: the nearest one within 30 m (a passer-by, a paramedic, a cop, a
-// gang member: anyone but the rival gangs) runs to it and revives it, a rival gang's member comes and kicks it while it
-// lies there (each kick takes 3 seconds off its time). Only this game's own people (a copy of another game's is moved
-// by that game), no mission people, none in a car.
+// ---- the people of this game near a wounded player: only a player revives it; a rival gang's member within 30 m
+// comes and kicks it while it lies there (each kick takes 3 seconds off its time). Only this game's own people (a copy
+// of another game's is moved by that game), no mission people, none in a car.
 constexpr float kNpcReach = 30.0f;
 constexpr uint64_t kKickEveryMs = 1300, kKickCostMs = 3000;
 constexpr uint64_t kNpcWayMs = 25000;  // an NPC that has not got there by then gives up
-constexpr int PED_TYPE_GANG1 = 7, PED_TYPE_GANG2 = 8, PED_TYPE_GANG3 = 9, PED_TYPE_GANG4 = 10, PED_TYPE_MEDIC = 18;
+constexpr int PED_TYPE_GANG1 = 7, PED_TYPE_GANG3 = 9, PED_TYPE_GANG4 = 10;
 constexpr uint8_t PED_MISSION = 2;    // CPed::m_nCreatedBy
 constexpr uint32_t kNeverTarget = 1u << 28;  // CPed::bNeverEverTargetThisPed (the second flags word)
 constexpr int kBackOffField = 0x1E;   // CWanted's flags: m_bEverybodyBackOff is bit 2
@@ -103,11 +100,9 @@ struct Npc {
     int stage = 0;   // 0 on the way, 1 there
     uint64_t since = 0, taskMs = 0;
     CVector spot{};
-    int kind = 0;    // the helper: 0 a passer-by, 1 a paramedic, 2 a Families member, 3 a cop
-    bool rob = false;  // a cop who goes through the pockets instead (one in two)
     uint64_t kickMs = 0;
     CPed* Ped() const { return handle >= 0 ? GetPed(handle) : nullptr; }
-} g_medic, g_kicker;
+} g_kicker;
 bool g_npcIgnore = false;  // the others leave this wounded player alone (we set it)
 uint8_t g_backOffWas = 0;
 
@@ -115,28 +110,8 @@ bool Rival(CPed* p) {
     int t = p->PedType();
     return t == PED_TYPE_GANG1 || t == PED_TYPE_GANG3 || t == PED_TYPE_GANG4;  // Ballas, Vagos, Rifa
 }
-constexpr int PED_TYPE_COP = 6;
-// who comes to a wounded player: a paramedic, a Families member, a cop (passers-by walk on)
-bool Helps(CPed* p) {
-    int t = p->PedType();
-    return t == PED_TYPE_MEDIC || t == PED_TYPE_GANG2 || t == PED_TYPE_COP;
-}
-std::set<int> g_usedHelpers;  // the people who came this time already (a cop who robbed it does not come back)
-constexpr uint64_t kRobMs = 2500;
-int KindOf(CPed* p) {
-    int t = p->PedType();
-    return t == PED_TYPE_MEDIC ? 1 : t == PED_TYPE_GANG2 ? 2 : t == PED_TYPE_COP ? 3 : 0;
-}
-std::string HelperName(int kind) {
-    switch (kind) {
-        case 1: return TR("врач", "a paramedic");
-        case 2: return TR("парень из Grove Street", "a Grove Street homie");
-        case 3: return TR("полицейский", "a cop");
-    }
-    return TR("прохожий", "a passer-by");
-}
-
-CPed* NearestNpc(CPlayerPed* me, bool helper, CPed* except = nullptr) {
+// the nearest rival gang member of this game
+CPed* NearestRival(CPlayerPed* me) {
     CPoolHeader* pool = PedPool();
     if (!pool) return nullptr;
     CPed* best = nullptr;
@@ -144,8 +119,8 @@ CPed* NearestNpc(CPlayerPed* me, bool helper, CPed* except = nullptr) {
     for (int i = 0; i < pool->size; ++i) {
         if (pool->byteMap[i] < 0) continue;
         auto* p = (CPed*)(pool->objects + (size_t)i * kPedPoolElemSize);
-        if (p == me || p == except || p->IsPlayer() || p->Health() <= 0.0f || p->InVehicle() || p->AreaCode() != me->AreaCode() ||
-            p->CreatedBy() == PED_MISSION || (helper ? !Helps(p) : !Rival(p)) || (helper && g_usedHelpers.count(GetPedRef(p))))
+        if (p == me || p->IsPlayer() || p->Health() <= 0.0f || p->InVehicle() || p->AreaCode() != me->AreaCode() ||
+            p->CreatedBy() == PED_MISSION || !Rival(p))
             continue;
         if (NetPed* np = Peds::Instance().Find(p); np && np->owner != Net().MyId()) continue;  // another game's
         if (Peds::Instance().IsLocalOnly(p)) continue;  // a shop's staff
@@ -158,7 +133,7 @@ CPed* NearestNpc(CPlayerPed* me, bool helper, CPed* except = nullptr) {
 bool CanGoDown(CPlayerPed* me, int weapon) {
     if (weapon == WEAPON_DROWNING || me->InVehicle() || (me->PhysicalFlags() & kSubmerged) || Ref<uint8_t>(kCutsceneRunning))
         return false;
-    if (!HelpNear(me) && !NearestNpc(me, true)) return false;
+    if (!HelpNear(me)) return false;  // only a partner can revive it
     if (RevivesLeft() <= 0) {
         ui::TheChat().AddSystem(TR("Вас уже откачивали дважды за 6 минут: в этот раз не повезло.",
                                    "You were revived twice in 6 minutes already: no luck this time."));
@@ -197,7 +172,6 @@ void LeaveAlone(CPlayerPed* me, bool on);
 void GoDown(CPlayerPed* me) {
     g_wantDown = false;
     if (g_down) return;
-    g_usedHelpers.clear();
     if (me->AttachedTo()) DetachPed(me);
     g_down = true;
     g_downEnd = NowMs() + kDownMs;
@@ -240,7 +214,6 @@ void EndDown(CPlayerPed* me) {
     g_down = false;
     g_wantDown = false;
     g_rescuer = -1;
-    ReleaseNpc(g_medic);
     ReleaseNpc(g_kicker);
     LeaveAlone(me, false);
     if (me) me->PhysicalFlags() = (me->PhysicalFlags() & ~kProofBits) | g_savedProofs;
@@ -369,13 +342,6 @@ void UpdateRescuer(CPlayerPed* me) {
     }
 }
 
-// the animation is there (a name the IFP has not would leave the task without one)
-bool HasAnim(const char* anim, const char* block) {
-    if (!EnsureBlock(block)) return false;
-    void* b = Call<0x4D3940, void*>(block);       // CAnimManager::GetAnimationBlock
-    return b && Call<0x4D42F0, void*>(anim, b);  // CAnimManager::GetAnimation(name, block)
-}
-
 void Face(int handle, CPed* p, const CVector& at) {
     CVector d = at - p->GetPosition();
     Cmd(0x0173).I(handle).F(std::atan2(-d.x, d.y) * 57.29578f).Run();  // SET_CHAR_HEADING
@@ -395,10 +361,6 @@ void Pick(Npc& n, CPed* p, CPlayerPed* me, float dist) {
     n = Npc{};
     n.handle = GetPedRef(p);
     n.since = NowMs();
-    n.kind = KindOf(p);
-    static std::mt19937 rng((uint32_t)NowMs());
-    n.rob = n.kind == 3 && (rng() & 1);
-    g_usedHelpers.insert(n.handle);
     CVector d = p->GetPosition() - me->GetPosition();
     float len = std::max(0.1f, std::sqrt(d.x * d.x + d.y * d.y));
     n.spot = me->GetPosition() + CVector{d.x / len * dist, d.y / len * dist, 0.0f};
@@ -407,49 +369,6 @@ void Pick(Npc& n, CPed* p, CPlayerPed* me, float dist) {
 
 void UpdateNpcs(CPlayerPed* me) {
     uint64_t now = NowMs();
-    // the one who revives: none while a player does it
-    CPed* m = g_medic.Ped();
-    if (g_medic.handle >= 0 && (!m || m->Health() <= 0.0f || m->InVehicle() || (g_medic.stage == 0 && now - g_medic.since > kNpcWayMs))) {
-        LOGI("Wounded: the NPC coming to help gave up");
-        ReleaseNpc(g_medic);
-        m = nullptr;
-    }
-    if (!m && g_rescuer < 0 && now - g_downEnd + kDownMs > 1500) {  // a moment after the fall
-        if (CPed* p = NearestNpc(me, true, g_kicker.Ped())) {
-            Pick(g_medic, p, me, 0.9f);
-            LOGI("Wounded: an NPC (kind %d, ped type %d) comes to help", g_medic.kind, p->PedType());
-            m = p;
-        }
-    }
-    if (m) {
-        if (g_medic.stage == 0 && Approach(g_medic, m, me, 7)) {  // sprinting
-            g_medic.stage = 1;
-            g_medic.taskMs = now;
-            Face(g_medic.handle, m, me->GetPosition());
-            if (g_medic.rob && HasAnim("BOM_Plant_Loop", "BOMBER")) {  // down on one knee by the body: the pockets (an activity the others see)
-                Cmd(0x0605).I(g_medic.handle).S("BOM_Plant_Loop").S("BOMBER").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
-            } else if (EnsureBlock("MEDIC")) {
-                Cmd(0x0605).I(g_medic.handle).S("CPR").S("MEDIC").F(4.0f).I(1).I(0).I(0).I(0).I(-1).Run();
-            }
-        } else if (g_medic.stage == 1 && g_medic.rob) {
-            if (now - g_medic.taskMs >= kRobMs) {
-                CPlayerInfo& info = PlayerInfos()[0];
-                int taken = std::max(0, info.money) * 3 / 10;
-                info.money -= taken;
-                info.displayMoney = info.money;
-                ui::TheChat().AddSystem(Format(TR("Полицейский обчистил ваши карманы: -$%d.", "A cop went through your pockets: -$%d."), taken));
-                LOGI("Wounded: a cop took $%d", taken);
-                ReleaseNpc(g_medic);
-                return;
-            }
-        } else if (g_medic.stage == 1) {
-            g_downEnd = std::max(g_downEnd, now + 1500);  // not while it is being revived
-            if (now - g_medic.taskMs >= kCprMs) {
-                Revive(me, HelperName(g_medic.kind));  // releases it
-                return;
-            }
-        }
-    }
     // the one who kicks it
     CPed* q = g_kicker.Ped();
     if (g_kicker.handle >= 0 && (!q || q->Health() <= 0.0f || q->InVehicle() || (g_kicker.stage == 0 && now - g_kicker.since > kNpcWayMs))) {
@@ -457,7 +376,7 @@ void UpdateNpcs(CPlayerPed* me) {
         q = nullptr;
     }
     if (!q && now - g_downEnd + kDownMs > 2500) {
-        if (CPed* p = NearestNpc(me, false)) {
+        if (CPed* p = NearestRival(me)) {
             Pick(g_kicker, p, me, 0.8f);
             LOGI("Wounded: a rival gang member comes to finish it off");
             q = p;
@@ -499,10 +418,15 @@ void UpdateDowned(CPlayerPed* me) {
         LOGI("Wounded: the game ended it (player state %d)", PlayerInfos()[0].playerState);
         return;
     }
-    if (me->Health() <= 0.0f) {  // a script killed it (or it died some other way): the death goes on
-        EndDown(me);
-        LOGI("Wounded: died anyway");
-        return;
+    // Something put it to death all the same while it lay there (a hit the hook did not see, a fall, the game's own
+    // death task): the host's mission took that for the player's death and failed at once. It stays wounded: back to
+    // 1 health and on the ground, the death task gone before the game has it wasted (PEDSTATE_DEAD ends it).
+    int pedState = me->PedState();
+    if (me->Health() <= 0.0f || pedState == PEDSTATE_DIE) {
+        me->Health() = 1.0f;
+        Cmd(0x0792).I(GetPedRef(me)).Run();  // CLEAR_CHAR_TASKS_IMMEDIATELY
+        LieDown(me);
+        LOGW("Wounded: a death came while lying (ped state %d): still wounded", pedState);
     }
     Pad()->DisablePlayerControls |= kOwnControls;  // a script, the pause menu may have put the controls back
     me->PhysicalFlags() |= kProofBits;
@@ -537,6 +461,27 @@ void UpdateDowned(CPlayerPed* me) {
     Players::Instance().SetLocalDowned(true, (uint8_t)std::min<uint64_t>(255, (g_downEnd - now + 999) / 1000));
 }
 
+// CRunningScript::DoDeathArrestCheck: a mission ends when its player is wasted or busted. A wounded player is neither
+// (only bleeding out or giving up makes it so): the check waits while it lies there.
+using DeathArrestFn = void(__fastcall*)(void*, void*);
+DeathArrestFn g_origDeathArrest = nullptr;
+void __fastcall HookDeathArrestCheck(void* script, void* edx) {
+    if ((g_down || g_wantDown) && !g_dyingMs && PlayerInfos()[0].playerState == 0) return;
+    g_origDeathArrest(script, edx);
+}
+
+// CCamera::Process: lying there, the player still turns the camera with the mouse. Our bit of the disabled controls
+// is off while the camera works (the pad's look and the mouse answer nothing with any bit on), back on after it.
+using CameraProcessFn = void(__fastcall*)(void*, void*);
+CameraProcessFn g_origCameraProcess = nullptr;
+void __fastcall HookCameraProcess(void* camera, void* edx) {
+    CPad* pad = g_down ? Pad() : nullptr;
+    bool lift = pad && (pad->DisablePlayerControls & kOwnControls);
+    if (lift) pad->DisablePlayerControls &= (uint16_t)~kOwnControls;
+    g_origCameraProcess(camera, edx);
+    if (lift) pad->DisablePlayerControls |= kOwnControls;
+}
+
 void HandleRevive(uint8_t from, Reader& r) {
     uint8_t op = r.U8();
     if (!r.Ok() || !g_down) return;
@@ -562,6 +507,8 @@ public:
     const char* Name() const override { return "Revive"; }
     void OnInstallHooks() override {
         mem::HookFn(0x4B3210, &HookWillKill, &g_origWillKill, "CPedDamageResponseCalculator::ComputeWillKillPed");
+        mem::HookFn(0x52B730, &HookCameraProcess, &g_origCameraProcess, "CCamera::Process");
+        mem::HookFn(0x485A50, &HookDeathArrestCheck, &g_origDeathArrest, "CRunningScript::DoDeathArrestCheck");
         Net().SetHandler(proto::G_REVIVE, &HandleRevive);
     }
     void OnSessionEnd() override { ResetAll(); }
@@ -598,11 +545,6 @@ std::string ReviveText(std::string& hint) {
         int secs = (int)((std::max(g_downEnd, now) - now + 999) / 1000);
         if (g_rescuer >= 0) {
             hint = Format(TR("%s откачивает вас", "%s is reviving you"), Name(g_rescuer).c_str());
-        } else if (g_medic.handle >= 0) {
-            std::string who = HelperName(g_medic.kind);
-            hint = g_medic.stage != 1 ? Format(TR("К вам бежит %s", "%s runs to you"), who.c_str())
-                   : g_medic.rob      ? std::string(TR("Полицейский шарит по вашим карманам!", "A cop is going through your pockets!"))
-                                      : Format(TR("Вас откачивает %s", "%s is reviving you"), who.c_str());
         } else if (g_kicker.handle >= 0 && g_kicker.stage == 1) {
             hint = TR("Вас добивают ногами!", "You are being kicked to death!");
         } else {

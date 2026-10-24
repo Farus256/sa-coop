@@ -272,6 +272,7 @@ void SaveConnectSettings() {
     ini.SetInt("connect", "port", cfg.port);
     ini.Set("connect", "password", cfg.password);
     ini.SetInt("connect", "friendly_fire", cfg.friendlyFire);
+    ini.SetInt("connect", "no_cheats", cfg.noCheats);
     ini.SetInt("connect", "max_players", cfg.maxPlayers);
     ini.Save(cfg.iniPath);
 }

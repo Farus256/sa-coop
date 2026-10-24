@@ -60,6 +60,7 @@ struct NetPed {
     bool hasState = false;
     PedSyncState state;
     uint64_t recvMs = 0;
+    uint64_t createdMs = 0;  // when its owner announced it (a new passer-by waits out of this player's sight)
     uint64_t lastTaskMs = 0;
     game::CVector lastTaskTarget;
     uint8_t lastTaskMove = 0;
@@ -118,6 +119,20 @@ public:
     // such a ped, or one a script of this game made outside a mission (a shop's, a restaurant's, a barber's staff:
     // those scripts run in every game)
     bool IsLocalOnly(game::CPed* ped);
+    // A ped a feature of the mod made with a script command (CREATE_CHAR: an arena's enemies, a tank battle's
+    // soldiers) for every player to see: announced although no mission made it (IsLocalOnly took such a ped for an
+    // ambient script's, which every game runs itself, and the others never saw it).
+    void Share(game::CPed* ped);
+    // The recruit key (G) by a Grove Street member another player's game made (here its copy, a civilian the game
+    // will not recruit): that game is asked to hand it over, and once it is this game's own it joins this player's
+    // gang. True when such a ped was there to ask for.
+    bool AskToRecruit();
+    // This game's player went into an interior (or out of one): the game drops its random people now
+    // (CPopulation::RemoveAllRandomPeds), and its cars are left behind. Those near another player in the place left go
+    // to that player's game instead, with whoever sits in them, so they do not vanish in front of it.
+    void HandOverLeftBehind();
+    // /sync: how many people this game shares (its own) and shows for the others (their copies made here)
+    void Count(int& own, int& copies) const;
 
 private:
     void ScanOwned();
@@ -130,6 +145,8 @@ private:
     void HandleRemove(uint8_t from, Reader& r);
     void HandleSync(uint8_t from, Reader& r);
     void HandleOwner(uint8_t from, Reader& r);
+    void HandleAsk(uint8_t from, Reader& r);
+    void Recruit(NetPed& np);
     void ApplyMirror(NetPed& np);
     game::CPed* SpawnMirror(NetPed& np);
     void Forget(uint16_t netId, bool deletePed);
@@ -143,6 +160,8 @@ private:
     std::map<int, std::string> m_specialNames;
     std::map<game::CPed*, uint8_t> m_giveAway;  // to hand over after the population code (ped -> player)
     std::set<int> m_localOnly;                  // handles of KeepLocal's peds
+    std::set<int> m_shared;                     // handles of Share's peds
+    std::map<uint16_t, uint64_t> m_recruitAsks; // peds asked for to recruit, and when
     uint64_t m_lastScan = 0, m_lastStatsMs = 0;
     bool m_wasReady = false;
     int m_mirrorShots = 0;  // diagnostics: shots fired by mirrors since the last stats line

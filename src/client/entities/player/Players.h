@@ -35,6 +35,8 @@ struct RemotePlayer {
     int8_t seat = -1;           // -1 driver, 0.. passenger seats
     uint64_t enterTaskMs = 0;   // when we started the enter-car animation for this player
     uint64_t exitTaskMs = 0;
+    game::CVector enterPos{};    // where its copy was getting into a car, and since when it has not moved from there
+    uint64_t enterStillMs = 0;
     bool deadShown = false;     // the owner reported death and the local ped plays it
     uint64_t jetpackMs = 0;     // when it was last given the jetpack
     std::vector<uint8_t> stats; // owner's CStats block (G_PLAYER_STATS): used while the ped is processed
@@ -116,6 +118,9 @@ private:
     std::map<uint8_t, RemotePlayer> m_remote;
     uint64_t m_lastSend = 0, m_lastFarSend = 0;
     PadState m_lastSentPad;
+    // a tap of jump or crouch stays down for a few states (a lost state lost the jump in the other games)
+    uint16_t m_realButtons = 0;
+    uint64_t m_stickyUntil[16] = {};
     game::CVehicle* m_enterReported = nullptr;
     bool m_exitReported = false;
     uint64_t m_followAt = 0;

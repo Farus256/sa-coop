@@ -3,11 +3,13 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <map>
 
 #include "common/config/version/Version.h"
 #include "common/lib/util/Util.h"
 #include "entities/session/Flow.h"
 #include "features/progress/SkinChoice.h"
+#include "features/progress/SkinPictures.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
@@ -58,33 +60,129 @@ void RefreshSlots() {
     g_slotsTime = NowMs();
 }
 
-// A character's card in the lobby: a figure in its colours (the head, a cap, the shirt with the arms, the trousers,
-// the shoes) and its name; the chosen one framed in the menu's blue
-void CharacterCard(const char* id, float x, float y, float cw, float ch, const skin::Choice& c, bool chosen, int index) {
+uint32_t Shade(uint32_t argb, float k) {  // darker (k < 1) or lighter (k > 1)
+    auto ch = [&](int sh) { return (uint32_t)std::clamp((float)((argb >> sh) & 0xFF) * k, 0.0f, 255.0f) << sh; };
+    return (argb & 0xFF000000) | ch(16) | ch(8) | ch(0);
+}
+
+// The character, standing: drawn in its colours from simple shapes (a shadow on the floor, the shoes, the legs in the
+// trousers, the top with its sleeves, the arms, the neck and the head with the hair, a cap or a bandana), feet at
+// footY, h tall. It breathes and its arms swing a little.
+void DrawFigure(float cx, float footY, float h, const skin::Choice& c) {
+    auto& g = Gfx();
+    float t = (float)(NowMs() % 4000) / 4000.0f * 6.2831853f;
+    float breath = std::sin(t) * h * 0.004f, sway = std::sin(t) * h * 0.006f;
+    const uint32_t skinTone = 0xFF5C3A26, skinDark = Shade(skinTone, 0.78f);
+    auto Y = [&](float k) { return footY - h * k; };
+    g.Ellipse(cx, footY + h * 0.005f, h * 0.17f, h * 0.025f, 0x66000000);                   // the shadow
+    float hipW = h * 0.055f, legW = h * 0.082f;
+    for (int side = -1; side <= 1; side += 2) {
+        float hx = cx + side * hipW, ax = cx + side * h * 0.07f;
+        g.Line(hx, Y(0.50f), ax, Y(0.05f), legW, side < 0 ? Shade(c.pants, 0.85f) : c.pants);  // a leg
+        g.Ellipse(ax + side * h * 0.012f, Y(0.025f), h * 0.055f, h * 0.026f, c.shoes);        // its shoe
+    }
+    g.Rect(cx - h * 0.105f, Y(0.535f), h * 0.21f, h * 0.04f, Shade(c.pants, 0.7f));  // the belt line
+    // the top: shoulders to the waist
+    float sh = Y(0.80f) + breath, waist = Y(0.515f);
+    uint32_t top = c.shirt, topDark = Shade(c.shirt, 0.82f);
+    g.Poly4(cx - h * 0.135f, sh, cx + h * 0.135f, sh, cx + h * 0.105f, waist, cx - h * 0.105f, waist, top);
+    g.Poly4(cx + h * 0.02f, sh, cx + h * 0.135f, sh, cx + h * 0.105f, waist, cx + h * 0.02f, waist, topDark);  // its shaded side
+    if (c.top == skin::TOP_TANK) {  // the vest's straps leave the shoulders and the chest bare
+        g.Tri(cx - h * 0.05f, sh - 1, cx + h * 0.05f, sh - 1, cx, sh + h * 0.07f, skinTone);
+        g.Poly4(cx - h * 0.135f, sh, cx - h * 0.085f, sh, cx - h * 0.095f, sh + h * 0.05f, cx - h * 0.13f, sh + h * 0.05f, skinTone);
+        g.Poly4(cx + h * 0.085f, sh, cx + h * 0.135f, sh, cx + h * 0.13f, sh + h * 0.05f, cx + h * 0.095f, sh + h * 0.05f, skinDark);
+    } else {
+        g.Tri(cx - h * 0.035f, sh - 1, cx + h * 0.035f, sh - 1, cx, sh + h * 0.035f, skinTone);  // the collar
+    }
+    // the arms: shoulder, elbow, hand; the sleeves over them as far as they go
+    float armW = h * 0.062f;
+    for (int side = -1; side <= 1; side += 2) {
+        float s0x = cx + side * h * 0.135f, s0y = sh + h * 0.025f;
+        float ex = cx + side * h * 0.165f + side * sway * 0.5f, ey = Y(0.635f) + breath;
+        float hx = cx + side * h * 0.16f + side * sway, hy = Y(0.48f);
+        uint32_t skinC = side < 0 ? skinTone : skinDark;
+        uint32_t upper = c.top == skin::TOP_TANK ? skinC : (side < 0 ? top : topDark);
+        uint32_t lower = c.top == skin::TOP_LONG ? upper : skinC;
+        g.Line(ex, ey, hx, hy, armW * 0.9f, lower);
+        g.Line(s0x, s0y, ex, ey, armW, upper);
+        if (c.top == skin::TOP_TEE) g.Line(s0x, s0y, (s0x + ex) * 0.5f, (s0y + ey) * 0.5f, armW * 1.18f, upper);  // the sleeve
+        g.Ellipse(hx, hy + h * 0.012f, armW * 0.55f, armW * 0.62f, skinC);  // the hand
+    }
+    // the neck and the head
+    float hy = Y(0.878f) + breath, hr = h * 0.07f;
+    g.Rect(cx - h * 0.026f, hy + hr * 0.6f, h * 0.052f, sh - (hy + hr * 0.6f) + 2, skinDark);
+    g.Ellipse(cx, hy, hr * 0.92f, hr * 1.08f, skinTone);
+    g.Ellipse(cx + hr * 0.35f, hy + hr * 0.05f, hr * 0.5f, hr * 0.95f, skinDark, 20);  // the shaded cheek
+    g.Ellipse(cx - hr * 0.88f, hy + hr * 0.1f, hr * 0.16f, hr * 0.24f, skinTone, 12);   // the ears
+    g.Ellipse(cx + hr * 0.88f, hy + hr * 0.1f, hr * 0.16f, hr * 0.24f, skinDark, 12);
+    if (c.head == skin::HEAD_CAP) {
+        g.Ellipse(cx, hy - hr * 0.45f, hr * 0.98f, hr * 0.62f, c.hat);
+        g.Rect(cx - hr * 0.98f, hy - hr * 0.45f, hr * 1.96f, hr * 0.28f, c.hat);
+        g.Ellipse(cx, hy - hr * 0.2f, hr * 1.12f, hr * 0.2f, Shade(c.hat, 0.72f));  // the peak, to the front
+    } else if (c.head == skin::HEAD_BANDANA) {
+        g.Ellipse(cx, hy - hr * 0.5f, hr * 0.96f, hr * 0.6f, c.hat);
+        g.Rect(cx - hr * 0.95f, hy - hr * 0.5f, hr * 1.9f, hr * 0.3f, c.hat);
+        g.Tri(cx + hr * 0.8f, hy - hr * 0.35f, cx + hr * 1.45f, hy - hr * 0.05f, cx + hr * 1.2f, hy + hr * 0.45f, Shade(c.hat, 0.8f));  // the knot
+    } else {
+        g.Ellipse(cx, hy - hr * 0.62f, hr * 0.9f, hr * 0.48f, c.hat);  // short hair
+    }
+    float ey = hy - hr * 0.05f;  // the eyes and the brows
+    g.Rect(cx - hr * 0.48f, ey, hr * 0.26f, hr * 0.12f, 0xFF140C08);
+    g.Rect(cx + hr * 0.18f, ey, hr * 0.26f, hr * 0.12f, 0xFF140C08);
+    g.Rect(cx - hr * 0.22f, hy + hr * 0.5f, hr * 0.44f, hr * 0.08f, 0xFF2A1810);  // the mouth
+}
+
+// Beside the lobby: the window with the character this player will play, its name, and the arrows under it
+void CharacterWindow(float x, float y, float W, float H) {
     auto& g = Gfx();
     float s = g.Scale();
-    if (w::Button(id, x, y, cw, ch, "", true, false)) skin::SetChoice(index);
-    g.Rect(x, y, cw, ch, chosen ? 0xFF16202B : 0xFF0B0F14);
-    g.RectOutline(x, y, cw, ch, chosen ? kSaBlue : kSaLine, std::max(1.0f, chosen ? 2 * s : s));
-    float mx = x + cw * 0.5f, unit = std::min(cw / 5.0f, (ch - g.LineHeight(FONT_SMALL) * 2.4f) / 9.0f);
-    float top = y + 10 * s;
-    const uint32_t skinTone = 0xFF5A3A28, shoes = 0xFF1A1A1A;
-    g.Rect(mx - unit * 0.6f, top, unit * 1.2f, unit * 1.3f, skinTone);                        // head
-    if (c.hat) g.Rect(mx - unit * 0.7f, top - unit * 0.1f, unit * 1.4f, unit * 0.45f, c.hat);  // cap / bandana
-    float body = top + unit * 1.45f;
-    g.Rect(mx - unit * 1.0f, body, unit * 2.0f, unit * 3.0f, c.shirt);                        // torso
-    g.Rect(mx - unit * 1.55f, body + unit * 0.1f, unit * 0.45f, unit * 2.6f, c.model ? c.shirt : skinTone);  // arms
-    g.Rect(mx + unit * 1.1f, body + unit * 0.1f, unit * 0.45f, unit * 2.6f, c.model ? c.shirt : skinTone);
-    float legs = body + unit * 3.0f;
-    g.Rect(mx - unit * 0.95f, legs, unit * 0.85f, unit * 3.2f, c.pants);                      // trousers
-    g.Rect(mx + unit * 0.1f, legs, unit * 0.85f, unit * 3.2f, c.pants);
-    g.Rect(mx - unit * 1.05f, legs + unit * 3.2f, unit * 0.95f, unit * 0.4f, shoes);
-    g.Rect(mx + unit * 0.1f, legs + unit * 3.2f, unit * 0.95f, unit * 0.4f, shoes);
-    float ty = y + ch - g.LineHeight(FONT_SMALL) * 2.2f;
-    for (const std::wstring& line : g.Wrap(FONT_SMALL, Widen(TR(c.name.ru, c.name.en)), cw - 8 * s)) {
-        g.TextW(FONT_SMALL, mx, ty, line, chosen ? 0xFFFFFFFF : kText, TEXT_CENTER | TEXT_SHADOW);
-        ty += g.LineHeight(FONT_SMALL);
+    int count = 0;
+    const skin::Choice* list = skin::Choices(count);
+    int index = std::clamp(skin::ChosenIndex(), 0, count - 1);
+    const skin::Choice& c = list[index];
+    g.Rect(x, y, W, H, 0xF0000000);
+    g.RectOutline(x, y, W, H, w::kSaLine, std::max(1.0f, s));
+    float cx = x + 24 * s, cw = W - 48 * s, cy = y + 26 * s;
+    g.Text(FONT_BIG, cx, cy, TR("Персонаж", "Character"), w::kSaBlue, TEXT_SHADOW);
+    cy += g.LineHeight(FONT_BIG) + 4 * s;
+    g.Text(FONT_SMALL, cx, cy, TR("Выберите стрелками внизу", "Pick with the arrows below"), w::kSaMuted, TEXT_SHADOW);
+    cy += g.LineHeight(FONT_SMALL) + 12 * s;
+    float selH = g.LineHeight(FONT_MENU) + 12 * s;
+    float nameH = g.LineHeight(FONT_NORMAL) * 2 + 8 * s;
+    float stageH = y + H - 22 * s - selH - nameH - 10 * s - cy;
+    // the stage: dark, lighter towards the floor, a glow of the character's colour under its feet
+    g.Rect(cx, cy, cw, stageH, 0xFF07090C);
+    for (int i = 0; i < 12; ++i) {
+        float k = i / 12.0f;
+        g.Rect(cx, cy + stageH * k, cw, stageH / 12.0f + 1, WithAlpha(0xFF1A2230, k * 0.8f));
     }
+    g.RectOutline(cx, cy, cw, stageH, w::kSaLine, std::max(1.0f, s));
+    float foot = cy + stageH * 0.93f;
+    g.Ellipse(cx + cw * 0.5f, foot, cw * 0.36f, stageH * 0.05f, WithAlpha(c.shirt, 0.18f));
+    // the game's own look of the character (a picture of its model); CJ, who has none, drawn
+    int pw = 0, ph = 0;
+    const uint32_t* px = c.model ? skin::Picture(c.model, pw, ph) : nullptr;
+    if (px && pw > 0 && ph > 0) {
+        static std::map<uint16_t, int> images;  // model -> the renderer's picture
+        auto it = images.find(c.model);
+        if (it == images.end()) it = images.emplace(c.model, g.AddImage(px, pw, ph)).first;
+        float h = stageH * 0.86f, w = h * (float)pw / (float)ph;
+        if (w > cw * 0.92f) h *= cw * 0.92f / w, w = cw * 0.92f;
+        g.Image(it->second, cx + cw * 0.5f - w * 0.5f, foot - h + stageH * 0.01f, w, h);
+    } else {
+        DrawFigure(cx + cw * 0.5f, foot, stageH * 0.84f, c);
+    }
+    cy += stageH + 10 * s;
+    float ty = cy;
+    for (const std::wstring& line : g.Wrap(FONT_NORMAL, Widen(TR(c.name.ru, c.name.en)), cw)) {
+        g.TextW(FONT_NORMAL, cx + cw * 0.5f, ty, line, 0xFFFFFFFF, TEXT_CENTER | TEXT_SHADOW);
+        ty += g.LineHeight(FONT_NORMAL);
+    }
+    if (c.model)
+        g.Text(FONT_SMALL, cx + cw * 0.5f, ty, TR("Без магазинов одежды", "No clothes shops"), w::kSaMuted, TEXT_CENTER | TEXT_SHADOW);
+    cy += nameH;
+    int step = w::Selector("skinsel", cx, cy, cw, selH, Format("%d / %d", index + 1, count));
+    if (step) skin::SetChoice((index + step + count) % count);
 }
 
 void LoadFields() {
@@ -167,6 +265,14 @@ void RenderConnectMenu() {
     float rowH = lh + 14 * s;
     float W = 820 * s, H = 690 * s;
     float x = (g.Width() - W) * 0.5f, y = (g.Height() - H) * 0.5f;
+    // everyone in the lobby (the host too, for now: to try the characters): the character window right of the lobby
+    // (the lobby stays in the middle while both fit)
+    bool picker = online && flow::InLobby();
+    float pickW = 380 * s, pickGap = 24 * s, pickH = H;
+    if (picker) {
+        float need = W + pickGap + pickW, margin = 16 * s;
+        if (x + need > g.Width() - margin) x = std::max(margin, (g.Width() - need) * 0.5f);
+    }
     float cx = x + 52 * s, cw = W - 104 * s;
     float room = mh * 1.6f;  // space for the pointer left of a menu item
 
@@ -302,20 +408,6 @@ void RenderConnectMenu() {
                             ready, (int)net.Peers().size()),
                      kSaMuted, FONT_SMALL, true);
             } else {
-                // new to this world, or the host starts a new one: the character to play, on cards
-                if (skin::Newcomer() || flow::LobbyHostNewGame()) {
-                    caption(cx, TR("Ваш персонаж", "Your character"));
-                    cy += ch + 6 * s;
-                    int count = 0;
-                    const skin::Choice* list = skin::Choices(count);
-                    float gap = 10 * s, cardW = (cw - gap * (count - 1)) / count, cardH = std::min(170 * s, cardW * 1.25f);
-                    for (int i = 0; i < count; ++i) {
-                        char id[16];
-                        snprintf(id, sizeof id, "skin%d", i);
-                        CharacterCard(id, cx + i * (cardW + gap), cy, cardW, cardH, list[i], skin::ChosenIndex() == i, i);
-                    }
-                    cy += cardH + 10 * s;
-                }
                 bool me = flow::LobbyMyReady();
                 if (w::Button("ready", cx, cy, cw, bh + 10 * s, me ? TR("Не готов", "Not ready") : TR("Готов", "Ready"), true, !me, true))
                     flow::LobbySetReady(!me);
@@ -399,9 +491,10 @@ void RenderConnectMenu() {
         cy += rowH + 22 * s;
         if (g_tab == 1) {  // the host decides for the whole game; saved with the other settings when the server starts
             w::Checkbox("ff", cx, cy, TR("Урон по напарнику", "Friendly fire"), Cfg().friendlyFire);
+            w::Checkbox("nocheat", cx + 270 * s, cy, TR("Без читов", "No cheats"), Cfg().noCheats);  // for all, the host too
             // the places on the server, the host's own among them
             int& places = Cfg().maxPlayers;
-            float sw = 300 * s;
+            float sw = 250 * s;
             int d = w::Selector("places", cx + cw - sw, cy - (rowH - lh * 0.8f) * 0.5f, sw, rowH,
                                 Format(TR("Игроков: до %d", "Players: up to %d"), places));
             if (d) places = (places - 2 + d + 15) % 15 + 2;  // 2..16 round
@@ -446,6 +539,7 @@ void RenderConnectMenu() {
               "{ACCBF1}F9{8D9CAD}  window     {ACCBF1}T{8D9CAD}  chat     {ACCBF1}B{8D9CAD}  voice     "
               "{ACCBF1}G{8D9CAD}  passenger     {ACCBF1}F2{8D9CAD}  players"),
            kSaMuted, TEXT_SHADOW);
+    if (picker) CharacterWindow(x + W + pickGap, y, pickW, pickH);
     w::EndFrame();
     w::DrawCursor();
     // Esc closes even when a text box is focused (handled in OnKeyDown)

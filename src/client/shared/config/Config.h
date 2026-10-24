@@ -17,6 +17,7 @@ struct ClientConfig {
     bool wantsHost = false;   // started from "Create server" in the launcher
     int loadSlot = 0;         // host: save slot (1..8) to load automatically, -1 a new game, 0 = choose in the menu
     bool friendlyFire = false;  // host: the players can hurt each other
+    bool noCheats = false;      // host: no cheat codes in its game (for everyone, itself too)
     int maxPlayers = 4;         // host: places on its server, itself included (2..16)
 
     // [game]
@@ -29,9 +30,9 @@ struct ClientConfig {
     bool windowedStrict = false;      // test setups: quit at once if windowed mode could not be applied
     int windowX = -1, windowY = -1;   // -1 = centre
     int width = 0, height = 0;        // 0 = use the game's video mode
-    float drawDistance = 2.0f;        // the far clip and fog of the time cycle times this (1 = the game's own)
-    float lodDistance = 1.0f;         // the menu's draw distance (models' detail range) times this
-    int streamingMemoryMb = 256;      // CStreaming::ms_memoryAvailable at least this (the game's 50 MB fill fast)
+    float drawDistance = 4.0f;        // the far clip and fog of the time cycle times this (1 = the game's own, 4 the most)
+    float lodDistance = 3.0f;         // the menu's draw distance (models' detail range) times this (3 the most)
+    int streamingMemoryMb = 512;      // CStreaming::ms_memoryAvailable at least this (the game's 50 MB fill fast)
     bool multiInstance = false;       // allow several game copies (testing)
     bool runInBackground = true;      // keep simulating when the window is not focused
     bool noPauseMenu = true;          // the world keeps running while the pause menu is open
@@ -52,6 +53,7 @@ struct ClientConfig {
     int chatKey = 0x54;               // T
     int passengerKey = 0x47;          // G
     int playerListKey = 0x71;         // F2
+    int firstPersonKey = 0x76;        // F7: the first-person view on and off
     int reviveKey = 0x45;             // E: revive a wounded partner (held while wounded: give up)
 
     // [debug]

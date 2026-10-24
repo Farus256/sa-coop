@@ -15,6 +15,7 @@
 #include "entities/player/Players.h"
 #include "entities/vehicle/Vehicles.h"
 #include "shared/api/net-session/Session.h"
+#include "shared/game/Challenge.h"
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
@@ -312,6 +313,12 @@ bool __cdecl HookAddProjectile(CEntity* creator, int weapon, CVector pos, float 
     if (shared && OtherSide(creator)) return false;
     uint32_t before = ActiveProjectiles();
     bool ok = g_origAddProjectile(creator, weapon, pos, force, dir, target);
+    CVector throwFrom, throwSpeed;
+    if (ok && game::challenge::NextThrow(throwFrom, throwSpeed))  // a battle's grenade thrown by hand: its arc
+        if (CPhysical* made = NewProjectile(before)) {
+            made->SetPositionRaw(throwFrom);
+            made->MoveSpeed() = throwSpeed;
+        }
     CPhysical* obj = ok && shared && Thrown(weapon) ? NewProjectile(before) : nullptr;
     if (!obj) return ok;
     uint8_t kind = ON_SPOT, targetKind = ON_SPOT;

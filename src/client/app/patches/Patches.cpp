@@ -73,6 +73,15 @@ int __cdecl HookIdleEvent(int event, void* param) {
 }
 
 using VoidFn = void(__cdecl*)();
+// CAudioEngine::PauseAllSounds, on losing the focus (WM_ACTIVATE): it stops every channel by its frequency (0), and
+// ResumeAllSounds puts back only the volumes. The game itself starts the music's stream again from its stream thread when
+// it is in the foreground again, and every sound sets its frequency anew each frame. Running in the background (the world
+// goes on) the stream thread never sees the game away: the music stayed silent after a minimise until the next track,
+// and a looped sound that keeps its frequency (the rain, the wind) stuck stopped or stuttered. The game goes on, so its
+// sound does too.
+VoidFn g_origPauseAllSounds = nullptr;
+void __cdecl HookPauseAllSounds() {}
+
 VoidFn g_origStartUserPause = nullptr;
 void __cdecl HookStartUserPause() {
     // In a co-op session the world is shared: the pause menu must not freeze it.
@@ -663,6 +672,7 @@ void Apply() {
         mem::RedirectCall(0x4D9875, (void*)&AudioIsForegroundApp, nullptr);  // CAEAudioHardware::Service
         mem::RedirectCall(0x4F15E1, (void*)&AudioIsForegroundApp, nullptr);  // CAEStreamThread::MainLoop
         mem::RedirectCallFn(0x748D9B, &HookIdleEvent, &g_origIdleEvent);    // WinMain -> RsEventHandler(rsIDLE)
+        mem::HookFn(0x507430, &HookPauseAllSounds, &g_origPauseAllSounds, "CAudioEngine::PauseAllSounds");
     }
     mem::HookFn(0x57C520, &HookCentreMousePointer, &g_origCentreMouse, "CMenuManager::CentreMousePointer");
     mem::RedirectCallFn(0x53E9F1, &HookIdleMouseSetPos, &g_origIdleMouseSetPos);  // Idle -> RsMouseSetPos

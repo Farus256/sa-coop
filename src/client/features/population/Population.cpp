@@ -6,7 +6,11 @@
 //    (CPopulation::ManagePed / CCarCtrl::PossiblyRemoveVehicle measure distance to the nearest player);
 //  * farther from this game's player, an ordinary ped or car the other player is nearer to goes to the other game
 //    instead of being dropped here (it vanished in front of the other player);
-//  * no random Ballas on Grove Street (Ganton).
+//  * no random Ballas on Grove Street (Ganton);
+//  * a player going into an interior leaves its people and cars near the others to their games (they do not vanish);
+//  * the game's new passers-by come a little farther off: in sight 46-53 m away instead of 42.5-50.5, and out of
+//    sight 37-46 m away instead of 15-25 (CPopulation::AddToPopulation): they no longer appear right behind a player
+//    who looks away and back. Out of sight they are kept to 50 m (the game dropped them past 25 m within 4 s).
 #include <algorithm>
 #include <cmath>
 
@@ -134,7 +138,12 @@ const CVector* NearestRemote(const CVector& p, float maxDist, int8_t area, uint8
 
 using ManagePedFn = void(__cdecl*)(CPed*, const CVector*);
 ManagePedFn g_origManagePed = nullptr;
+constexpr int kTimeTillWeNeedThisPed = 0x54C;  // CPed::m_nTimeTillWeNeedThisPed
+constexpr float kKeepOffScreen = 50.0f;
 void __cdecl HookManagePed(CPed* ped, const CVector* centre) {
+    // out of sight within 50 m: still needed (they come 37-46 m away now, AddToPopulation)
+    if (ped && centre && ped->Health() > 0.0f && (ped->GetPosition() - *centre).Length2D() < kKeepOffScreen)
+        Field<uint32_t>(ped, kTimeTillWeNeedThisPed) = std::max(Field<uint32_t>(ped, kTimeTillWeNeedThisPed), TimeMs() + 1000);
     if (Net().Online() && ped && centre) {
         CVector p = ped->GetPosition();
         float local = (p - *centre).Length2D();
@@ -210,10 +219,32 @@ void __fastcall HookSetupInteriorPeds(void* group, void* edx) {  // InteriorGrou
         if (CPed* p = Field<CPed*>(group, kGroupPeds + i * 4)) Peds::Instance().KeepLocal(p);
 }
 
+// CPopulation::RemoveAllRandomPeds: on going into an interior (and out of one) the game drops all its random people,
+// and the cars they drove stood empty. Near another player who stays out there they vanished in front of that player:
+// those people and cars go to that player's game instead (Peds::HandOverLeftBehind), the rest go as before.
+using VoidCdeclFn = void(__cdecl*)();
+VoidCdeclFn g_origRemoveAllRandomPeds = nullptr;
+void __cdecl HookRemoveAllRandomPeds() {
+    if (Net().Online() && core::IsPlayerReady()) Peds::Instance().HandOverLeftBehind();
+    g_origRemoveAllRandomPeds();
+}
+
+using AddToPopulationFn = bool(__cdecl*)(float, float, float, float);
+AddToPopulationFn g_origAddToPopulation = nullptr;
+bool __cdecl HookAddToPopulation(float minOn, float maxOn, float minOff, float maxOff) {
+    if (maxOn > minOn && minOn > 30.0f)  // the usual call (the start of the game's spreads them from 10 m: left alone)
+        minOn = std::min(minOn * 1.08f, maxOn * 1.05f - 1.0f), maxOn *= 1.05f;
+    // out of sight: 15-25 m was right behind the player, and 5 of them stood there as soon as it looked back
+    if (maxOff > minOff && minOff >= 10.0f) minOff = std::max(minOff, maxOff * 1.48f), maxOff *= 1.85f;
+    return g_origAddToPopulation(minOn, maxOn, minOff, maxOff);
+}
+
 class Population : public Module {
 public:
     const char* Name() const override { return "Population"; }
     void OnInstallHooks() override {
+        mem::HookFn(0x614720, &HookAddToPopulation, &g_origAddToPopulation, "CPopulation::AddToPopulation");
+        mem::HookFn(0x6122C0, &HookRemoveAllRandomPeds, &g_origRemoveAllRandomPeds, "CPopulation::RemoveAllRandomPeds");
         mem::RedirectCallFn(0x59690F, &HookSetupInteriorPeds, &g_origSetupInteriorPeds);  // InteriorGroup_c::Update
         mem::RedirectCallFn(0x43E983, &HookPopulateInterior, &g_origPopulateInterior);    // CEntryExit::GenerateAmbientPeds
         mem::HookFn(0x616650, &HookPopulationUpdate, &g_origPopUpdate, "CPopulation::Update");

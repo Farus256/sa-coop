@@ -47,6 +47,13 @@ public:
     uint8_t FindPeer(const std::string& nameOrId) const;
     proto::PlayerMask PeersMask() const;  // every other player
     uint32_t Rtt() const { return m_net.Rtt(); }
+    // How long a state from that player takes to get here (its half of the way to the server and ours), in seconds:
+    // the copies here are shown that much further on, where the player is now rather than where it was when it sent
+    float LatencyFrom(uint8_t id) const {
+        const PeerInfo* p = Peer(id);
+        uint32_t ms = (Rtt() + (p ? p->ping : Rtt())) / 2;
+        return (float)(ms > 250 ? 250 : ms) / 1000.0f;
+    }
     NetClient& Net() { return m_net; }
 
     void Send(uint8_t channel, const Writer& w) { m_net.Send(channel, w); }

@@ -50,10 +50,10 @@ constexpr int kLodListRoom = (0x2000 - 24) / 8;
 // The far plane at most this. The depth buffer's step grows with the square of the distance (24 bits from a near plane
 // of 0.3 m: some 0.2 m at 1 km, nearly a metre at 2 km), and far off the road over the ground, a wall's paint over the
 // wall and an LOD over its building shimmered as the camera moved: the game's own fog hides that from 1-1.5 km on.
-constexpr float kMaxFarClip = 2400.0f;
+constexpr float kMaxFarClip = 3000.0f;  // 0.4.0: farther (was 2400); the fog thickens over the last part
 // The models' detail range at most this (the menu's slider ends at 1.8): beyond, the streamer cannot keep the HD models
 // in, they swap with their LODs back and forth, and the two overlap while they cross-fade (their textures shimmer).
-constexpr float kMaxLodScale = 1.9f;
+constexpr float kMaxLodScale = 2.2f;  // 0.4.0: farther (was 1.9), with the larger streaming memory
 
 float g_adapt = 1.0f;          // the share of the configured stretch in use now (0: the game's own view)
 uint32_t g_droppedFrame = 0;   // entities the guard left out since the last frame

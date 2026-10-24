@@ -19,12 +19,12 @@ using namespace game;
 using game::script::Cmd;
 
 const Choice kChoices[] = {
-    {0, TRP("Карл Джонсон (CJ)", "Carl Johnson (CJ)"), 0xFFF2F2F2, 0xFF3A5A8C, 0},
-    {105, TRP("Боец Grove Street 1", "Grove Street homie 1"), 0xFF2E8B3E, 0xFF2B2B2B, 0xFF2E8B3E},
-    {106, TRP("Боец Grove Street 2", "Grove Street homie 2"), 0xFF3FA34D, 0xFF5A4630, 0xFF1F5F2A},
-    {107, TRP("Боец Grove Street 3", "Grove Street homie 3"), 0xFF1E6B2E, 0xFF3A3A3A, 0},
+    {0, TRP("Карл Джонсон (CJ)", "Carl Johnson (CJ)"), 0xFFF2F2F2, 0xFF3A5A8C, 0xFF151515, TOP_TANK, HEAD_HAIR, 0xFF1A1A1A},
+    {105, TRP("Боец Grove Street 1", "Grove Street homie 1"), 0xFF2E8B3E, 0xFF2B2B2B, 0xFF2E8B3E, TOP_TEE, HEAD_CAP, 0xFFE8E8E8},
+    {106, TRP("Боец Grove Street 2", "Grove Street homie 2"), 0xFF3FA34D, 0xFF5A4630, 0xFF1F5F2A, TOP_LONG, HEAD_BANDANA, 0xFF202020},
+    {107, TRP("Боец Grove Street 3", "Grove Street homie 3"), 0xFF1E6B2E, 0xFF3A3A3A, 0xFF151515, TOP_TEE, HEAD_HAIR, 0xFFD8D8D8},
 };
-bool g_profileKnown = false, g_newcomer = false;
+bool g_profileKnown = false, g_newcomer = false, g_picked = false;
 int g_choice = 0;
 uint64_t g_shopNoteMs = 0;
 
@@ -69,7 +69,7 @@ public:
         mem::HookFn(0x43FFD0, &HookTransitionStarted, &g_origTransition, "CEntryExit::TransitionStarted");
     }
     void OnSessionEnd() override {
-        g_profileKnown = g_newcomer = false;
+        g_profileKnown = g_newcomer = g_picked = false;
         g_choice = 0;
     }
 };
@@ -85,16 +85,21 @@ const Choice* Choices(int& count) {
     return kChoices;
 }
 
-void OnProfile(bool empty) {
+void OnProfile(bool empty, uint16_t worn) {
     if (!g_profileKnown || empty) g_newcomer = empty;  // the first one of the session says; an empty one later: a new game
     g_profileKnown = true;
+    if (!g_picked)  // the lobby shows the one it has
+        for (int i = 0; i < (int)std::size(kChoices); ++i)
+            if (kChoices[i].model == (empty ? 0 : worn)) g_choice = i;
 }
 
 bool Newcomer() { return g_newcomer; }
 
 void SetChoice(int index) {
-    if (index >= 0 && index < (int)std::size(kChoices)) g_choice = index;
+    if (index >= 0 && index < (int)std::size(kChoices)) g_choice = index, g_picked = true;
 }
+
+bool Picked() { return g_picked; }
 
 int ChosenIndex() { return g_choice; }
 
@@ -105,7 +110,7 @@ void ApplyChoice() {
     if (c.model)
         ui::TheChat().AddSystem(TR("Магазины одежды, парикмахерские и тату-салоны открыты только для CJ.",
                                    "Clothes shops, barbers and tattoo parlours are for CJ only."));
-    g_newcomer = false;
+    g_newcomer = g_picked = false;
     LOGI("Character from the lobby: model %d", c.model);
 }
 

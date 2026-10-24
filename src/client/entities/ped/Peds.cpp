@@ -19,9 +19,11 @@
 #include "entities/player/Players.h"
 #include "entities/vehicle/Vehicles.h"
 #include "shared/api/net-session/Session.h"
+#include "shared/config/Config.h"
 #include "shared/game/Anim.h"
 #include "shared/game/Script.h"
 #include "shared/lib/memory/Memory.h"
+#include "shared/ui/chat/Chat.h"
 
 namespace coop {
 
@@ -268,8 +270,13 @@ void Peds::KeepLocal(CPed* ped) {
     if (ped && IsPedValid(ped)) m_localOnly.insert(GetPedRef(ped));
 }
 
+void Peds::Share(CPed* ped) {
+    if (ped && IsPedValid(ped)) m_shared.insert(GetPedRef(ped));
+}
+
 bool Peds::IsLocalOnly(CPed* ped) {
     if (!ped) return false;
+    if (!m_shared.empty() && m_shared.count(GetPedRef(ped))) return false;
     if (MadeByAmbientScript(ped)) return true;
     return !m_localOnly.empty() && m_localOnly.count(GetPedRef(ped)) != 0;
 }
@@ -323,6 +330,7 @@ void Peds::OnInstallHooks() {
     Net().SetHandler(proto::G_PED_REMOVE, [](uint8_t from, Reader& r) { Instance().HandleRemove(from, r); });
     Net().SetHandler(proto::G_PED_SYNC, [](uint8_t from, Reader& r) { Instance().HandleSync(from, r); });
     Net().SetHandler(proto::G_PED_OWNER, [](uint8_t from, Reader& r) { Instance().HandleOwner(from, r); });
+    Net().SetHandler(proto::G_PED_ASK, [](uint8_t from, Reader& r) { Instance().HandleAsk(from, r); });
     Net().SetHandler(proto::G_RESYNC, [](uint8_t from, Reader&) {
         if (!core::IsPlayerReady()) return;
         // its game started over: what it owned before is gone there
@@ -515,6 +523,7 @@ void Peds::ScanOwned() {
     // the interiors' people this game made for itself that are gone (their handles may come back as other peds)
     for (auto it = m_localOnly.begin(); it != m_localOnly.end();)
         it = GetPed(*it) ? std::next(it) : m_localOnly.erase(it);
+    for (auto it = m_shared.begin(); it != m_shared.end();) it = GetPed(*it) ? std::next(it) : m_shared.erase(it);
 
     // owned peds that vanished or went out of the partner's range (or an interior's that came out as this game's own).
     // A mission's ped stays announced when its mission lets it stay on in the world (DONT_REMOVE_CHAR keeps it a script
@@ -558,7 +567,8 @@ void Peds::ScanOwned() {
             Announce(n);
             continue;
         }
-        uint64_t interval = d < 40.0f ? 100 : (d < 80.0f ? 200 : 400);
+        // 0.4.0: half again as often near a player (15 a second within 40 m; it was 10), where its steps are watched
+        uint64_t interval = d < 40.0f ? 66 : (d < 80.0f ? 150 : 300);
         if (now - np->lastSendMs >= interval) SendState(*np);
     }
 }
@@ -634,7 +644,7 @@ void Peds::HandleCreate(uint8_t from, Reader& r) {
     np.special = special;
     np.state = st;
     np.hasState = true;
-    np.recvMs = NowMs();
+    np.recvMs = np.createdMs = NowMs();
     if (WantMirror(np)) SpawnMirror(np);  // may fail for now: retried from ApplyMirror
 }
 
@@ -681,8 +691,109 @@ void Peds::HandleOwner(uint8_t from, Reader& r) {
     NetPed& np = it->second;
     if (to != Net().MyId() || !IsAlive(np) || IsPedDead(np.ped)) return Forget(id, true);
     Adopt(np);
+    auto ask = m_recruitAsks.find(id);
+    bool recruit = ask != m_recruitAsks.end() && NowMs() - ask->second < 5000;
+    if (ask != m_recruitAsks.end()) m_recruitAsks.erase(ask);
+    if (recruit) Recruit(np);
     Forget(id, false);
-    LOGD("Ped %04X taken over from player %d", id, from);
+    LOGD("Ped %04X taken over from player %d%s", id, from, recruit ? " (a recruit)" : "");
+}
+
+// ---- recruiting another game's Grove Street member
+constexpr int PED_TYPE_GANG2 = 8;
+constexpr uintptr_t kTargetedObject = 0x71C;  // CPed::m_pTargetedObject (the lock-on target)
+
+bool Peds::AskToRecruit() {
+    CPlayerPed* me = core::IsPlayerReady() ? FindPlayerPed(0) : nullptr;
+    if (!me || me->InVehicle() || !Net().Online()) return false;
+    // the one the player locks on to (as the game's own recruiting wants), else the nearest in front within 3 m
+    NetPed* pick = nullptr;
+    if (auto* t = Field<CEntity*>(me, kTargetedObject); t && t->IsPed()) pick = Find((CPed*)t);
+    if (!pick || pick->owner == Net().MyId()) {
+        pick = nullptr;
+        float h = me->CurrentRotation(), bestD = 3.0f;
+        CVector fwd{-std::sin(h), std::cos(h), 0.0f};
+        for (auto& [id, np] : m_byId) {
+            if (np.owner == Net().MyId() || !IsAlive(np) || np.ped->InVehicle()) continue;
+            CVector d = np.ped->GetPosition() - me->GetPosition();
+            float dist = d.Length();
+            if (dist < bestD && (d.x * fwd.x + d.y * fwd.y) > 0.3f * dist) bestD = dist, pick = &np;
+        }
+    }
+    if (!pick || pick->owner == Net().MyId() || pick->pedType != PED_TYPE_GANG2 || IsPedDead(pick->ped)) return false;
+    m_recruitAsks[pick->netId] = NowMs();
+    Writer w(proto::G_PED_ASK);
+    w.U16(pick->netId);
+    w.U8(1);
+    Net().SendTo(pick->owner, proto::CH_RELIABLE, w);
+    LOGI("Asked player %d for ped %04X to recruit it", pick->owner, pick->netId);
+    return true;
+}
+
+// another game wants our ped: a Grove Street member it recruits goes to it, unless it is in our player's gang already
+// or a script (a mission) holds it
+void Peds::HandleAsk(uint8_t from, Reader& r) {
+    uint16_t id = r.U16();
+    uint8_t why = r.U8();
+    if (!r.Ok() || why != 1) return;
+    auto it = m_byId.find(id);
+    if (it == m_byId.end() || it->second.owner != Net().MyId() || !IsAlive(it->second)) return;
+    NetPed& np = it->second;
+    CPed* ped = np.ped;
+    if (IsPedDead(ped) || ped->InVehicle() || ped->CreatedBy() == 2 /* PED_MISSION */ || ped->PedType() != PED_TYPE_GANG2) return;
+    int32_t group = -1;
+    Cmd(0x07AF).I(0).Out(&group).Run();  // GET_PLAYER_GROUP
+    if (group >= 0 && Cmd(0x06EE).I(np.handle).I(group).Run()) {  // IS_GROUP_MEMBER: ours already
+        LOGI("Player %d asked for ped %04X: in our gang, kept", from, id);
+        return;
+    }
+    LOGI("Player %d recruits ped %04X: handed over", from, id);
+    GiveAway(id, from);
+}
+
+// our own now: into this player's gang
+void Peds::Recruit(NetPed& np) {
+    int32_t group = -1;
+    Cmd(0x07AF).I(0).Out(&group).Run();         // GET_PLAYER_GROUP
+    if (group < 0) return;
+    Cmd(0x0631).I(group).I(np.handle).Run();    // SET_GROUP_MEMBER
+    ui::TheChat().AddSystem(TR("Боец Grove Street теперь в вашей банде.", "A Grove Street homie is in your gang now."));
+}
+
+// ---- left behind when this game's player goes into an interior
+void Peds::HandOverLeftBehind() {
+    if (!Net().Online() || !core::IsPlayerReady()) return;
+    int nVeh = 0, nPed = 0;
+    // its cars near another player (with the people in them)
+    nVeh = Vehicles::Instance().HandOverLeftBehind();
+    // the people on foot near another player, in their area
+    std::vector<std::pair<uint16_t, uint8_t>> give;
+    for (auto& [id, np] : m_byId) {
+        if (np.owner != Net().MyId() || !IsAlive(np) || IsPedDead(np.ped) || np.ped->InVehicle() || IsLocalOnly(np.ped)) continue;
+        CPed* ped = np.ped;
+        if (ped->CreatedBy() != 1 /* PED_GAME */ || !CanGiveAwayType(np) || !CallMethod<0x5DF100, bool>(ped)) continue;  // CanBeDeleted
+        CVector p = ped->GetPosition();
+        // its own area: our player's is the interior's already (the game set it before dropping the people), and AreaOf
+        // took everyone by the door for the interior's, so nobody outside was given them
+        int8_t area = ped->AreaCode();
+        uint8_t best = 255;
+        float bestD = 120.0f;
+        for (auto& [pid, rp] : Players::Instance().All()) {
+            if (!rp.hasState || rp.state.area != area || NowMs() - rp.stateRecvMs > 1500 || !rp.ped) continue;
+            float d = (rp.state.pos - p).Length2D();
+            if (d < bestD) bestD = d, best = pid;
+        }
+        if (best != 255) give.push_back({id, best});
+    }
+    for (auto& [id, to] : give) GiveAway(id, to), ++nPed;
+    if (nVeh || nPed) LOGI("Into another place: %d cars and %d people near the other players handed over to them", nVeh, nPed);
+}
+
+void Peds::Count(int& own, int& copies) const {
+    own = copies = 0;
+    for (auto& [id, np] : m_byId)
+        if (np.owner == Net().MyId()) ++own;
+        else if (np.ped) ++copies;
 }
 
 // a mirror becomes this game's own ped: it can be hurt, drops its loot, and the population manages it
@@ -717,7 +828,19 @@ bool Peds::WantMirror(const NetPed& np) const {
         return nv && nv->veh;
     }
     CPlayerPed* me = FindPlayerPed(0);
-    return me && (st.pos - me->GetPosition()).Length() < (np.ped ? kMirrorOut : kMirrorIn);
+    if (!me) return false;
+    float d = (st.pos - me->GetPosition()).Length();
+    if (d >= (np.ped ? kMirrorOut : kMirrorIn)) return false;
+    // A passer-by the other game has just made (at the edge of its own player's view) and which is in the middle of
+    // ours, near: it waits until it is out of sight and not close (at most 10 s), instead of appearing out of nowhere
+    // in front of this player - or right behind it, where it stood as soon as the player looked back.
+    bool ambient = np.pedType == PED_TYPE_CIVMALE || np.pedType == PED_TYPE_CIVFEMALE || (np.pedType >= 7 && np.pedType <= 16);
+    if (!np.ped && ambient && NowMs() - np.createdMs < 10000 && d < 70.0f && !(st.flags & PedSyncState::F_DEAD)) {
+        if (d < 35.0f) return false;
+        CVector centre = st.pos;
+        if (CallMethod<0x420D40, bool>((void*)addr::TheCamera, &centre, 1.5f)) return false;  // CCamera::IsSphereVisible
+    }
+    return true;
 }
 
 // far from this game's player: the copy goes, the record stays (the owner's states keep it up to date)
@@ -733,6 +856,7 @@ void Peds::Unspawn(NetPed& np) {
     fresh.hasState = np.hasState;
     fresh.state = np.state;
     fresh.recvMs = np.recvMs;
+    fresh.createdMs = np.createdMs;
     np = fresh;
 }
 
@@ -886,7 +1010,7 @@ void Peds::ApplyMirror(NetPed& np) {
     }
 
     // ---- on foot
-    float age = std::min(0.5f, (float)(now - np.recvMs) / 1000.0f);
+    float age = std::min(0.6f, (float)(now - np.recvMs) / 1000.0f + Net().LatencyFrom(np.owner));  // since it left its owner
     CVector target = st.pos + st.vel * age;
     // on a moving vehicle: where it stands on this game's copy of it, carried along with it (by its world place, which
     // comes with the network's delay, it was pulled along behind the car and fell off)
@@ -1031,7 +1155,7 @@ void Peds::OnPreProcess() {
 
 void Peds::OnPostProcess() {
     bool ready = Net().Online() && core::IsPlayerReady();
-    if (!ready || NowMs() - m_lastScan < 50) return;
+    if (!ready || NowMs() - m_lastScan < 33) return;  // the near ones go every 66 ms
     m_lastScan = NowMs();
     ScanOwned();
     if (NowMs() - m_lastStatsMs >= 5000) {

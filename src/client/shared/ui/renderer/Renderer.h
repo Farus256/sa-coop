@@ -45,6 +45,12 @@ public:
 
     void Rect(float x, float y, float w, float h, uint32_t argb);
     void RectOutline(float x, float y, float w, float h, uint32_t argb, float t = 1.0f);
+    // flat shapes: a triangle, a filled ellipse (rx = ry: a circle), a line of some thickness with round ends, a
+    // quadrilateral given by its corners in order
+    void Tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_t argb);
+    void Ellipse(float cx, float cy, float rx, float ry, uint32_t argb, int segments = 32);
+    void Line(float x0, float y0, float x1, float y1, float thickness, uint32_t argb, bool roundEnds = true);
+    void Poly4(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, uint32_t argb);
     // Text in UTF-8. Supports inline colour codes {RRGGBB}.
     void Text(FontId f, float x, float y, std::string_view utf8, uint32_t argb, uint32_t flags = TEXT_SHADOW);
     void TextW(FontId f, float x, float y, std::wstring_view text, uint32_t argb, uint32_t flags = TEXT_SHADOW);
@@ -63,6 +69,13 @@ public:
     // UI scale relative to 1080p.
     float Scale() const { return m_height / 1080.0f; }
     bool Ready() const { return m_ready; }
+
+    // A picture: ARGB pixels (straight alpha, rows top-down) that stay the caller's (static data). Its texture is made
+    // when it is first drawn, and again after a device reset. Drawn stretched into the rectangle, tinted.
+    int AddImage(const uint32_t* argb, int w, int h);
+    void Image(int id, float x, float y, float w, float h, uint32_t tint = 0xFFFFFFFF);
+    // its size in pixels
+    bool ImageSize(int id, int& w, int& h) const;
 
     void Invalidate();  // destroy textures (device reset / shutdown)
     // Tests: the frame drawn so far (the game's back buffer, never other windows) as a 24-bit BMP, scaled down.
@@ -99,6 +112,15 @@ private:
     void Quad(float x, float y, float w, float h, float u0, float v0, float u1, float v1, uint32_t c);
     const Glyph* GetGlyph(Font& f, wchar_t ch);
     void DrawRun(Font& f, float x, float y, std::wstring_view text, uint32_t argb);
+
+    struct Picture {
+        const uint32_t* px = nullptr;
+        int w = 0, h = 0;
+        int texW = 0, texH = 0;  // the texture: powers of two
+        IDirect3DTexture9* tex = nullptr;
+    };
+    std::vector<Picture> m_pictures;
+    bool MakePicture(Picture& p);
 
     IDirect3DDevice9* m_dev = nullptr;
     void* m_stateBlock = nullptr;

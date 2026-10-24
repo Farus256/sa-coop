@@ -596,12 +596,12 @@ void Vehicles::HandleRemove(uint8_t from, Reader& r) {
 // An ordinary car of this game (traffic, a parked one) the other player is at while this game's player is far: this
 // game would drop it soon (CCarCtrl removes cars beyond its player's reach) and it vanished in front of the other player.
 // The other game takes it over with whoever sits in it, as its own, and this game's one goes.
-static bool CanGiveAway(CVehicle* v) {
+static bool CanGiveAway(CVehicle* v, bool evenInView = false) {
     uint8_t by = v->CreatedBy();
     if ((by != VEHICLE_CREATED_RANDOM && by != VEHICLE_CREATED_PARKED) || v->Status() == STATUS_WRECKED ||
         Field<CVehicle*>(v, 0x4C4) || Field<CVehicle*>(v, 0x4C8) ||  // towing or towed: the pair stays together
         !CallMethod<0x6D1180, bool>(v) ||                             // CVehicle::CanBeDeleted: the engine's own test
-        CallMethod<0x534540, bool>(v) || ScriptHolds(v))               // CEntity::GetIsOnScreen: it does not vanish in view
+        (!evenInView && CallMethod<0x534540, bool>(v)) || ScriptHolds(v))  // CEntity::GetIsOnScreen: it does not vanish in view
         return false;
     CPed* seats[9] = {v->Driver()};
     for (int i = 0; i < 8; ++i) seats[i + 1] = v->Passengers()[i];
@@ -630,6 +630,33 @@ void Vehicles::GiveAway(NetVehicle& nv, uint8_t to) {
     nv.createdByUs = true;
     nv.hasState = false;
     Park(nv);
+}
+
+// This game's player goes into another place: its cars near the other players go to them now (see Peds)
+int Vehicles::HandOverLeftBehind() {
+    std::vector<std::pair<NetVehicle*, uint8_t>> give;
+    for (auto& [id, nv] : m_byId) {
+        if (IsMirror(nv) || !IsVehicleValid(nv.veh) || !CanGiveAway(nv.veh, true)) continue;
+        if (GetVehicleRef(nv.veh) == m_lastDriven || GetVehicleRef(nv.veh) == m_kept) continue;  // the player's car waits for it
+        CVector p = nv.veh->GetPosition();
+        uint8_t best = 255;
+        float bestD = 140.0f;
+        for (auto& [pid, rp] : Players::Instance().All()) {
+            if (!rp.hasState || rp.state.area != nv.veh->AreaCode() || NowMs() - rp.stateRecvMs > 1500 || !rp.ped) continue;
+            float d = (rp.state.pos - p).Length2D();
+            if (d < bestD) bestD = d, best = pid;
+        }
+        if (best != 255) give.push_back({&nv, best});
+    }
+    for (auto& [nv, to] : give) GiveAway(*nv, to);
+    return (int)give.size();
+}
+
+void Vehicles::Count(int& own, int& copies) const {
+    own = copies = 0;
+    for (auto& [id, nv] : m_byId)
+        if (!IsMirror(nv)) ++own;
+        else if (nv.veh) ++copies;
 }
 
 bool Vehicles::QueueGiveAway(CVehicle* v, uint8_t to) {
@@ -888,7 +915,9 @@ void Vehicles::ApplyMirror(NetVehicle& nv, float dt) {
         if (void* clump = v->RwObject()) Call<0x732B00>(clump, (int)std::min<uint64_t>(255, t * 255 / 500));  // SetClumpAlpha
         if (t >= 500) nv.fadeMs = 0;
     }
-    float age = std::min(0.3f, (float)(NowMs() - nv.recvMs) / 1000.0f);
+    // from the state's leaving its owner's game: the time it took to come here too (0.4.0). From its arrival only, a car
+    // was shown a network trip behind its owner's: at 100 km/h some 3 m, a car's length, with the usual ping.
+    float age = std::min(0.45f, (float)(NowMs() - nv.recvMs) / 1000.0f + Net().LatencyFrom(nv.owner));
     // Where the owner's car is now: on from the last state with its speed and how it was speeding up or braking. With
     // the speed alone a braking car went on past the place it stops at, a car behind another drove into it here and
     // was pushed back by the next state: the queues at the lights kept bumping into each other. Braking, it goes no

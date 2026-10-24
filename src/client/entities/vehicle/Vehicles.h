@@ -110,6 +110,10 @@ public:
     proto::PlayerMask Riders(uint16_t netId) const;
     // this game would drop the car, the other player is nearer: it goes to that player's game (false: not ours to give)
     bool QueueGiveAway(game::CVehicle* v, uint8_t to);
+    // this game's player goes into another place: its cars near another player go to that player's game; how many
+    int HandOverLeftBehind();
+    // /sync: how many vehicles this game shares (its own) and shows for the others (their copies made here)
+    void Count(int& own, int& copies) const;
     // The host's mission cleared an area: the other players' empty cars there go from this game at once (their copies
     // are mission cars here, CLEAR_AREA left them). Returns their ids for the owners (G_VEH_CLEAR).
     std::vector<uint16_t> ClearMirrors(const game::CVector& at, float radius);

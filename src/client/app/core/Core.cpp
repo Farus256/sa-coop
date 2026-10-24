@@ -11,9 +11,13 @@
 #include "common/lib/ini/Ini.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "entities/ped/Peds.h"
 #include "entities/player/Players.h"
 #include "entities/session/Flow.h"
+#include "features/aim-view/AimView.h"
 #include "features/revive/Revive.h"
+#include "features/rc-race/RcRace.h"
+#include "features/shops/Shops.h"
 #include "features/story/missions/Missions.h"
 #include "pages/connect-menu/ConnectMenu.h"
 #include "shared/api/net-session/Session.h"
@@ -282,6 +286,8 @@ void WriteDefaultConfig(const std::wstring& path) {
         "load_slot = 0\r\n"
         "; Для хоста: поставьте 1, чтобы игроки могли ранить и убивать друг друга. Это галочка в окне F9.\r\n"
         "friendly_fire = 0\r\n"
+        "; Для хоста: поставьте 1, чтобы в игре не работали чит-коды (у всех). Это галочка в окне F9 и команда /cheats.\r\n"
+        "no_cheats = 0\r\n"
         "\r\n"
         "[game]\r\n"
         "; Поставьте 1, чтобы играть в окне.\r\n"
@@ -298,12 +304,13 @@ void WriteDefaultConfig(const std::wstring& path) {
         "width = 0\r\n"
         "height = 0\r\n"
         "; Дальность прорисовки: дальняя плоскость и туман (1.0 — как в игре, до 4.0) и детализация моделей вдаль\r\n"
-        "; (множитель к ползунку в меню, до 3.0). В игре меняется командой /draw. Где в кадре слишком много объектов\r\n"
-        "; (лес, центр города), дальность сама уменьшается до обычной, а потом плавно возвращается.\r\n"
-        "draw_distance = 2.0\r\n"
-        "lod_distance = 1.0\r\n"
+        "; (множитель к ползунку в меню, до 3.0). По умолчанию самая большая. В игре меняется командой /draw. Где в\r\n"
+        "; кадре слишком много объектов (лес, центр города), дальность сама уменьшается, а потом плавно возвращается.\r\n"
+        "draw_distance = 4.0\r\n"
+        "lod_distance = 3.0\r\n"
+        "draw_settings = 2\r\n"
         "; Память для подгрузки моделей, МБ (у игры 50): с большой дальностью прорисовки нужно больше.\r\n"
-        "streaming_memory = 256\r\n"
+        "streaming_memory = 512\r\n"
         "; Игра не встаёт на паузу, когда окно не в фокусе. Для совместной игры это нужно.\r\n"
         "run_in_background = 1\r\n"
         "; Меню паузы не останавливает мир, чтобы напарник мог играть дальше.\r\n"
@@ -396,9 +403,13 @@ bool OnKeyDown(int vk, bool repeat) {
         ui::TogglePlayerList();
         return true;
     }
+    if (!inMenu && aimview::KeyDown(vk)) return true;  // the first-person view
+    if (!inMenu && shops::KeyDown(vk)) return true;   // a shop's or a fridge's menu (E, then 1-4)
+    if (!inMenu && rc::KeyDown(vk)) return true;      // the toy car race in San Fierro
     if (vk == cfg.reviveKey && !inMenu && ReviveKeyPressed()) return true;  // otherwise E goes on (the next weapon)
     if (vk == cfg.passengerKey && !inMenu && IsPlayerReady()) {
-        Players::Instance().TryEnterAsPassenger();
+        // a Grove Street member of another player's game in front: asked for, it joins this player's gang
+        if (!Peds::Instance().AskToRecruit()) Players::Instance().TryEnterAsPassenger();
         return false;  // G still reaches the game (gang recruiting)
     }
     return false;

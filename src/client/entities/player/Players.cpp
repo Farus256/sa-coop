@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
 #include "entities/mission/Mission.h"
+#include "entities/ped/Peds.h"
 #include "entities/session/Flow.h"
 #include "entities/vehicle/Vehicles.h"
 #include "entities/world-share/WorldShare.h"
@@ -275,6 +277,16 @@ bool __fastcall HookGangDriveByProcess(void* task, void* edx, CPed* ped) {
     bool done = g_origGangDriveBy(task, edx, ped);
     if (done && ours != g_ourDriveBy.end()) g_ourDriveBy.erase(ours);
     return done;
+}
+
+// CCarEnterExit::IsPlayerToQuitCarEnter: a player gives up getting into a car by its pad (the stick pushed away a
+// moment after it began). A copy runs under its owner's pad, which drives off or turns the moment the owner sits in
+// the car: the copy gave up at the door. A copy gets in as its owner did; its owner's exit says when it gets out.
+using QuitEnterFn = bool(__cdecl*)(CPed*, CVehicle*, int32_t, void*);
+QuitEnterFn g_origQuitEnter = nullptr;
+bool __cdecl HookQuitCarEnter(CPed* ped, CVehicle* v, int32_t start, void* task) {
+    if (ped && ped != FindPlayerPed(0) && Players::Instance().FindByPed(ped)) return false;
+    return g_origQuitEnter(ped, v, start, task);
 }
 
 // Two players dead or busted at about the same time come back at the same hospital or police station door, one inside
@@ -642,9 +654,30 @@ bool CountedGun(int type) { return (type >= 22 && type <= 34) || type == 38; }  
 using WeaponFireFn = bool(__fastcall*)(CWeapon*, void*, CEntity*, CVector*, CVector*, CEntity*, CVector*, CVector*);
 WeaponFireFn g_origWeaponFire = nullptr;
 bool g_forcingShot = false;
+// People shooting at a player aim at its head now and then: the sharper the shooter, the more often (its accuracy
+// / 200, 12%-50% of the shots), at the head bone (CPed::GetBonePosition) instead of the body.
+bool AimsAtHead(CEntity* by, CEntity* target, int type) {
+    if (!by || !target || !by->IsPed() || !target->IsPed() || !CountedGun(type) || type == 38) return false;
+    auto* shooter = (CPed*)by;
+    if (shooter->IsPlayer() || Players::Instance().FindByPed(shooter)) return false;
+    auto* victim = (CPed*)target;
+    if (victim != (CPed*)FindPlayerPed(0) && !Players::Instance().FindByPed(victim)) return false;
+    float chance = std::clamp((float)shooter->WeaponAccuracy() / 200.0f, 0.12f, 0.5f);
+    return (float)(std::rand() % 1000) / 1000.0f < chance;
+}
+
 bool __fastcall HookWeaponFire(CWeapon* w, void* edx, CEntity* by, CVector* start, CVector* barrel, CEntity* target,
                                CVector* targetPos, CVector* alt) {
     int type = w->type;
+    CVector head;
+    if (AimsAtHead(by, target, type)) {
+        CallMethod<0x5E4280>(target, &head, 5 /* BONE_HEAD */, false);  // CPed::GetBonePosition
+        if (head.Length() > 1.0f) {
+            head = head + CVector{((float)(std::rand() % 100) - 50.0f) * 0.0016f, ((float)(std::rand() % 100) - 50.0f) * 0.0016f, 0.0f};
+            target = nullptr;  // at the point, not at the body
+            targetPos = &head;
+        }
+    }
     bool fired = g_origWeaponFire(w, edx, by, start, barrel, target, targetPos, alt);
     if (!fired || !by || !by->IsPed() || !CountedGun(type) || !Net().Online()) return fired;
     if (by == (CEntity*)FindPlayerPed(0) && !g_inRemoteContext) {
@@ -835,6 +868,7 @@ void Players::OnInstallHooks() {
     mem::Nop(0x644A27, 28);  // the SMG slot holds a weapon with ammo (PassengerDriveBy checks the gun in hand)
     mem::Nop(0x644A69, 6);   // jne: the camera is MODE_TWOPLAYER_IN_CAR_AND_SHOOTING
     mem::HookFn(0x62D3B0, &HookGangDriveByProcess, &g_origGangDriveBy, "CTaskSimpleGangDriveBy::ProcessPed");
+    mem::HookFn(0x64F240, &HookQuitCarEnter, &g_origQuitEnter, "CCarEnterExit::IsPlayerToQuitCarEnter");
     mem::HookFn(0x442060, &HookRestorePlayer, &g_origRestore, "CGameLogic::RestorePlayerStuffDuringResurrection");
     mem::RedirectCallFn(0x4677A5, &HookDeleteChar, &g_origRemoveThisPed);  // DELETE_CHAR -> CTheScripts::RemoveThisPed
     mem::HookFn(0x609FF0, &HookGetPlayerInfoForThisPlayerPed, &g_origGetPlayerInfo,
@@ -1298,9 +1332,13 @@ void Players::ApplyState(RemotePlayer& rp) {
 
     if (Ref<uint8_t>(0xB5F851)) return;  // CCutsceneMgr::ms_running: Missions places the ped in the scene
     if (RideVehicle(rp)) return;
+    // getting into a car: its task walks it to the door, turns it and opens the door; the pull to its owner's place
+    // and facing (its owner is at the door or in the seat already) held it on the spot until the warp
+    if (EnteringCar(ped) && NowMs() - rp.enterTaskMs < kEnterGraceMs && (st.pos - ped->GetPosition()).Length() < 6.0f) return;
 
     // position: predict, then correct smoothly (teleport on large errors)
-    float age = std::min(0.25f, (float)(NowMs() - rp.stateRecvMs) / 1000.0f);
+    // from the state's leaving its owner: the time it took to come too (0.4.0; the copy was a network trip behind)
+    float age = std::min(0.4f, (float)(NowMs() - rp.stateRecvMs) / 1000.0f + Net().LatencyFrom(rp.id));
     CVector target = st.pos + st.vel * age;
     CVector cur = ped->GetPosition();
     CVector err = target - cur;
@@ -1425,8 +1463,18 @@ void Players::ApplyVehicleSeat(RemotePlayer& rp) {
     int seat = PassengerSeatOf(nv->veh, ped);
     bool seated = ped->InVehicle() && ped->Vehicle() == nv->veh && seat == rp.seat;
     if (seated) return;
-    // give the enter animation time; otherwise put the player in place directly
-    if (NowMs() - rp.enterTaskMs < kEnterGraceMs && EnteringCar(ped)) return;
+    // give the enter animation time while it goes on; otherwise put the player in place directly. A copy whose
+    // animation stands still (it never got to open the door: its owner, seated already, drives off, the door is
+    // blocked here) used to stand frozen by the car until the grace was over and then appeared inside.
+    if (NowMs() - rp.enterTaskMs < kEnterGraceMs && EnteringCar(ped)) {
+        CVector p = ped->GetPosition();
+        if ((p - rp.enterPos).Length() > 0.05f || !rp.enterStillMs) rp.enterPos = p, rp.enterStillMs = NowMs();
+        bool stuck = NowMs() - rp.enterStillMs > 1200 || nv->veh->MoveSpeed().Length2D() * 50.0f > 3.0f;
+        if (!stuck) return;
+        LOGD("Remote player %d: the enter animation stalled, into the seat", rp.id);
+        Cmd(0x0792).I(rp.pedHandle).Run();  // CLEAR_CHAR_TASKS_IMMEDIATELY
+    }
+    rp.enterStillMs = 0;
     if (ped->InVehicle()) {
         CVector p = ped->GetPosition();
         Cmd(0x0362).I(rp.pedHandle).F(p.x).F(p.y).F(p.z).Run();  // WARP_CHAR_FROM_CAR_TO_COORD
@@ -1665,6 +1713,16 @@ void Players::SendLocalState() {
     c.chairY = cam::CrosshairMultY();
 
     uint64_t now = NowMs();
+    // A jump or a crouch is a press, often a tap one frame long, and it went in one state only (on the unreliable channel):
+    // with that state lost the other games never saw it. A tap now stays down in the states of the next 80 ms (a
+    // longer press of those changes nothing there: they act on the press).
+    constexpr uint16_t kTaps = PadState::B_SQUARE | PadState::B_SHOCKL;
+    uint16_t down = st.pad.buttons & ~m_realButtons & kTaps;
+    m_realButtons = st.pad.buttons;
+    for (int b = 0; b < 16; ++b) {
+        if (down & (1u << b)) m_stickyUntil[b] = now + 80;
+        if (m_stickyUntil[b] > now) st.pad.buttons |= (uint16_t)(1u << b);
+    }
     bool padChanged = st.pad.buttons != m_lastSentPad.buttons;  // a stick alone waits for the 30 Hz below (see SendVehicleState)
     if (!padChanged && now - m_lastSend < 33) return;  // ~30 Hz, immediately on a button
     m_lastSend = now;
@@ -1800,6 +1858,31 @@ void Players::OnRender() {
 }
 
 bool Players::OnCommand(const std::string& cmd, const std::vector<std::string>& args) {
+    if (cmd == "sync") {  // what the sync looks like from here: for a report of something out of step
+        auto& chat = ui::TheChat();
+        if (!Net().Online() || !core::IsPlayerReady()) return true;
+        CPlayerPed* me = FindPlayerPed(0);
+        int ownPeds = 0, peds = 0, ownCars = 0, cars = 0;
+        Peds::Instance().Count(ownPeds, peds);
+        Vehicles::Instance().Count(ownCars, cars);
+        chat.AddSystem(Format(TR("Синхронизация: пинг %u мс; люди — свои %d, чужих копий %d; машины — свои %d, чужих копий %d.",
+                                 "Sync: ping %u ms; people — own %d, others' copies %d; vehicles — own %d, others' copies %d."),
+                              Net().Rtt(), ownPeds, peds, ownCars, cars));
+        for (auto& [id, rp] : m_remote) {
+            if (!rp.hasState) continue;
+            uint64_t age = NowMs() - rp.stateRecvMs;
+            float dist = (rp.state.pos - me->GetPosition()).Length();
+            chat.AddSystem(Format(TR("  %s: задержка %d мс, состояние %llu мс назад, %.0f м, интерьер %d, %s",
+                                     "  %s: delay %d ms, state %llu ms ago, %.0f m, interior %d, %s"),
+                                  Net().PeerName(id).c_str(), (int)(Net().LatencyFrom(id) * 1000.0f), (unsigned long long)age, dist,
+                                  rp.state.area,
+                                  rp.mode == RemotePlayer::Mode::OnFoot ? TR("пешком", "on foot")
+                                  : rp.mode == RemotePlayer::Mode::Driver ? TR("за рулём", "driving")
+                                                                          : TR("пассажир", "a passenger")));
+        }
+        LOGI("/sync: rtt %u, peds %d own %d copies, vehicles %d own %d copies", Net().Rtt(), ownPeds, peds, ownCars, cars);
+        return true;
+    }
     if (cmd != "tp" && cmd != "tphere") return false;
     if (!core::IsPlayerReady()) return true;
     auto& chat = ui::TheChat();

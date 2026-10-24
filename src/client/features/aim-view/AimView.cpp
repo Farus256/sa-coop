@@ -1,144 +1,25 @@
-// What the camera and the sights do for a player, apart from the game's:
-//  * the sniper rifle's scope is drawn sharp and round ([game] better_scope = 0: the game's own);
-//  * a passenger in a car keeps looking where it aimed out of the window (online).
+// The sniper rifle's scope is drawn sharp and round ([game] better_scope = 0: the game's own). The cameras on foot and
+// aiming out of a car's window are the game's own; a passenger's car camera stays where the player turned it.
+// A first-person view, as the mods have it (F7, [keys] first_person, or /fp): the game's camera works as ever (the mouse
+// turns it, it aims as it aims), but it looks from the player's eyes: after each camera's work (CCam::Process) its
+// place is the head's (a little ahead of the face), the crosshair in the middle of the screen.
 #include <algorithm>
 #include <cmath>
-#include <vector>
 
-#include "common/lib/log/Log.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
+#include "features/aim-view/AimView.h"
 #include "shared/game/Game.h"
+#include "shared/game/Im2D.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
+#include "shared/ui/chat/Chat.h"
 
 namespace coop {
 
 namespace {
 using namespace game;
-
-constexpr int kFront = 0x190, kSource = 0x19C, kFov = 0xB4;  // CCam::m_vecFront, m_vecSource, m_fFOV
-constexpr int kBeta = 0xBC;                                  // CCam::m_fHorizontalAngle
-constexpr uintptr_t kFrameCounter = 0xB7CB4C;                // CTimer::m_FrameCounter
-
-// the aiming camera (on foot, from a car): where it looked last, and when (it is the game's own, untouched)
-CVector g_lookFront{0, 1, 0};
-bool g_haveLook = false;
-uint32_t g_aimFrame = 0;
-
-using ProcessFn = void(__fastcall*)(void*, void*, const CVector*, float, float, float);
-ProcessFn g_origAim = nullptr;
-void __fastcall HookAimWeapon(void* cam, void* edx, const CVector* target, float a, float b, float c) {
-    g_origAim(cam, edx, target, a, b, c);
-    g_aimFrame = Ref<uint32_t>(kFrameCounter);
-    g_lookFront = Field<CVector>(cam, kFront);
-    g_haveLook = true;
-}
-
-// In a car, a passenger looks where it likes: aiming out of the window turns the camera with the mouse (the look button
-// held, CPad::m_bVehicleMouseLook, or the aiming camera of MODE_AIMWEAPON_FROMCAR), and letting go the car's camera
-// swung back behind the car, losing where the player had looked. For a passenger the car's camera stays turned where
-// it was, relative to the car, and the mouse turns it on from there (as CCam's free mouse look does: 3 x the mouse's
-// move x FOV/80 x the camera's mouse speed). The game's camera works out its frame and is turned round the car by
-// what is between its angle and ours; the next frame it starts from ours.
-using FollowCarFn = void(__fastcall*)(void*, void*, const CVector*, float, float, float, bool);
-FollowCarFn g_origFollowCar = nullptr;
-uint32_t g_carFrame = 0;
-constexpr uintptr_t kMouseMoved = 0xB73418 + 0x0C;  // CPad::NewMouseControllerState.m_AmountMoved
-constexpr uintptr_t kMouseAccelH = 0xB6EC1C;        // CCamera::m_fMouseAccelHorzntl
-bool g_passLook = false;   // the passenger's own look holds
-float g_passRel = 0;       // its angle from the car's heading
-CVehicle* g_passCar = nullptr;
-
-float CarAngle(CVehicle* v) {
-    CMatrix* m = v->Matrix();
-    return m ? std::atan2(m->forward.y, m->forward.x) : 0.0f;
-}
-
-void __fastcall HookFollowCar(void* cam, void* edx, const CVector* target, float a, float b, float c, bool d) {
-    uint32_t frame = Ref<uint32_t>(kFrameCounter);
-    bool afterAim = frame - g_carFrame > 2 && frame - g_aimFrame <= 3;
-    g_carFrame = frame;
-    g_origFollowCar(cam, edx, target, a, b, c, d);
-    CPlayerPed* me = FindPlayerPed(0);
-    CVehicle* v = me ? me->VehicleIfIn() : nullptr;
-    if (!Net().Online() || !v || v->Driver() == me || !cam::UseMouse3rdPerson()) {
-        g_passLook = false;
-        return;
-    }
-    if (v != g_passCar) g_passLook = false, g_passCar = v;
-    float& beta = Field<float>(cam, kBeta);
-    bool held = GetPad(0)->NewState.m_bVehicleMouseLook;
-    if (afterAim && g_haveLook) {  // from the aiming camera: where it looked
-        CVector f = g_lookFront.Normalized();
-        g_passRel = WrapAngle(std::atan2(-f.y, -f.x) - CarAngle(v));
-        g_passLook = true;
-    } else if (held) {  // turning with the look button: the game's turn is the passenger's
-        g_passRel = WrapAngle(beta - CarAngle(v));
-        g_passLook = true;
-        return;
-    }
-    if (!g_passLook) return;
-    float fov = Field<float>(cam, kFov) / 80.0f;
-    g_passRel = WrapAngle(g_passRel - 3.0f * Ref<float>(kMouseMoved) * fov * Ref<float>(kMouseAccelH));
-    float want = CarAngle(v) + g_passRel, turn = WrapAngle(want - beta);
-    if (std::fabs(turn) < 1e-4f) return;
-    // the frame turned round the car by the difference
-    CVector pivot = v->GetPosition();
-    CVector& src = Field<CVector>(cam, kSource);
-    CVector& front = Field<CVector>(cam, kFront);
-    float cs = std::cos(turn), sn = std::sin(turn);
-    auto rot = [&](const CVector& p) { return CVector{p.x * cs - p.y * sn, p.x * sn + p.y * cs, p.z}; };
-    src = pivot + rot(src - pivot);
-    front = rot(front);
-    beta = WrapAngle(want);
-}
-
-// ---- drawing: one batch of triangles through RenderWare's immediate mode (one draw call for the whole scope)
-struct Vtx {  // RwD3D9Vertex, the Im2D vertex
-    float x, y, z, rhw;
-    uint32_t color;
-    float u, v;
-};
-std::vector<Vtx> g_tris;
-constexpr uintptr_t kRwEngine = 0xC97B24;                       // RwEngineInstance (RwGlobals*)
-constexpr uintptr_t kRenderStateSet = 0x20, kIm2DPrimitive = 0x30;  // RwGlobals::dOpenDevice (+0x10) functions
-constexpr uintptr_t kNearScreenZ = 0xC4B8D8, kRecipNearClip = 0xC4B8D4;  // CSprite2d's
-enum { RS_RASTER = 1, RS_ZTEST = 6, RS_ZWRITE = 8, RS_SRCBLEND = 10, RS_DESTBLEND = 11, RS_VERTEXALPHA = 12 };
-enum { BLEND_SRCALPHA = 5, BLEND_INVSRCALPHA = 6, PRIM_TRILIST = 3 };
-
-uint32_t Argb(uint8_t a, uint8_t r, uint8_t g, uint8_t b) { return (uint32_t)a << 24 | (uint32_t)r << 16 | (uint32_t)g << 8 | b; }
-void V(float x, float y, uint32_t c) { g_tris.push_back({x, y, Ref<float>(kNearScreenZ), Ref<float>(kRecipNearClip), c, 0, 0}); }
-void Quad(float x0, float y0, float x1, float y1, uint32_t c) {
-    V(x0, y0, c), V(x1, y0, c), V(x1, y1, c);
-    V(x0, y0, c), V(x1, y1, c), V(x0, y1, c);
-}
-// a ring between two radii, its colour fading from one edge to the other (a soft, smooth circle)
-void Ring(float cx, float cy, float r0, float r1, uint32_t c0, uint32_t c1, int n = 160) {
-    for (int i = 0; i < n; ++i) {
-        float a0 = 6.2831853f * i / n, a1 = 6.2831853f * (i + 1) / n;
-        float s0 = std::sin(a0), k0 = std::cos(a0), s1 = std::sin(a1), k1 = std::cos(a1);
-        V(cx + k0 * r0, cy + s0 * r0, c0), V(cx + k1 * r0, cy + s1 * r0, c0), V(cx + k1 * r1, cy + s1 * r1, c1);
-        V(cx + k0 * r0, cy + s0 * r0, c0), V(cx + k1 * r1, cy + s1 * r1, c1), V(cx + k0 * r1, cy + s0 * r1, c1);
-    }
-}
-void Flush() {
-    auto* rw = Ref<uint8_t*>(kRwEngine);
-    if (!rw || g_tris.empty()) return;
-    using SetFn = int(__cdecl*)(int, void*);
-    using PrimFn = int(__cdecl*)(int, Vtx*, int);
-    auto set = *(SetFn*)(rw + kRenderStateSet);
-    auto prim = *(PrimFn*)(rw + kIm2DPrimitive);
-    set(RS_RASTER, nullptr);
-    set(RS_VERTEXALPHA, (void*)1);
-    set(RS_SRCBLEND, (void*)BLEND_SRCALPHA);
-    set(RS_DESTBLEND, (void*)BLEND_INVSRCALPHA);
-    set(RS_ZTEST, (void*)0);
-    set(RS_ZWRITE, (void*)0);
-    prim(PRIM_TRILIST, g_tris.data(), (int)g_tris.size());
-    set(RS_ZWRITE, (void*)1);
-    g_tris.clear();
-}
+using namespace im2d;
 
 // The sniper rifle's scope, drawn here instead of the game's: its texture is a 210x210 picture stretched to the
 // screen's proportions (an oval on a wide screen) with a blurry edge. A round sight, sharp at any resolution: black
@@ -149,8 +30,8 @@ void DrawScope() {
     uint32_t black = Argb(255, 0, 0, 0), clear = Argb(0, 0, 0, 0);
     float outerR = std::sqrt(w * w + h * h);
     Ring(cx, cy, r, outerR, black, black, 96);                   // all round the lens
-    Ring(cx, cy, r - 2.5f * px, r, clear, black);               // its edge, smooth
-    Ring(cx, cy, r * 0.72f, r - 2.5f * px, clear, Argb(110, 0, 0, 0));  // the lens darkens towards its rim
+    Ring(cx, cy, r - 2.5f * px, r, clear, black, 160);               // its edge, smooth
+    Ring(cx, cy, r * 0.72f, r - 2.5f * px, clear, Argb(110, 0, 0, 0), 160);  // the lens darkens towards its rim
     uint32_t ink = Argb(235, 0, 0, 0);
     float thin = std::max(1.0f, 1.5f * px), thick = 5.0f * px, gap = r * 0.33f;
     Quad(cx - r, cy - thin * 0.5f, cx + r, cy + thin * 0.5f, ink);  // the thin cross
@@ -178,17 +59,143 @@ void __cdecl HookCrossHairs() {
     g_origCrossHairs();
 }
 
+// ---- a passenger's camera
+// The car's camera (CCam::Process_FollowCar_SA) swings back behind the car by itself a moment after the mouse rests: a
+// passenger who had turned it to shoot out of the side window (the right button held turns it with the mouse) saw it
+// go back behind the car the moment the button or the mouse let go, without having asked for it. For a passenger the
+// game's own turn by the mouse (and by the look keys while they are held) still turns it, but nothing else does: it
+// keeps its angle to the car (it turns with the car as it turns), and the frame the game worked out is turned round the
+// car by whatever the game's own swing back added. 0.3.9 turned it by its own reckoning of the mouse instead, which did
+// not feel as the game's camera does.
+constexpr int kFront = 0x190, kSource = 0x19C, kBeta = 0xBC;  // CCam::m_vecFront, m_vecSource, m_fHorizontalAngle
+constexpr uintptr_t kMouseMovedX = 0xB73418 + 0x0C;            // CPad::NewMouseControllerState.m_AmountMoved.x
+
+using FollowCarFn = void(__fastcall*)(void*, void*, const CVector*, float, float, float, bool);
+FollowCarFn g_origFollowCar = nullptr;
+bool g_holding = false;   // the passenger's angle is kept
+float g_frontOffset = 0;  // the car camera's angle (Beta) less its look's (Front), to follow an aim's look
+float g_rel = 0.0f;       // the camera's angle from the car's heading
+CVehicle* g_holdCar = nullptr;
+
+float Wrap(float a) {
+    while (a > 3.14159265f) a -= 6.2831853f;
+    while (a < -3.14159265f) a += 6.2831853f;
+    return a;
+}
+float CarAngle(CVehicle* v) {
+    CMatrix* m = v->Matrix();
+    return m ? std::atan2(m->forward.y, m->forward.x) : 0.0f;
+}
+
+void __fastcall HookFollowCar(void* cam, void* edx, const CVector* target, float a, float b, float c, bool d) {
+    g_origFollowCar(cam, edx, target, a, b, c, d);
+    CPlayerPed* me = FindPlayerPed(0);
+    CVehicle* v = me ? me->VehicleIfIn() : nullptr;
+    CEntity* follows = Field<CEntity*>(cam, 0x21C);  // CCam::m_pCamTargetEntity: this camera follows our car (or us in it)
+    if (!v || v->Driver() == me || !cam::UseMouse3rdPerson() || cam::WideScreenOn() || (follows != (CEntity*)v && follows != (CEntity*)me)) {
+        g_holding = false;
+        return;
+    }
+    float& beta = Field<float>(cam, kBeta);
+    if (v != g_holdCar || !g_holding) {  // just got in: as the game has it
+        g_holdCar = v;
+        g_holding = true;
+        g_rel = Wrap(beta - CarAngle(v));
+        return;
+    }
+    const CControllerState& pad = GetPad(0)->NewState;
+    bool mouse = std::fabs(Ref<float>(kMouseMovedX)) > 0.0f;
+    bool looking = pad.LeftShoulder2 || pad.RightShoulder2 || pad.ShockButtonR;  // looking aside or back: the game's
+    if (mouse) {  // the player turns it: the game's turn is the passenger's
+        g_rel = Wrap(beta - CarAngle(v));
+        return;
+    }
+    if (looking) return;
+    g_frontOffset = Wrap(beta - std::atan2(Field<CVector>(cam, kFront).y, Field<CVector>(cam, kFront).x));
+    float want = CarAngle(v) + g_rel, turn = Wrap(want - beta);
+    if (std::fabs(turn) < 1e-4f) return;
+    CVector pivot = v->GetPosition();
+    CVector& src = Field<CVector>(cam, kSource);
+    CVector& front = Field<CVector>(cam, kFront);
+    float cs = std::cos(turn), sn = std::sin(turn);
+    auto rot = [&](const CVector& p) { return CVector{p.x * cs - p.y * sn, p.x * sn + p.y * cs, p.z}; };
+    src = pivot + rot(src - pivot);
+    front = rot(front);
+    beta = Wrap(want);
+}
+
+// Aiming out of the window the car camera rests (another camera, MODE_AIMWEAPON_FROMCAR, looks along the aim): the
+// angle kept is the aim's, so that when the aim ends the car camera looks where the aim did - it went back to the
+// angle from before the aim, behind the car.
+constexpr uint16_t MODE_CAM_ON_A_STRING = 18;
+void FollowAim() {
+    CPlayerPed* me = FindPlayerPed(0);
+    CVehicle* v = me ? me->VehicleIfIn() : nullptr;
+    if (!g_holding || !v || v != g_holdCar || v->Driver() == me || cam::Mode() == MODE_CAM_ON_A_STRING) return;
+    CVector f = cam::Front();
+    if (std::fabs(f.x) + std::fabs(f.y) < 0.01f) return;
+    g_rel = Wrap(std::atan2(f.y, f.x) + g_frontOffset - CarAngle(v));
+}
+
+// ---- the first-person view
+bool g_firstPerson = false;
+float g_savedCrossX = 0.53f, g_savedCrossY = 0.4f;
+bool FirstPersonMode(uint16_t mode) {
+    switch (mode) {
+    case 4: case 18: case 22: case 53: case 55: case 65:  // on foot, a car, a boat, aiming on foot / from a car / attached
+        return true;
+    }
+    return false;
+}
+
+using CamProcessFn = void(__fastcall*)(void*, void*);
+CamProcessFn g_origCamProcess = nullptr;
+void __fastcall HookCamProcess(void* cam, void* edx) {
+    g_origCamProcess(cam, edx);
+    if (!g_firstPerson || (uintptr_t)cam != cam::Active() || cam::WideScreenOn() || !core::IsPlayerReady()) return;
+    CPlayerPed* me = FindPlayerPed(0);
+    uint16_t mode = Field<uint16_t>(cam, 0x0C);
+    if (!me || me->Health() <= 0.0f || !FirstPersonMode(mode)) return;
+    CVector head;
+    CallMethod<0x5E4280>(me, &head, 5 /* BONE_HEAD */, true);  // CPed::GetBonePosition
+    if (head.Length() < 1.0f) return;
+    CVector& front = Field<CVector>(cam, kFront);
+    CVector flat{front.x, front.y, 0.0f};
+    float len = flat.Length();
+    if (len > 0.01f) flat = flat * (1.0f / len);
+    Field<CVector>(cam, kSource) = head + flat * 0.22f + CVector{0, 0, 0.06f};  // the eyes, ahead of the face
+}
+
+void SetFirstPerson(bool on) {
+    if (on == g_firstPerson) return;
+    g_firstPerson = on;
+    if (on) {
+        g_savedCrossX = cam::CrosshairMultX(), g_savedCrossY = cam::CrosshairMultY();
+    } else {
+        cam::CrosshairMultX() = g_savedCrossX, cam::CrosshairMultY() = g_savedCrossY;
+    }
+    ui::TheChat().AddSystem(on ? TR("Вид от первого лица (F7 — обратно).", "First-person view (F7: back).")
+                               : TR("Вид от третьего лица.", "Third-person view."));
+}
+
 class AimView : public Module {
 public:
     const char* Name() const override { return "AimView"; }
     void OnInstallHooks() override {
-        mem::HookFn(0x521500, &HookAimWeapon, &g_origAim, "CCam::Process_AimWeapon");
-        mem::HookFn(0x5245B0, &HookFollowCar, &g_origFollowCar, "CCam::Process_FollowCar_SA");
         mem::HookFn(0x58E020, &HookCrossHairs, &g_origCrossHairs, "CHud::DrawCrossHairs");
+        mem::HookFn(0x5245B0, &HookFollowCar, &g_origFollowCar, "CCam::Process_FollowCar_SA");
+        mem::HookFn(0x526FC0, &HookCamProcess, &g_origCamProcess, "CCam::Process");
     }
-    void OnGameShutdown() override {
-        g_haveLook = false;
-        g_passLook = false;
+    void OnGameShutdown() override { g_holding = false, g_holdCar = nullptr; }
+    void OnPostProcess() override {
+        if (!core::IsPlayerReady()) return;
+        FollowAim();
+        if (g_firstPerson) cam::CrosshairMultX() = 0.5f, cam::CrosshairMultY() = 0.5f;  // the shot goes where the eyes look
+    }
+    bool OnCommand(const std::string& cmd, const std::vector<std::string>&) override {
+        if (cmd != "fp" && cmd != "firstperson") return false;
+        SetFirstPerson(!g_firstPerson);
+        return true;
     }
 };
 
@@ -197,5 +204,13 @@ struct Reg {
     Reg() { core::RegisterModule(&g_module); }
 } g_reg;
 }  // namespace
+
+namespace aimview {
+bool KeyDown(int vk) {
+    if (vk != Cfg().firstPersonKey || !core::IsPlayerReady() || MenuActive()) return false;
+    SetFirstPerson(!g_firstPerson);
+    return true;
+}
+}  // namespace aimview
 
 }  // namespace coop

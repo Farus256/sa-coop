@@ -190,7 +190,62 @@ bool Renderer::BuildFonts() {
     return ok;
 }
 
+int Renderer::AddImage(const uint32_t* argb, int w, int h) {
+    Picture p;
+    p.px = argb;
+    p.w = w;
+    p.h = h;
+    m_pictures.push_back(p);
+    return (int)m_pictures.size() - 1;
+}
+
+bool Renderer::ImageSize(int id, int& w, int& h) const {
+    if (id < 0 || id >= (int)m_pictures.size()) return false;
+    w = m_pictures[(size_t)id].w;
+    h = m_pictures[(size_t)id].h;
+    return true;
+}
+
+bool Renderer::MakePicture(Picture& p) {
+    if (p.tex) return true;
+    if (!m_dev || !p.px || p.w <= 0 || p.h <= 0) return false;
+    p.texW = 1, p.texH = 1;
+    while (p.texW < p.w) p.texW <<= 1;
+    while (p.texH < p.h) p.texH <<= 1;
+    IDirect3DTexture9* tex = nullptr;
+    if (FAILED(m_dev->CreateTexture(p.texW, p.texH, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex, nullptr))) {
+        LOGE("CreateTexture for a picture failed");
+        return false;
+    }
+    D3DLOCKED_RECT lr;
+    if (SUCCEEDED(tex->LockRect(0, &lr, nullptr, 0))) {
+        for (int row = 0; row < p.texH; ++row) {
+            uint32_t* dst = (uint32_t*)((uint8_t*)lr.pBits + row * lr.Pitch);
+            int srcRow = std::min(row, p.h - 1);  // the edge repeated: no dark seam when filtered
+            for (int col = 0; col < p.texW; ++col) {
+                uint32_t px = p.px[(size_t)srcRow * p.w + std::min(col, p.w - 1)];
+                dst[col] = (row >= p.h || col >= p.w) ? (px & 0x00FFFFFF) : px;
+            }
+        }
+        tex->UnlockRect(0);
+    }
+    p.tex = tex;
+    return true;
+}
+
+void Renderer::Image(int id, float x, float y, float w, float h, uint32_t tint) {
+    if (!m_inFrame || id < 0 || id >= (int)m_pictures.size()) return;
+    Picture& p = m_pictures[(size_t)id];
+    if (!MakePicture(p)) return;
+    SetTexture(p.tex);
+    Quad(x, y, w, h, 0.0f, 0.0f, (float)p.w / (float)p.texW, (float)p.h / (float)p.texH, tint);
+}
+
 void Renderer::Invalidate() {
+    for (auto& p : m_pictures) {
+        if (p.tex) p.tex->Release();
+        p.tex = nullptr;
+    }
     for (auto& f : m_fonts) {
         if (f.tex) f.tex->Release();
         f.tex = nullptr;
@@ -313,6 +368,40 @@ void Renderer::Rect(float x, float y, float w, float h, uint32_t argb) {
     Font& f = m_fonts[FONT_NORMAL];
     SetTexture(f.tex);
     Quad(x, y, w, h, f.whiteU, f.whiteV, f.whiteU, f.whiteV, argb);
+}
+
+void Renderer::Tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_t argb) {
+    if (!m_inFrame || (argb >> 24) == 0) return;
+    Font& f = m_fonts[FONT_NORMAL];
+    SetTexture(f.tex);
+    float u = f.whiteU, v = f.whiteV;
+    m_verts.push_back({x0 - 0.5f, y0 - 0.5f, 0, 1, argb, u, v});
+    m_verts.push_back({x1 - 0.5f, y1 - 0.5f, 0, 1, argb, u, v});
+    m_verts.push_back({x2 - 0.5f, y2 - 0.5f, 0, 1, argb, u, v});
+}
+
+void Renderer::Poly4(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, uint32_t argb) {
+    Tri(x0, y0, x1, y1, x2, y2, argb);
+    Tri(x0, y0, x2, y2, x3, y3, argb);
+}
+
+void Renderer::Ellipse(float cx, float cy, float rx, float ry, uint32_t argb, int segments) {
+    for (int i = 0; i < segments; ++i) {
+        float a0 = 6.2831853f * i / segments, a1 = 6.2831853f * (i + 1) / segments;
+        Tri(cx, cy, cx + std::cos(a0) * rx, cy + std::sin(a0) * ry, cx + std::cos(a1) * rx, cy + std::sin(a1) * ry, argb);
+    }
+}
+
+void Renderer::Line(float x0, float y0, float x1, float y1, float t, uint32_t argb, bool roundEnds) {
+    float dx = x1 - x0, dy = y1 - y0, len = std::sqrt(dx * dx + dy * dy);
+    if (len > 0.001f) {
+        float nx = -dy / len * t * 0.5f, ny = dx / len * t * 0.5f;
+        Poly4(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, argb);
+    }
+    if (roundEnds) {
+        Ellipse(x0, y0, t * 0.5f, t * 0.5f, argb, 16);
+        Ellipse(x1, y1, t * 0.5f, t * 0.5f, argb, 16);
+    }
 }
 
 void Renderer::RectOutline(float x, float y, float w, float h, uint32_t argb, float t) {

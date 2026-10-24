@@ -50,7 +50,8 @@ constexpr const char* kActivityBlocks[] = {
     "HAIRCUTS", "TATTOOS",  "FOOD",     "VENDING", "GYMNASIUM", "BENCHPRESS", "FREEWEIGHTS", "DANCING", "CASINO",
     "BAR",      "CLOTHES",  "SHOP",     "BSKTBALL", "POOL",     "KISSING",    "STRIP",       "LAPDAN1", "LAPDAN2",
     "LAPDAN3",  "BOMBER",   "CARRY",    "PARACHUTE", "INT_HOUSE", "INT_OFFICE", "INT_SHOP",
-    "MEDIC"};  // a player's CPR for a wounded one (Revive)
+    "MEDIC",    // a player's CPR for a wounded one (Revive)
+    "SMOKING"};  // a cigarette from a 24/7 (Shops)
 
 bool IsReplicated(int g, int id) {
     if (g == ANIM_GROUP_DEFAULT)  // phone_in, phone_out, phone_talk; choking

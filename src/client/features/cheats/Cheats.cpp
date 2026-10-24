@@ -3,6 +3,8 @@
 // games: the other game applies the same cheat (CCheat::ApplyCheat), a switch only when its own state differs. Cheats
 // for the player alone (weapons, money, health, wanted level, vehicles, body, skills) stay in the game where they were
 // typed.
+// The host can forbid cheat codes in its game (the "No cheats" box in F9, no_cheats in coop.ini, /cheats on|off):
+// then no code works for anyone, the host included (CCheat::ApplyCheat does nothing), and the one who typed it is told.
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -170,6 +172,33 @@ std::string Describe(int id, const std::string& code, bool toggled, bool on) {
 }
 
 // a cheat typed here: told once the game applied it (whether a switch went on or off shows only then)
+bool g_noCheats = false;      // the host's rule here
+bool g_applyingRemote = false;
+bool NoCheats() { return Net().Online() && (Net().IsHost() ? Cfg().noCheats : g_noCheats); }
+
+using ApplyCheatFn = void(__cdecl*)(int);
+ApplyCheatFn g_origApplyCheat = nullptr;
+void __cdecl HookApplyCheat(int id) {
+    if (NoCheats() && !g_applyingRemote) return;
+    g_origApplyCheat(id);
+}
+
+void SendRule(proto::PlayerMask to = proto::kAllPlayers) {
+    if (!Net().Online() || !Net().IsHost()) return;
+    Writer w(proto::G_CHEAT_RULE);
+    w.U8(Cfg().noCheats);
+    Net().SendTo(to, proto::CH_RELIABLE, w);
+}
+
+void HandleRule(uint8_t from, Reader& r) {
+    uint8_t on = r.U8();
+    if (!r.Ok() || from != Net().HostId()) return;
+    if ((on != 0) != g_noCheats)
+        ui::TheChat().AddSystem(on ? TR("Хост отключил чит-коды.", "The host turned cheat codes off.")
+                                   : TR("Хост разрешил чит-коды.", "The host allowed cheat codes."));
+    g_noCheats = on != 0;
+}
+
 struct Typed {
     bool pending = false;
     int id = -1;
@@ -190,6 +219,10 @@ void __cdecl HookCheatCounted(uint16_t stat, float value) {
     std::string code(s, (size_t)len);
     std::reverse(code.begin(), code.end());  // the newest key is first
     g_typed = {true, id, Active(id), code};
+    if (NoCheats()) {  // ApplyCheat does nothing now
+        g_typed.pending = false;
+        ui::TheChat().AddError(TR("Чит-коды отключены хостом.", "The host turned cheat codes off."));
+    }
 }
 
 void Announce() {
@@ -219,7 +252,9 @@ void HandleCheat(uint8_t from, Reader& r) {
     std::string line = Format(TR("%s ввёл чит-код %s", "%s entered the cheat %s"), Net().PeerName(from).c_str(),
                               Describe(id, code, toggled, on).c_str());
     if (world && WorldCheat(id) && core::IsPlayerReady() && flow::InSharedWorld()) {
+        g_applyingRemote = true;
         if (OneShot(id) || Active(id) != on) Call<0x438370>(id);  // CCheat::ApplyCheat
+        g_applyingRemote = false;
         line += TR(" · действует и у вас", " · works for you too");
         LOGI("Cheat %d from player %d applied", id, from);
     }
@@ -252,9 +287,38 @@ public:
     void OnInstallHooks() override {
         mem::RedirectCallFn(0x438565, &HookCheatCounted, &g_origIncrementStat);  // in CCheat::AddToCheatString
         Net().SetHandler(proto::G_CHEAT, &HandleCheat);
+        Net().SetHandler(proto::G_CHEAT_RULE, &HandleRule);
+        mem::HookFn(0x438370, &HookApplyCheat, &g_origApplyCheat, "CCheat::ApplyCheat");
     }
-    void OnPostProcess() override { Announce(); }
+    void OnSessionStart() override { SendRule(); }
+    void OnSessionEnd() override { g_noCheats = false; }
+    void OnPeerJoin(uint8_t id) override { SendRule(proto::Bit(id)); }
+    void OnPeerResync(uint8_t id) override { SendRule(proto::Bit(id)); }
+    void OnPostProcess() override {
+        Announce();
+        static int sent = -1;  // the host's box ticked in F9 during the game: the rule goes out at once
+        if (Net().Online() && Net().IsHost() && sent != (int)Cfg().noCheats) {
+            sent = Cfg().noCheats;
+            SendRule();
+        }
+    }
     bool OnCommand(const std::string& cmd, const std::vector<std::string>& args) override {
+        if (cmd == "cheats") {  // the host: /cheats off | on
+            std::string a = args.empty() ? "" : ToLower(args[0]);
+            if (!Net().Online() || !Net().IsHost()) {
+                ui::TheChat().AddError(TR("Чит-коды разрешает и запрещает хост.", "The host allows or forbids cheat codes."));
+            } else if (a == "off" || a == "on") {
+                Cfg().noCheats = a == "off";
+                flow::SaveConnectSettings();
+                SendRule();
+                ui::TheChat().AddSystem(Cfg().noCheats ? TR("Чит-коды отключены у всех.", "Cheat codes are off for everyone.")
+                                                       : TR("Чит-коды снова работают.", "Cheat codes work again."));
+            } else {
+                ui::TheChat().AddSystem(Cfg().noCheats ? TR("Чит-коды отключены. /cheats on — разрешить.", "Cheat codes are off. /cheats on allows them.")
+                                                       : TR("Чит-коды работают. /cheats off — отключить у всех.", "Cheat codes work. /cheats off turns them off for all."));
+            }
+            return true;
+        }
         if (cmd != "code" && cmd != "cheat") return false;
         std::string all;
         for (auto& a : args) all += a;

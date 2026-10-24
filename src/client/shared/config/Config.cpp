@@ -46,6 +46,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     wantsHost = ToLower(ini.Get("connect", "mode", "join")) == "host";
     loadSlot = ini.GetInt("connect", "load_slot", 0);
     friendlyFire = ini.GetBool("connect", "friendly_fire", friendlyFire);
+    noCheats = ini.GetBool("connect", "no_cheats", noCheats);
     maxPlayers = std::clamp(ini.GetInt("connect", "max_players", maxPlayers), 2, 16);
 
     windowed = ini.GetBool("game", "windowed", windowed);
@@ -62,6 +63,17 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     drawDistance = std::clamp(ini.GetFloat("game", "draw_distance", drawDistance), 0.5f, 4.0f);
     lodDistance = std::clamp(ini.GetFloat("game", "lod_distance", lodDistance), 0.5f, 3.0f);
     streamingMemoryMb = std::clamp(ini.GetInt("game", "streaming_memory", streamingMemoryMb), 0, 1024);
+    // 0.4.0 draws as far as it can: a coop.ini written before it gets the most (once; /draw changes it after)
+    if (ini.GetInt("game", "draw_settings", 0) < 2) {
+        drawDistance = 4.0f;
+        lodDistance = 3.0f;
+        streamingMemoryMb = std::max(streamingMemoryMb, 512);
+        ini.Set("game", "draw_distance", "4.0");
+        ini.Set("game", "lod_distance", "3.0");
+        ini.SetInt("game", "streaming_memory", streamingMemoryMb);
+        ini.SetInt("game", "draw_settings", 2);
+        ini.Save(iniPath);
+    }
     multiInstance = ini.GetBool("game", "multi_instance", multiInstance);
     runInBackground = ini.GetBool("game", "run_in_background", runInBackground);
     noPauseMenu = ini.GetBool("game", "no_pause_menu", noPauseMenu);
@@ -81,6 +93,7 @@ bool ClientConfig::Load(const std::wstring& coopDirectory) {
     passengerKey = ini.GetInt("keys", "enter_as_passenger", passengerKey);
     playerListKey = ini.GetInt("keys", "player_list", playerListKey);
     reviveKey = ini.GetInt("keys", "revive", reviveKey);
+    firstPersonKey = ini.GetInt("keys", "first_person", firstPersonKey);
 
     debugOverlay = ini.GetBool("debug", "overlay", debugOverlay);
     verboseLog = ini.GetBool("debug", "verbose_log", verboseLog);

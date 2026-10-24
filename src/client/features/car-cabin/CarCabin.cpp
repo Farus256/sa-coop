@@ -6,7 +6,7 @@
 // wheel the passenger tunes as it likes.
 //
 // A passenger's mouse wheel picks the gun to lean out of the window with (the guns a drive-by can fire: pistols,
-// shotguns, SMGs, rifles with ammunition), as the wheel does on foot. Leaning out at that moment, the passenger draws
+// shotguns, SMGs, rifles with ammunition), as the wheel does on foot; a passenger's wheel never retunes the radio. Leaning out at that moment, the passenger draws
 // back in and leans out again with the new gun (while the aim button is held).
 #include <map>
 
@@ -56,9 +56,15 @@ CVehicle* PlayersCar(CPlayerPed* me) {
     return Players::Instance().FindByPed(v->Driver()) ? v : nullptr;
 }
 
+bool WheelTurned() { return Ref<uint8_t>(kMouseState + 3) || Ref<uint8_t>(kMouseState + 4); }
+
+// a passenger's radio: the driver's when a player drives; the mouse wheel is a passenger's gun choice in any car
 bool RadioLocked() {
     if (!Net().Online() || !core::IsPlayerReady()) return false;
-    return PlayersCar(FindPlayerPed(0)) != nullptr;
+    CPlayerPed* me = FindPlayerPed(0);
+    if (PlayersCar(me)) return true;
+    CVehicle* v = me ? me->VehicleIfIn() : nullptr;
+    return v && v->Driver() != me && WheelTurned();
 }
 
 using StationKeyFn = bool(__fastcall*)(void*, void*);
@@ -126,7 +132,10 @@ void WheelGun(CPlayerPed* me) {
         int slot = (cur + dir * step + NUM_WEAPON_SLOTS * 2) % NUM_WEAPON_SLOTS;
         const CWeapon& w = me->Weapons()[slot];
         if (!DriveByGun(w.type, w.ammoTotal)) continue;
-        Cmd(0x01B9).I(GetPedRef(me)).I(w.type).Run();  // SET_CURRENT_CHAR_WEAPON
+        // CPed::SetCurrentWeapon(slot). Not SET_CURRENT_CHAR_WEAPON: for a player it only notes the choice
+        // (CPlayerPedData::m_nChosenWeapon) for the weapon switch, which a player in a car never runs
+        // (m_bInVehicleDontAllowWeaponChange)
+        CallMethod<0x5E61F0>(me, slot);
         // leaning out with the old one: back in (CTaskSimpleGangDriveBy's way out, command 7), out again with the new
         void* intel = me->Intelligence();
         if (void* task = intel ? CallMethod<0x681740, void*>((uint8_t*)intel + 4, TASK_SIMPLE_GANG_DRIVEBY) : nullptr)

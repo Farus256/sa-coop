@@ -19,6 +19,7 @@
 #include "common/lib/util/Util.h"
 #include "entities/mission/Mission.h"
 #include "shared/api/net-session/Session.h"
+#include "shared/game/Challenge.h"
 #include "shared/game/Game.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
@@ -141,7 +142,7 @@ void __cdecl HookSprayTag(CEntity* tag, uint8_t alpha) {
 using GenerateFn = int(__cdecl*)(float, float, float, uint32_t, int, uint32_t, uint32_t, int, char*);
 GenerateFn g_origGenerate = nullptr;
 bool Announced(int type, int model) {
-    if (g_applying || !flow::InSharedWorld() || !core::IsPlayerReady() || PlayerInFocus() != 0) return false;  // the remote
+    if (g_applying || game::challenge::MakingPickups() || !flow::InSharedWorld() || !core::IsPlayerReady() || PlayerInFocus() != 0) return false;  // the remote
     if (!Shared((uint8_t)type, model)) return false;                                  // player's drops are its game's
     if (void* script = CurrentScript())  // a script: only the host's mission is not run by both games
         return Net().IsHost() && Field<uint8_t>(script, 0xDC) && HostReplicating();  // CRunningScript::m_bIsMission

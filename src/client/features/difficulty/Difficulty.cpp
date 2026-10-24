@@ -7,6 +7,15 @@
 //    (CTaskComplexKillPedOnFoot on a player), a game with more players makes extra ones of the same model and gun near
 //    it, behind it as the player sees it, and sets them on the same player (one for every two players more, at most 8
 //    at a time). They are ordinary people of the host's game, the others see them as its copies.
+// The police come armed: a cop after a wanted player with nothing in hand gets its nightstick (one star, the player
+// unarmed) or its pistol (shotgun if it has one). The game chooses a pursuing cop's weapon by the wanted level of
+// its own player (CTaskComplexPolicePursuit::SetWeapon, FindPlayerWanted): a cop of this game after another player,
+// whose stars this game's player has not, kept its fists; and the pistol comes "delayed" (CCopPed::CCopPed), only once
+// its model is in memory. Every 0.5 s, online or not.
+// The SWAT and the FBI (models 285, 286) are sharpshooters who see far: accuracy 95, shooting range 120, sight 80 m,
+// full armour, and a headshot does not kill them at once (SET_CHAR_SUFFERS_CRITICAL_HITS off).
+// And the SWAT carry the SMG the FBI do (the MP5, held in both hands as police hold their guns) instead of the Micro
+// Uzi they had, shot sideways the way gangsters shoot it (always, online or not).
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -34,6 +43,97 @@ constexpr uint8_t PED_MISSION = 2;
 constexpr int kWantedMaxCops = 0x19, kWantedMaxCopCars = 0x1A;  // CWanted
 constexpr int kMaxExtras = 8;
 constexpr int kLastWeapon = 46;
+
+// CCopPed::CCopPed(type or model)
+constexpr uint32_t COP_TYPE_SWAT1 = 2, COP_TYPE_SWAT2 = 3;
+constexpr int WEAPON_MP5 = 29, MODEL_MP5 = 353;
+using CopCtorFn = void*(__fastcall*)(void*, void*, uint32_t);
+CopCtorFn g_origCopCtor = nullptr;
+void* __fastcall HookCopCtor(void* cop, void* edx, uint32_t type) {
+    void* r = g_origCopCtor(cop, edx, type);
+    if (type == COP_TYPE_SWAT1 || type == COP_TYPE_SWAT2) {
+        RequestModel(MODEL_MP5);
+        CallMethod<0x5E89B0>(cop, WEAPON_MP5, 1000u);  // CPed::GiveDelayedWeapon: the SMG slot, the Uzi's
+        CallMethod<0x5E6280>(cop, WEAPON_MP5);         // CPed::SetCurrentWeapon(type)
+    }
+    return r;
+}
+
+// ---- the police's arms
+constexpr int PED_TYPE_COP = 6, WEAPON_NIGHTSTICK = 3, WEAPON_PISTOL = 22, WEAPON_SHOTGUN = 25;
+uint64_t g_copScanMs = 0;
+
+uint8_t LocalWanted() {
+    void* w = Call<0x56E230, void*>(-1);  // FindPlayerWanted
+    return w ? (uint8_t)std::clamp(Field<int32_t>(w, 0x2C), 0, 6) : 0;
+}
+
+bool Has(CPed* p, int weapon) { return CallMethod<0x5DF300, bool>(p, weapon); }  // CPed::DoWeHaveWeaponAvailable
+
+// the nearest wanted player within 45 m of the cop, its stars and whether it holds a gun
+CPed* WantedNear(CPed* cop, uint8_t& stars) {
+    CPed* best = nullptr;
+    float bestD = 45.0f;
+    auto consider = [&](CPed* ped, uint8_t wanted) {
+        if (!ped || !wanted || ped->Health() <= 0.0f) return;
+        float d = (ped->GetPosition() - cop->GetPosition()).Length();
+        if (d < bestD) bestD = d, best = ped, stars = wanted;
+    };
+    consider(FindPlayerPed(0), LocalWanted());
+    for (auto& [id, rp] : Players::Instance().All())
+        if (rp.ped && rp.hasState) consider(rp.ped, rp.state.wanted);
+    return best;
+}
+
+std::set<int> g_elite;  // handles made elite
+void Elite() {
+    CPoolHeader* pool = PedPool();
+    if (!pool) return;
+    for (auto it = g_elite.begin(); it != g_elite.end();) it = GetPed(*it) ? std::next(it) : g_elite.erase(it);
+    for (int i = 0; i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        auto* p = (CPed*)(pool->objects + (size_t)i * kPedPoolElemSize);
+        int model = p->ModelIndex();
+        if ((model != 285 && model != 286) || p->IsPlayer() || p->Health() <= 0.0f) continue;
+        if (NetPed* np = Peds::Instance().Find(p); np && np->owner != Net().MyId() && Net().Online()) continue;  // a copy
+        int h = GetPedRef(p);
+        if (!g_elite.insert(h).second) continue;
+        Cmd(0x0446).I(h).I(0).Run();     // SET_CHAR_SUFFERS_CRITICAL_HITS: no one-shot headshots
+        Cmd(0x060F).I(h).F(80.0f).Run();  // SET_SENSE_RANGE
+        p->WeaponAccuracy() = 95;
+        Field<uint8_t>(p, 0x719) = 120;   // CPed::m_nWeaponShootingRate: how far it opens fire
+        if (p->Armour() < 100.0f) p->Armour() = 100.0f;
+    }
+}
+
+void ArmCops() {
+    CPoolHeader* pool = PedPool();
+    if (!pool) return;
+    for (int i = 0; i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        auto* p = (CPed*)(pool->objects + (size_t)i * kPedPoolElemSize);
+        if (p->PedType() != PED_TYPE_COP || p->IsPlayer() || p->Health() <= 0.0f || p->InVehicle() || p->ActiveWeapon().type != 0)
+            continue;
+        if (NetPed* np = Peds::Instance().Find(p); np && np->owner != Net().MyId() && Net().Online()) continue;  // a copy: its game arms it
+        uint8_t stars = 0;
+        CPed* target = WantedNear(p, stars);
+        if (!target) continue;
+        int t = target->ActiveWeapon().type;
+        bool armed = t >= 16 && t <= 38;  // a thrown weapon or a gun
+        int want = stars == 1 && !armed ? WEAPON_NIGHTSTICK : Has(p, WEAPON_SHOTGUN) ? WEAPON_SHOTGUN : WEAPON_PISTOL;
+        if (!Has(p, want)) {
+            int model = -1;
+            Cmd(0x0781).I(want).Out(&model).Run();  // GET_WEAPONTYPE_MODEL
+            if (model > 0 && !IsModelLoaded(model)) {
+                RequestModel(model);
+                continue;  // next time
+            }
+            Cmd(0x01B2).I(GetPedRef(p)).I(want).I(want == WEAPON_NIGHTSTICK ? 1 : 200).Run();  // GIVE_WEAPON_TO_CHAR
+        }
+        Cmd(0x01B9).I(GetPedRef(p)).I(want).Run();  // SET_CURRENT_CHAR_WEAPON
+        LOGD("Cop %p armed with %d (%d stars)", (void*)p, want, stars);
+    }
+}
 
 int PlayersInGame() {
     int n = 1;
@@ -155,11 +255,20 @@ void WatchFights(int players) {
 class Difficulty : public Module {
 public:
     const char* Name() const override { return "Difficulty"; }
-    void OnInstallHooks() override { mem::HookFn(0x561C90, &HookUpdateWantedLevel, &g_origUpdateWanted, "CWanted::UpdateWantedLevel"); }
+    void OnInstallHooks() override {
+        mem::HookFn(0x561C90, &HookUpdateWantedLevel, &g_origUpdateWanted, "CWanted::UpdateWantedLevel");
+        mem::HookFn(0x5DDC60, &HookCopCtor, &g_origCopCtor, "CCopPed::CCopPed");
+    }
     void OnGameStarted() override { Reset(); }
     void OnSessionEnd() override { Reset(); }
     void OnPostProcess() override {
-        if (!Net().Online() || !core::IsPlayerReady()) return;
+        if (!core::IsPlayerReady()) return;
+        if (NowMs() - g_copScanMs >= 500) {
+            g_copScanMs = NowMs();
+            ArmCops();
+            Elite();
+        }
+        if (!Net().Online()) return;
         int players = PlayersInGame();
         if (players <= 1) return;
         uint64_t now = NowMs();
