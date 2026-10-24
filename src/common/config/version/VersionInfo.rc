@@ -1,0 +1,41 @@
+// The version resource of the three binaries (the Details tab of a file's properties), included by each one's .rc
+// once it has named COOP_FILE_DESCRIPTION, COOP_ORIGINAL_NAME and COOP_FILE_TYPE. Antiviruses' learned models took the
+// mod's unsigned binaries without one for threats. COOP_FILEVERSION (four numbers) comes from tools/build.py.
+#include "common/config/version/Version.h"
+
+// winver.h's values, not the header: under the resource compiler it still brings C declarations. (This file is not a
+// .h: the resource compiler, as Microsoft's, reads only the macros of a header and dropped the resource without a word.)
+#define VS_VERSION_INFO 1
+#define VOS_NT_WINDOWS32 0x00040004L
+#define VFT_APP 0x00000001L
+#define VFT_DLL 0x00000002L
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION COOP_FILEVERSION
+PRODUCTVERSION COOP_FILEVERSION
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE COOP_FILE_TYPE
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Karimov-Akbar"
+            VALUE "FileDescription", COOP_FILE_DESCRIPTION
+            VALUE "FileVersion", COOP_VERSION_STR
+            VALUE "InternalName", COOP_ORIGINAL_NAME
+            VALUE "LegalCopyright", "Copyright (c) 2026 Karimov-Akbar, MIT License"
+            VALUE "OriginalFilename", COOP_ORIGINAL_NAME
+            VALUE "ProductName", COOP_NAME
+            VALUE "ProductVersion", COOP_VERSION_STR
+            VALUE "Comments", "https://github.com/Karimov-Akbar/sa-coop"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

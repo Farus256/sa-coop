@@ -3,7 +3,8 @@
 namespace coop::patches {
 
 // Applies engine patches required by co-op (and optional comfort patches from coop.ini):
-//  * CGameLogic::IsCoopGameGoingOn always false (the native split-screen mode must never activate)
+//  * CGameLogic::IsCoopGameGoingOn always false (the native split-screen mode must never activate), and its 20 m leash
+//    between the two players (IsPlayerAllowedToGoInThisDirection) always lets go
 //  * run in background, no pause on focus loss, no auto pause menu, optional no-pause menu
 //  * multiple game instances, windowed mode, custom user files directory, skip intro movies
 void Apply();

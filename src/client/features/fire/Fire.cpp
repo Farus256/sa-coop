@@ -4,6 +4,7 @@
 // fire on its copy of the entity, or at the spot: such a fire never spreads, never burns the copy (copies are
 // fireproof, the proof is lifted only to light it) and goes out when the owner's fire does. A copy this game's player
 // puts out (water, an extinguisher) puts the owner's fire out too: the partner helps with the host's firefighting.
+#include <algorithm>
 #include <cmath>
 #include <map>
 
@@ -250,6 +251,8 @@ void __cdecl HookAddExplosion(CEntity* victim, CEntity* creator, int type, CVect
     g_origAddExplosion(victim, creator, type, pos, lifetime, sound, shake, visible);
 }
 
+void DropCharges(CEntity* creator, const CVector& at, float within);
+
 void HandleExplosion(uint8_t from, Reader& r) {
     uint8_t kind = r.U8();
     uint16_t id = r.U16();
@@ -265,18 +268,54 @@ void HandleExplosion(uint8_t from, Reader& r) {
     g_settingOff = true;
     g_origAddExplosion(nullptr, creator, type, CVector{p.x, p.y, p.z}, lifetime, sound, shake, visible);
     g_settingOff = false;
+    // the real blast of a satchel charge: its copy here goes (the replayed detonator press may have been lost)
+    // shortcut: a grenade of the same player within 3 m takes a charge's copy too, a charge id in G_EXPLOSION would end it
+    if (type == 0 && creator) DropCharges(creator, CVector{p.x, p.y, p.z}, 3.0f);
     LOGD("Explosion of player %d set off (type %d, by %d %04X)", from, type, kind, id);
 }
 
 // ---------------------------------------------------------------- projectiles
-// A grenade, a molotov, tear gas, a rocket, a bomb or a flare flies in the game that threw or fired it, and the other
-// game throws the same one from the same spot at the same speed in the name of its copy of the thrower, to be seen:
-// it goes off there without harm (a blast of the other side is left out, above) and the real blast comes. A projectile
-// here of the other side's copy (its copy of the other player throwing) is left out the same way. Satchel charges
-// stay in the game that planted them, the other one gets their blasts.
-constexpr uintptr_t kProjectileInfos = 0xC891A8;  // gaProjectileInfo[32], 0x24 bytes each, m_bActive at +0x10
+// A grenade, a molotov, tear gas, a rocket, a bomb, a satchel charge or a flare flies in the game that threw or fired
+// it, and the other game throws the same one from the same spot at the same speed in the name of its copy of the
+// thrower, to be seen: it goes off there without harm (a blast of the other side is left out, above) and the real blast
+// comes. A projectile here of the other side's copy (its copy of the other player throwing) is left out the same way.
+// A satchel charge's copy lies where it landed until its thrower's copy sets it off (blast left out) or the real blast
+// comes (the other player saw the charge in the thrower's hand, never where it flew or lay).
+constexpr uintptr_t kProjectileInfos = 0xC891A8;  // gaProjectileInfo[32], 0x24 bytes: weapon +0, creator +4, fuse +0xC, m_bActive +0x10
 constexpr uintptr_t kProjectiles = 0xC89110;      // CProjectileInfo::ms_apProjectile[32]
-bool Thrown(int weapon) { return (weapon >= 16 && weapon <= 21) || weapon == 58; }  // GRENADE..FREEFALL_BOMB, FLARE
+constexpr int WEAPON_SATCHEL = 39;
+bool Thrown(int weapon) { return (weapon >= 16 && weapon <= 21) || weapon == WEAPON_SATCHEL || weapon == 58; }  // GRENADE..FREEFALL_BOMB, SATCHEL, FLARE
+
+// satchel charges of `creator` (nullptr: nobody's, the copy of their thrower was deleted) within `within` of `at`, gone
+// without a blast
+void DropCharges(CEntity* creator, const CVector& at, float within) {
+    for (int i = 0; i < 32; ++i) {
+        uintptr_t info = kProjectileInfos + (uintptr_t)i * 0x24;
+        auto* obj = Ref<CPhysical*>(kProjectiles + (uintptr_t)i * 4);
+        if (obj && Ref<int32_t>(info) == WEAPON_SATCHEL && Ref<uint8_t>(info + 0x10) && Ref<CEntity*>(info + 4) == creator &&
+            (obj->GetPosition() - at).Length() <= within)
+            Call<0x739A40, bool>(obj);  // CProjectileInfo::RemoveIfThisIsAProjectile
+    }
+}
+
+// CWorld::UseDetonator(user) ends in CProjectileInfo::RemoveDetonatorProjectiles, which sets off every satchel charge
+// there is: the other player's detonator, replayed on its copy, blew up this player's own charges. Each sets off its
+// own (the copy its copies here, their blasts left out).
+using UseDetonatorFn = void(__cdecl*)(CEntity*);
+UseDetonatorFn g_origUseDetonator = nullptr;
+void __cdecl HookUseDetonator(CEntity* user) {
+    uint32_t others = 0;
+    for (int i = 0; i < 32; ++i) {
+        uintptr_t info = kProjectileInfos + (uintptr_t)i * 0x24;
+        if (Ref<int32_t>(info) == WEAPON_SATCHEL && Ref<uint8_t>(info + 0x10) && Ref<CEntity*>(info + 4) != user) {
+            others |= 1u << i;
+            Ref<uint8_t>(info + 0x10) = 0;  // m_bActive: passed over this once
+        }
+    }
+    g_origUseDetonator(user);
+    for (int i = 0; i < 32; ++i)
+        if (others & (1u << i)) Ref<uint8_t>(kProjectileInfos + (uintptr_t)i * 0x24 + 0x10) = 1;
+}
 
 uint32_t ActiveProjectiles() {
     uint32_t mask = 0;
@@ -368,6 +407,11 @@ void HandleProjectile(uint8_t from, Reader& r) {
     if (!obj) return;
     obj->SetPositionRaw(at);  // where and how fast it left the other game, whatever the copy's aim here
     obj->MoveSpeed() = speed;
+    // its thrower's detonator is looked at without a null check once the fuse time is up (CProjectileInfo::Update,
+    // 0x738F3D), and the copy of the thrower can be deleted before the charge: a copy never looks
+    if (weapon == WEAPON_SATCHEL)
+        for (int i = 0; i < 32; ++i)
+            if (Ref<CPhysical*>(kProjectiles + (uintptr_t)i * 4) == obj) Ref<uint32_t>(kProjectileInfos + (uintptr_t)i * 0x24 + 0x0C) = 0;
     LOGD("Projectile of player %d thrown (weapon %d, by %d %04X)", from, weapon, kind, id);
 }
 
@@ -397,6 +441,60 @@ void __cdecl HookWaterCannon(uint32_t vehicle, CVector* start, CVector* speed) {
     Net().SendTo(PlayersNear(nv->veh->GetPosition(), nv->veh->AreaCode(), 250.0f, false), proto::CH_STATE, w);
 }
 
+// The police helicopter's gun (CHeli::ProcessControl, 0x6C7773: FireOneInstantHitRound from under its nose towards the
+// wanted player) fired in its own game only: the other player saw it hover, and its target hit by nothing (issue #22).
+// Each round goes over (G_HELI_SHOT) and is fired again from the copy, tracer, flash and sound. The round names no
+// shooter, so here it hurts only what this game owns (copies of the other game's people and cars let such hits by):
+// every bullet hits once, in the game of what it hits.
+using RoundFn = void(__cdecl*)(const CVector*, const CVector*, int);
+RoundFn g_origHeliRound = nullptr;
+
+CVehicle* HeliAt(const CVector& gun) {  // the gun is 3.6 m from its helicopter's centre
+    CPoolHeader* pool = VehiclePool();
+    CVehicle* best = nullptr;
+    float bestD = 6.0f;
+    for (int i = 0; pool && i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        auto* v = (CVehicle*)(pool->objects + (size_t)i * kVehiclePoolElemSize);
+        if (v->VehicleSubClass() != VEHICLE_TYPE_HELI) continue;
+        if (float d = (v->GetPosition() - gun).Length(); d < bestD) bestD = d, best = v;
+    }
+    return best;
+}
+
+void __cdecl HookHeliRound(const CVector* start, const CVector* end, int damage) {
+    g_origHeliRound(start, end, damage);
+    if (!Net().Online() || !core::IsPlayerReady()) return;
+    CVehicle* heli = HeliAt(*start);
+    NetVehicle* nv = heli ? Vehicles::Instance().Find(heli) : nullptr;
+    if (!nv || Vehicles::Instance().IsMirror(*nv)) return;
+    CVector gun = *start - heli->GetPosition();
+    Writer w(proto::G_HELI_SHOT);
+    w.U16(nv->netId);
+    w.Vec({gun.x, gun.y, gun.z});
+    w.Vec({end->x, end->y, end->z});
+    w.U8((uint8_t)std::clamp(damage, 0, 255));
+    Net().Send(proto::CH_RELIABLE, w);
+    static uint64_t saidMs = 0;
+    if (NowMs() - saidMs > 5000) saidMs = NowMs(), LOGD("Helicopter %04X fires: sent", nv->netId);
+}
+
+void HandleHeliShot(uint8_t, Reader& r) {
+    uint16_t id = r.U16();
+    Vec3 g = r.Vec(), e = r.Vec();
+    int damage = r.U8();
+    NetVehicle* nv = r.Ok() && core::IsPlayerReady() ? Vehicles::Instance().Find(id) : nullptr;
+    if (!nv || !Vehicles::Instance().IsMirror(*nv) || !IsVehicleValid(nv->veh) ||
+        nv->veh->VehicleSubClass() != VEHICLE_TYPE_HELI)
+        return;
+    CVector gun{g.x, g.y, g.z}, start = nv->veh->GetPosition() + gun, end{e.x, e.y, e.z};
+    if (!(gun.Length() < 10.0f) || !((end - start).Length() < 300.0f)) return;  // NaN fails these too
+    Call<0x73AF00>(&start, &end, damage);                       // FireOneInstantHitRound
+    CallMethod<0x506F40>((void*)0xB6BC90, 0x91, 0x1F, nv->veh);  // CAudioEngine::ReportWeaponEvent: its gun's sound
+    static uint64_t saidMs = 0;
+    if (NowMs() - saidMs > 5000) saidMs = NowMs(), LOGD("Helicopter %04X of the other game fires here", id);
+}
+
 void ShootJets() {
     for (auto it = g_jets.begin(); it != g_jets.end();) {
         NetVehicle* nv = Vehicles::Instance().Find(it->first);
@@ -418,8 +516,11 @@ public:
         mem::HookFn(0x736A50, &HookAddExplosion, &g_origAddExplosion, "CExplosion::AddExplosion");
         Net().SetHandler(proto::G_EXPLOSION, &HandleExplosion);
         mem::HookFn(0x737C80, &HookAddProjectile, &g_origAddProjectile, "CProjectileInfo::AddProjectile");
+        mem::HookFn(0x5660B0, &HookUseDetonator, &g_origUseDetonator, "CWorld::UseDetonator");
         Net().SetHandler(proto::G_PROJECTILE, &HandleProjectile);
         mem::HookFn(0x728CB0, &HookWaterCannon, &g_origWaterCannon, "CWaterCannons::UpdateOne");
+        mem::RedirectCallFn(0x6C7773, &HookHeliRound, &g_origHeliRound);  // CHeli::ProcessControl -> FireOneInstantHitRound
+        Net().SetHandler(proto::G_HELI_SHOT, &HandleHeliShot);
         Net().SetHandler(proto::G_WATER_CANNON, [](uint8_t, Reader& r) {
             uint16_t id = r.U16();
             Vec3 at = r.Vec(), v = r.Vec();
@@ -456,6 +557,7 @@ public:
     void OnPostProcess() override {
         if (!Net().Online() || !core::IsPlayerReady() || NowMs() - g_scanMs < 200) return;
         g_scanMs = NowMs();
+        DropCharges(nullptr, CVector{}, 1e9f);  // the copy of their thrower is gone: a projectile slot (32 in all) held for good
         // copies whose fire went out here by itself (water, the entity died) stay out; put out by this player, the
         // owner's goes out too
         for (auto it = g_copies.begin(); it != g_copies.end();) {

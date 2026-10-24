@@ -207,7 +207,10 @@ void Scan() {
         }
         bool changed = t->remote || stage != t->stage || moved != t->moved || moving != t->moving ||
                        (moved && !moving && (at - t->pos).Length() > 0.1f);
-        if (!changed && !(moving && now - t->sentMs >= 100)) continue;
+        // a loose one that hardly moves (rocking on a slope, bobbing in the water: the game never makes it static again)
+        // went out ten times a second for as long as it lay there; such goes once a second
+        bool stirring = moving && ((at - t->pos).Length() > 0.05f || ((CPhysical*)o)->TurnSpeed().Length() > 0.002f);
+        if (!changed && !(moving && now - t->sentMs >= (stirring ? 100u : 1000u))) continue;
         if (sends >= kMaxSendsPerScan) continue;
         ++sends;
         if (t->remote) LOGD("World object %d at %.1f,%.1f: ours now", t->model, origin.x, origin.y);

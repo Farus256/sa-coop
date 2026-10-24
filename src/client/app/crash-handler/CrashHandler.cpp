@@ -132,6 +132,27 @@ LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* ep) {
     return r;
 }
 
+// CStreaming's two read channels (ms_channel 0x8E4A60, 0x98 bytes each; ms_channelError 0x8E4B90) and the first
+// model each one reads (CStreamingInfo 0x14 bytes from 0x8E4CC0: img +7, sector +8, size +0xC). A read that keeps
+// failing holds the game in CStreaming::RetryLoadFile for good: these name the file it waits for.
+void WriteStreaming(FILE* f) {
+    fprintf(f, "Streaming: channel error %d\r\n", *(volatile int32_t*)0x8E4B90);
+    for (int c = 0; c < 2; ++c) {
+        auto* ch = (volatile const uint8_t*)(0x8E4A60 + c * 0x98);
+        int model = *(volatile const int32_t*)ch;
+        fprintf(f, "  channel %d: state %d, sector %08X, %d sectors, tries %d, status %d, model %d", c,
+                *(volatile const int32_t*)(ch + 0x80), (unsigned)*(volatile const int32_t*)(ch + 0x88),
+                *(volatile const int32_t*)(ch + 0x8C), *(volatile const int32_t*)(ch + 0x90), *(volatile const int32_t*)(ch + 0x94),
+                model);
+        if (model >= 0 && model < 26316) {
+            auto* info = (volatile const uint8_t*)(0x8E4CC0 + model * 0x14);
+            fprintf(f, " (img %u, sector %d, size %d, state %u)", info[7], *(volatile const int32_t*)(info + 8),
+                    *(volatile const int32_t*)(info + 0xC), info[0x10]);
+        }
+        fprintf(f, "\r\n");
+    }
+}
+
 void DumpThread(DWORD tid, const char* why) {
     HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
     if (!th) return;
@@ -159,6 +180,7 @@ void DumpThread(DWORD tid, const char* why) {
         fprintf(f, "\r\n==== %s - %02d:%02d:%02d - main thread %s ====\r\nEIP %s ESP=%08X EBP=%08X\r\n", COOP_NAME,
                 st.wHour, st.wMinute, st.wSecond, why, where, (unsigned)ctx.Esp, (unsigned)ctx.Ebp);
         WriteStack(f, stack, size);
+        WriteStreaming(f);
         fclose(f);
     }
     LOGE("Main thread %s at %s - stack written to crash.log", why, where);

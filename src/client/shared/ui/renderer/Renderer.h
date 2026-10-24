@@ -69,6 +69,8 @@ public:
     // UI scale relative to 1080p.
     float Scale() const { return m_height / 1080.0f; }
     bool Ready() const { return m_ready; }
+    // nothing drawn shows (the frame's callers still run): a clean picture to record
+    void SetHidden(bool hidden) { m_hidden = hidden; }
 
     // A picture: ARGB pixels (straight alpha, rows top-down) that stay the caller's (static data). Its texture is made
     // when it is first drawn, and again after a device reset. Drawn stretched into the rectangle, tinted.
@@ -131,6 +133,7 @@ private:
     int m_fontHeightFor = 0;  // screen height the atlases were built for
     bool m_ready = false;
     bool m_inFrame = false;
+    bool m_hidden = false;
 };
 
 Renderer& Gfx();

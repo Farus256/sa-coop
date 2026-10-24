@@ -123,6 +123,7 @@ void OnFootState::Write(Writer& w) const {
     w.U8(weapon);
     w.U16(ammo);
     w.U16(flags);
+    w.U8(flags2);
     w.I8(area);
     w.U8(moveState);
     w.U8(wanted);
@@ -153,6 +154,7 @@ bool OnFootState::Read(Reader& r) {
     weapon = r.U8();
     ammo = r.U16();
     flags = r.U16();
+    flags2 = r.U8();
     area = r.I8();
     moveState = r.U8();
     wanted = r.U8();

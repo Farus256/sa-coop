@@ -40,13 +40,44 @@ bool IsCopy(CEntity* e) {
 
 bool g_injecting = false;  // this module starts a line on a copy
 
+// the other player whose camera is within the 40 m a line is heard from p, in the same area
+const RemotePlayer* HearerOf(const CVector& p, int8_t area) {
+    for (auto& [id, rp] : Players::Instance().All())
+        if (rp.hasState && NowMs() - rp.stateRecvMs < 1500 && rp.state.area == area &&
+            (p - (rp.state.pos + rp.state.cam.sourceOffset)).Length() < kHeardWithin)
+            return &rp;
+    return nullptr;
+}
+
 using SayFn = int16_t(__fastcall*)(void*, void*, int, int16_t, uint32_t, float, uint8_t, uint8_t, uint8_t);
 SayFn g_origSay = nullptr;
 int16_t __fastcall HookAddSayEvent(void* s, void* edx, int event, int16_t ctx, uint32_t delay, float probability,
                                    uint8_t overrideSilence, uint8_t forceAudible, uint8_t frontEnd) {
-    if (Net().Online() && IsCopy(Field<CEntity*>(s, 0x04))) return -1;  // CAEAudioEntity::m_pEntity
+    auto* e = Field<CEntity*>(s, 0x04);  // CAEAudioEntity::m_pEntity
+    if (Net().Online() && IsCopy(e)) return -1;
     // a player who plays a Grove Street homie (SkinChoice) is not CJ: CJ's voice lines are not his
-    if (auto* e = Field<CEntity*>(s, 0x04); e && e == (CEntity*)FindPlayerPed(0) && e->ModelIndex() != 0) return -1;
+    if (e && e == (CEntity*)FindPlayerPed(0) && e->ModelIndex() != 0) return -1;
+    // A line is started only within 40 m of this game's camera: our ped next to the other player but far from us said
+    // nothing to him (no "watch it" when he bumped it, no gang taunts). It starts as if our camera were his, and
+    // G_PED_SPEECH plays it there; here it is too far away to be heard.
+    // shortcut: TheCamera's position is moved for the call (one thread); I_AddSayEvent with a hearer of its own would not
+    // CPlaceable::GetPosition: the matrix's, or the simple transform's when the camera has none
+    auto* matrix = Field<CMatrix*>((void*)addr::TheCamera, 0x14);  // CPlaceable::m_matrix
+    CVector& camera = matrix ? matrix->pos : Ref<CVector>(addr::TheCamera + 0x04);
+    if (Net().Online() && e && e->IsPed() && e != FindPlayerPed(0) && !frontEnd && (e->GetPosition() - camera).Length() >= kHeardWithin)
+        if (NetPed* np = Peds::Instance().Find((CPed*)e); np && np->owner == Net().MyId())
+            if (const RemotePlayer* rp = HearerOf(e->GetPosition(), ((CPed*)e)->AreaCode())) {
+                CVector ours = camera;
+                camera = rp->state.pos + rp->state.cam.sourceOffset;
+                int16_t r = g_origSay(s, edx, event, ctx, delay, probability, overrideSilence, forceAudible, frontEnd);
+                camera = ours;
+                static uint64_t refusedMs = 0;  // a line the game refuses comes again every frame
+                if (r >= 0 || NowMs() - refusedMs > 1000) {
+                    if (r < 0) refusedMs = NowMs();
+                    LOGD("Ped %04X speaks by player %d (context %d): %d", np->netId, rp->id, ctx, r);
+                }
+                return r;
+            }
     return g_origSay(s, edx, event, ctx, delay, probability, overrideSilence, forceAudible, frontEnd);
 }
 

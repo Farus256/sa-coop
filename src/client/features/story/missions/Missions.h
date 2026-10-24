@@ -16,4 +16,10 @@ bool CutsceneSkipDecline();
 // what the skip button does in a cutscene (debug bot)
 void CutsceneSkipPress();
 
+// a side activity's call to play it together: the line for the box ("Lesha зовёт вас на совместное задание в такси",
+// "Позвать Lesha на совместное задание в такси?") and the keys to answer; empty when there is nothing to say
+std::string SideCallText(std::string& hint);
+// Y (yes) or N: answers the call, or makes it. False when there was nothing to answer (the key goes on to the game).
+bool SideCallKey(bool yes);
+
 }  // namespace coop

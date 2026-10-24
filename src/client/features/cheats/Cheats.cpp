@@ -2,9 +2,11 @@
 // does. Cheats that change the shared world (weather, game speed, traffic, pedestrians, themes, car behaviour) work in both
 // games: the other game applies the same cheat (CCheat::ApplyCheat), a switch only when its own state differs. Cheats
 // for the player alone (weapons, money, health, wanted level, vehicles, body, skills) stay in the game where they were
-// typed.
+// typed, and so do a theme's clothes and katana.
 // The host can forbid cheat codes in its game (the "No cheats" box in F9, no_cheats in coop.ini, /cheats on|off):
-// then no code works for anyone, the host included (CCheat::ApplyCheat does nothing), and the one who typed it is told.
+// then no code works for anyone, the host included, and the one who typed it is told. The keys still go into the typed
+// string (CCheat::DoCheats), but with the codes' hashes blanked for the call nothing matches; a code typed whole is
+// then recognised here and refused. (AddToCheatString applies a cheat by itself, not through CCheat::ApplyCheat.)
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -17,6 +19,7 @@
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "shared/game/Game.h"
+#include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
 #include "shared/ui/chat/Chat.h"
@@ -25,6 +28,7 @@ namespace coop {
 
 namespace {
 using namespace game;
+using game::script::Cmd;
 
 constexpr uintptr_t kCheatString = 0x969110;   // CCheat::m_CheatString[30], the newest key first
 constexpr uintptr_t kCheatsActive = 0x969130;  // CCheat::m_aCheatsActive[92]
@@ -173,14 +177,23 @@ std::string Describe(int id, const std::string& code, bool toggled, bool on) {
 
 // a cheat typed here: told once the game applied it (whether a switch went on or off shows only then)
 bool g_noCheats = false;      // the host's rule here
-bool g_applyingRemote = false;
 bool NoCheats() { return Net().Online() && (Net().IsHost() ? Cfg().noCheats : g_noCheats); }
 
-using ApplyCheatFn = void(__cdecl*)(int);
-ApplyCheatFn g_origApplyCheat = nullptr;
-void __cdecl HookApplyCheat(int id) {
-    if (NoCheats() && !g_applyingRemote) return;
-    g_origApplyCheat(id);
+using DoCheatsFn = void(__cdecl*)();
+DoCheatsFn g_origDoCheats = nullptr;
+void __cdecl HookDoCheats() {
+    if (!NoCheats()) return g_origDoCheats();
+    uint32_t keys[92];
+    memcpy(keys, (void*)0x8A5CC8, sizeof keys);  // CCheat::m_aCheatHashKeys
+    memset((void*)0x8A5CC8, 0, sizeof keys);
+    g_origDoCheats();
+    memcpy((void*)0x8A5CC8, keys, sizeof keys);
+    const char* typed = (const char*)0x969110;  // CCheat::m_CheatString
+    int len = 0;
+    if (Matched(typed, &len) >= 0) {
+        Ref<uint8_t>(0x969110) = 0;  // gone, so that it is told once
+        ui::TheChat().AddError(TR("Чит-коды отключены хостом.", "The host turned cheat codes off."));
+    }
 }
 
 void SendRule(proto::PlayerMask to = proto::kAllPlayers) {
@@ -219,10 +232,6 @@ void __cdecl HookCheatCounted(uint16_t stat, float value) {
     std::string code(s, (size_t)len);
     std::reverse(code.begin(), code.end());  // the newest key is first
     g_typed = {true, id, Active(id), code};
-    if (NoCheats()) {  // ApplyCheat does nothing now
-        g_typed.pending = false;
-        ui::TheChat().AddError(TR("Чит-коды отключены хостом.", "The host turned cheat codes off."));
-    }
 }
 
 void Announce() {
@@ -252,9 +261,21 @@ void HandleCheat(uint8_t from, Reader& r) {
     std::string line = Format(TR("%s ввёл чит-код %s", "%s entered the cheat %s"), Net().PeerName(from).c_str(),
                               Describe(id, code, toggled, on).c_str());
     if (world && WorldCheat(id) && core::IsPlayerReady() && flow::InSharedWorld()) {
-        g_applyingRemote = true;
+        CPlayerPed* me = FindPlayerPed(0);
+        CPedClothesDesc look = *me->ClothesDesc();
+        int melee = me->Weapons()[1].type, current = me->ActiveWeapon().type;  // the hand weapon's slot
         if (OneShot(id) || Active(id) != on) Call<0x438370>(id);  // CCheat::ApplyCheat
-        g_applyingRemote = false;
+        // A theme dresses whoever applies it (the beach party, the gimp suit, the funhouse, country) and the ninja one
+        // arms him with a katana: the theme is the world's, the look and the katana the typing player's (original #43)
+        if (memcmp(me->ClothesDesc(), &look, sizeof look) != 0) {
+            *me->ClothesDesc() = look;
+            if (me->PedState() != 50) Call<0x5A82C0>(me, false);  // not PEDSTATE_DRIVING: CClothes::RebuildPlayer
+        }
+        if (int h = GetPedRef(me); me->Weapons()[1].type == 8 && melee != 8) {  // WEAPON_KATANA
+            Cmd(0x0555).I(h).I(8).Run();                      // REMOVE_WEAPON_FROM_CHAR
+            if (melee) Cmd(0x01B2).I(h).I(melee).I(1).Run();  // GIVE_WEAPON_TO_CHAR: its own back
+            Cmd(0x01B9).I(h).I(current).Run();                // SET_CURRENT_CHAR_WEAPON
+        }
         line += TR(" · действует и у вас", " · works for you too");
         LOGI("Cheat %d from player %d applied", id, from);
     }
@@ -263,6 +284,10 @@ void HandleCheat(uint8_t from, Reader& r) {
 
 // "/code HESOYAM": the letters go to the game as if typed on the keyboard
 void TypeCode(const std::string& text) {
+    if (NoCheats()) {
+        ui::TheChat().AddError(TR("Чит-коды отключены хостом.", "The host turned cheat codes off."));
+        return;
+    }
     if (!core::IsPlayerReady()) {
         ui::TheChat().AddError(TR("Чит-коды вводятся в игре.", "Cheats are entered in the game."));
         return;
@@ -288,7 +313,7 @@ public:
         mem::RedirectCallFn(0x438565, &HookCheatCounted, &g_origIncrementStat);  // in CCheat::AddToCheatString
         Net().SetHandler(proto::G_CHEAT, &HandleCheat);
         Net().SetHandler(proto::G_CHEAT_RULE, &HandleRule);
-        mem::HookFn(0x438370, &HookApplyCheat, &g_origApplyCheat, "CCheat::ApplyCheat");
+        mem::HookFn(0x439AF0, &HookDoCheats, &g_origDoCheats, "CCheat::DoCheats");
     }
     void OnSessionStart() override { SendRule(); }
     void OnSessionEnd() override { g_noCheats = false; }

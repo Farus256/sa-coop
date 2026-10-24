@@ -513,6 +513,12 @@ void SetEntityPosition(CEntity* e, const CVector& pos);
 // The light of an interior, as going through its door sets it (CEntryExit::TransitionFinished: the timecycle's extra
 // colour of the interior's own entrance nearest to pos), or none outside. For players moved there by our code.
 void LightArea(int area, const CVector& pos);
+// The street door into interior `area` whose inside door is in the same building as `inside` (one area holds many: all
+// the Bincos), the one nearest `hint` (where the player came from): a CEntryExit, or null. Going through it sets it on
+// the ped (CPed::m_pEnex: the radar centres on it, a death inside comes back by the hospital nearest it, the interior
+// manager starts the shop's scripts).
+void* StreetDoorOf(int area, const CVector& inside, const CVector& hint);
+CVector DoorSpot(void* enex);  // the middle of its entrance
 // World -> screen (game screen space = back buffer pixels). Returns false when behind the camera.
 bool WorldToScreen(const CVector& world, float& sx, float& sy, float& depth);
 // CPlayerInfo of a player ped (handles our remote player outside CWorld::Players).

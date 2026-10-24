@@ -5,6 +5,7 @@
 // CObject::ObjectDamage, and a copy breaks when the host's object did.
 #include <cmath>
 #include <map>
+#include <vector>
 
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
@@ -39,6 +40,10 @@ struct NetObject {
     int8_t area = 0;
     bool broken = false;
     bool adopted = false;  // partner: its world had this object already (the host's world brought it)
+    // attached to a vehicle in the host's game (a box in a van, a tarp on a train): there it never touches its vehicle,
+    // here a solid copy sat inside the vehicle's copy and lifted it ("Robbing Uncle Sam": the van floated)
+    bool attached = false;
+    float scale = 1.0f;  // CObject::m_fScale (SET_OBJECT_SCALE)
     uint64_t sentMs = 0;
 };
 
@@ -52,6 +57,13 @@ bool g_applying = false;  // a damage this module applies itself
 bool Alive(const NetObject& no) { return no.obj && IsObjectValid(no.obj) && GetObjectRef(no.obj) == no.handle; }
 bool Broken(CObject* o) { return !o->IsVisible() && !(o->Flags() & 1); }  // smashed: no rendering, no collision
 Quat RotationOf(CObject* o) { return o->Matrix() ? Quat::FromMatrix(*o->Matrix()) : Quat{}; }
+
+// the copy as the host's object: no collision while that rides attached, its size
+void ApplyRide(NetObject& no) {
+    if (!Alive(no) || Broken(no.obj)) return;
+    Cmd(0x0382).I(no.handle).I(no.attached ? 0 : 1).Run();  // SET_OBJECT_COLLISION
+    Field<float>(no.obj, 0x15C) = no.scale;                // CObject::m_fScale (CObject::PreRender scales it)
+}
 
 void Place(CObject* o, const CVector& pos, const Quat& rot) {
     CMatrix* m = o->Matrix();
@@ -72,6 +84,8 @@ void SendCreate(const NetObject& no, proto::PlayerMask to = proto::kAllPlayers) 
     no.rot.Write(w);
     w.I8(no.area);
     w.U8(no.broken);
+    w.U8(no.attached);
+    w.F32(no.scale);
     Net().SendTo(to, proto::CH_RELIABLE, w);
 }
 
@@ -107,6 +121,8 @@ void HostScan() {
             no.rot = RotationOf(o);
             no.area = o->AreaCode();
             no.broken = Broken(o);
+            no.attached = o->AttachedTo() != nullptr;
+            no.scale = Field<float>(o, 0x15C);
             no.sentMs = NowMs();
             g_owned[no.netId] = no;
             SendCreate(no);
@@ -132,16 +148,22 @@ void HostScan() {
             Quat rot = RotationOf(no.obj);
             float turn = std::fabs(rot.x - no.rot.x) + std::fabs(rot.y - no.rot.y) + std::fabs(rot.z - no.rot.z) +
                          std::fabs(rot.w - no.rot.w);
+            bool attached = no.obj->AttachedTo() != nullptr;
+            float scale = Field<float>(no.obj, 0x15C);
             // and again every 2 s at rest: the state channel can lose the last one, and a pushed box stood half-way there
-            bool moved = (pos - no.pos).Length() > 0.02f || turn > 0.01f;
+            bool moved = (pos - no.pos).Length() > 0.02f || turn > 0.01f || attached != no.attached || scale != no.scale;
             if ((moved && NowMs() - no.sentMs >= 100) || NowMs() - no.sentMs >= 2000) {
                 no.pos = pos;
                 no.rot = rot;
+                no.attached = attached;
+                no.scale = scale;
                 no.sentMs = NowMs();
                 Writer w(proto::G_OBJ_SYNC);
                 w.U16(no.netId);
                 w.Vec({pos.x, pos.y, pos.z});
                 rot.Write(w);
+                w.U8(attached);
+                w.F32(scale);
                 Net().Send(proto::CH_STATE, w);
             }
         }
@@ -212,6 +234,7 @@ void CreatePending() {
         bool broken = no.broken;
         no.broken = false;
         NetObject& copy = g_mirrors[no.netId] = no;
+        ApplyRide(copy);
         if (broken) BreakCopy(copy, 0);
         LOGI("Mission object %04X (model %d) %s", no.netId, no.model, no.adopted ? "found here" : "copied");
     }
@@ -259,12 +282,62 @@ void __fastcall HookObjectDamage(CObject* o, void* edx, float damage, CVector* o
     g_origObjectDamage(o, edx, damage, origin, dir, damager, weapon);
 }
 
+// The host's mission asks whether its people and objects were photographed ("Badlands", "Photo Opportunity",
+// "Architectural Espionage"), and the partner's camera marked only their copies: the partner's game tells the host which.
+constexpr uint32_t kPedPhotographed = 1u << 18;  // CPed::bHasBeenPhotographed (the second flags)
+constexpr uint32_t kObjectPhotographed = 0x1000;  // CObject::bIsPhotographed
+using TakePhotoFn = bool(__fastcall*)(void*, void*, CEntity*, CVector*);
+TakePhotoFn g_origTakePhoto = nullptr;
+bool __fastcall HookTakePhotograph(void* weapon, void* edx, CEntity* owner, CVector* point) {
+    bool taken = g_origTakePhoto(weapon, edx, owner, point);  // false for the other player's camera (Players)
+    LOGD("Camera shot by %s: %s (camera mode %d)", owner == (CEntity*)FindPlayerPed(0) ? "us" : "another", taken ? "taken" : "none",
+         (int)cam::Mode());
+    if (!taken || !Net().Online() || Net().IsHost() || !core::IsPlayerReady()) return taken;
+    std::vector<uint16_t> peds, objects;
+    CPoolHeader* pool = PedPool();
+    for (int i = 0; pool && i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        auto* p = (CPed*)(pool->objects + (size_t)i * kPedPoolElemSize);
+        NetPed* np = Peds::Instance().Find(p);
+        if (!np || np->owner != Net().HostId() || !(p->PedFlags2() & kPedPhotographed) || peds.size() >= 100) continue;
+        p->PedFlags2() &= ~kPedPhotographed;  // told once
+        peds.push_back(np->netId);
+    }
+    for (auto& [id, no] : g_mirrors)
+        if (Alive(no) && (Field<uint32_t>(no.obj, 0x140) & kObjectPhotographed) && objects.size() < 100) {
+            Field<uint32_t>(no.obj, 0x140) &= ~kObjectPhotographed;
+            objects.push_back(id);
+        }
+    if (peds.empty() && objects.empty()) return taken;
+    Writer w(proto::G_PHOTO);
+    w.U8((uint8_t)peds.size());
+    for (uint16_t id : peds) w.U16(id);
+    w.U8((uint8_t)objects.size());
+    for (uint16_t id : objects) w.U16(id);
+    Net().Send(proto::CH_RELIABLE, w);
+    LOGI("Our photo holds %d of the host's people and %d of its objects", (int)peds.size(), (int)objects.size());
+    return taken;
+}
+
+void HandlePhoto(uint8_t from, Reader& r) {
+    if (!Net().IsHost() || !core::IsPlayerReady()) return;
+    int peds = 0, objects = 0;
+    for (int n = r.U8(); n > 0 && r.Ok(); --n)
+        if (CPed* p = Peds::Instance().FindOwned(r.U16()); p && r.Ok()) p->PedFlags2() |= kPedPhotographed, ++peds;
+    for (int n = r.U8(); n > 0 && r.Ok(); --n)
+        if (auto it = g_owned.find(r.U16()); r.Ok() && it != g_owned.end() && Alive(it->second))
+            Field<uint32_t>(it->second.obj, 0x140) |= kObjectPhotographed, ++objects;
+    LOGI("Player %d photographed %d of our people and %d of our objects", from, peds, objects);
+}
+
 class Objects : public Module {
 public:
     const char* Name() const override { return "Objects"; }
 
     void OnInstallHooks() override {
         mem::HookFn(0x5A0D90, &HookObjectDamage, &g_origObjectDamage, "CObject::ObjectDamage");
+        mem::RedirectCallFn(0x74278B, &HookTakePhotograph, &g_origTakePhoto);  // CWeapon::Fire, the camera (Players' too)
+        Net().SetHandler(proto::G_PHOTO, &HandlePhoto);
         Net().SetHandler(proto::G_OBJ_CREATE, [](uint8_t from, Reader& r) {
             NetObject no;
             no.netId = r.U16();
@@ -274,6 +347,9 @@ public:
             no.rot.Read(r);
             no.area = r.I8();
             no.broken = r.U8() != 0;
+            no.attached = r.U8() != 0;
+            no.scale = r.F32();
+            if (!std::isfinite(no.scale) || no.scale <= 0.0f || no.scale > 50.0f) no.scale = 1.0f;
             // not in the game yet (a partner waits in the menu): the host announces them again once it is (resync)
             if (!r.Ok() || from != Net().HostId() || Net().IsHost() || !core::IsPlayerReady()) return;
             if (!IsObjectModel(no.model)) {  // a model of a mod this game lacks: the streamer crashes on it
@@ -292,12 +368,22 @@ public:
             Vec3 p = r.Vec();
             Quat q;
             q.Read(r);
+            bool attached = r.U8() != 0;
+            float scale = r.F32();
             if (!r.Ok() || from != Net().HostId() || !core::IsPlayerReady()) return;
+            if (!std::isfinite(scale) || scale <= 0.0f || scale > 50.0f) scale = 1.0f;
             if (auto it = g_pending.find(id); it != g_pending.end()) {
                 it->second.pos = {p.x, p.y, p.z};
                 it->second.rot = q;
+                it->second.attached = attached;
+                it->second.scale = scale;
             } else if (auto m = g_mirrors.find(id); m != g_mirrors.end() && Alive(m->second)) {
                 Place(m->second.obj, {p.x, p.y, p.z}, q);
+                if (m->second.attached != attached || m->second.scale != scale) {
+                    m->second.attached = attached;
+                    m->second.scale = scale;
+                    ApplyRide(m->second);
+                }
             }
         });
         Net().SetHandler(proto::G_OBJ_REMOVE, [](uint8_t from, Reader& r) {

@@ -11,8 +11,10 @@
 //    played before joining, else its newest save) instead of keeping the host's CJ the world came with.
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 #include <map>
+#include <tuple>
 #include <vector>
 
 #include "common/api/protocol/Protocol.h"
@@ -39,14 +41,20 @@ using namespace game;
 using game::script::Cmd;
 
 constexpr uint32_t kProfileMagic = 0x46504353;  // "SCPF"
-constexpr uint16_t kProfileVersion = 4;  // 2: the rewards of side missions (CPlayerInfo +0x14C..+0x152); 3: whose look;
-                                         // 4: the character chosen (SkinChoice)
+constexpr uint16_t kProfileVersion = 6;  // 2: the rewards of side missions (CPlayerInfo +0x14C..+0x152); 3: whose look;
+                                         // 4: the character chosen (SkinChoice, always the last field); 6: the gym's
+                                         // moves (CPed::m_nAllowedAttackMoves) and side activities (SideProgress), from
+                                         // the original's 0.3.0 (its own 4 and 5)
 constexpr uintptr_t kStatsBlock = 0xB79000;  // CStats::StatTypesInt + StatTypesFloat
 constexpr size_t kStatsSize = 0x4C8;
 // stats the world owns, not the player (CStats::StatTypesInt, id - 120): the profile keeps the values of the world it was
 // saved in, and laid over a newer one it took the city back (STAT_CITY_UNLOCKED: wanted stars over the bridges, the
 // hospitals, the radio) and the story's accomplished missions, gang strength and territory
-constexpr int kWorldStats[][2] = {{148, 148}, {180, 181}, {302, 342}};  // missions in game; no more hurricanes, city; story
+constexpr int kWorldStats[][2] = {{146, 148}, {180, 181}, {302, 342}};  // missions tried, passed, in game; no more hurricanes, city; story
+// and the story's progress (CStats::StatTypesFloat at +0x380: STAT_PROGRESS_MADE, STAT_TOTAL_PROGRESS): the menu's per cent
+// stood where the partner's profile began (3.21% for a whole story played together, issue #59)
+constexpr size_t kFloatStats = 0x380;
+constexpr int kWorldFloatStats = 2;
 constexpr size_t kClothesSize = sizeof(CPedClothesDesc);
 
 void RebuildPlayer(CPlayerPed* ped, bool keepDescFatMuscle) { Call<0x5A82C0>(ped, keepDescFatMuscle); }  // CClothes::RebuildPlayer
@@ -116,6 +124,150 @@ bool WearOwnLook(bool body) {
     return true;
 }
 
+// The side activities keep their progress in main.scm globals of the world (schools, jobs, the gym, exports, burglary),
+// and the host's world brought its own at every load: the partner's lessons, levels and medals started over, and the
+// unique stunt jumps paid again. The profile keeps them and puts them back, with what is engine state: the jumps, the
+// reward cars' generators and the assets' revenue pickups. Story globals, handles, the "running" flags and the
+// girlfriends stay the world's: their agent script redoes a date the world has not seen, moving the dating stats.
+struct GlobalRange {
+    uint16_t first, last;
+};
+constexpr GlobalRange kSideGlobals[] = {
+    {53, 53}, {86, 86}, {91, 92}, {94, 94}, {96, 98}, {100, 103}, {105, 105}, {107, 107}, {5187, 5187}, {7417, 7419},  // driving
+    {1962, 1967}, {1969, 1987}, {2162, 2162}, {2164, 2191}, {2201, 2201},  // boat and bike schools
+    {8159, 8159}, {8171, 8171}, {8174, 8180},                            // trucking, quarry
+    {1487, 1493}, {180, 180}, {163, 163}, {8239, 8240}, {1900, 1900}, {1991, 1994},  // jobs done, taxi, freight, valet, ...
+    {8153, 8158}, {5347, 5349},                                          // gym: trainers beaten, styles, today's workout
+    {1049, 1049}, {1060, 1069}, {1076, 1117}, {1184, 1184}, {1790, 1791},  // exports, burglary
+};
+// the flight school's, only in a world whose story has passed "Learning to Fly" ($87): before that the school is the story's
+constexpr GlobalRange kFlightGlobals[] = {{1942, 1952}, {1954, 1955}, {1959, 1961}};
+// globals holding the reward cars' generators (an index into CTheCarGenerators::CarGeneratorArray, the same in both games)
+constexpr uint16_t kRewardGenerators[] = {5178, 5183, 5184, 5185, 5186, 1988, 1989, 1990, 2192, 2193, 2194, 2759, 2760};
+constexpr uint16_t kFlightGenerators[] = {1956, 1957, 1958, 5214};
+struct Asset {
+    uint16_t done;  // the global set when the job is done
+    float x, y, z;  // where its revenue pickup is (the job's own CREATE_PROTECTION_PICKUP)
+};
+constexpr Asset kAssets[] = {{1492, -82.269f, -1135.526f, 0.585f},   {1493, 818.258f, 853.887f, 10.806f},
+                             {1900, -1757.668f, 961.782f, 24.383f},  {1992, 1345.859f, -1757.432f, 13.008f},
+                             {1994, -2593.882f, 59.247f, 3.836f},    {1993, 1887.997f, 2073.008f, 10.555f}};
+constexpr uintptr_t kCarGenerators = 0xC27AD0;  // CTheCarGenerators::CarGeneratorArray: 500 x 0x20
+constexpr uintptr_t kStuntJumps = 0xA9A888;     // CStuntJumpManager::mp_poolStuntJumps: 256 x 0x44, +0x40 done, +0x41 found
+
+int32_t& Global(uint16_t n) { return Ref<int32_t>(addr::ScriptSpace + (uintptr_t)n * 4); }
+template <size_t N>
+bool Listed(const GlobalRange (&ranges)[N], uint16_t n) {
+    for (const GlobalRange& r : ranges)
+        if (n >= r.first && n <= r.last) return true;
+    return false;
+}
+template <size_t N>
+bool Listed(const uint16_t (&list)[N], uint16_t n) {
+    return std::find(std::begin(list), std::end(list), n) != std::end(list);
+}
+uint8_t* Generator(uint16_t global) {
+    int32_t i = Global(global);
+    return i >= 0 && i < 500 ? (uint8_t*)(kCarGenerators + (uintptr_t)i * 0x20) : nullptr;
+}
+// CPool<CStuntJump>: objects, byte map (bit 7: free), size
+uint8_t* StuntJump(int i) {
+    auto* pool = Ref<uint8_t*>(kStuntJumps);
+    if (!pool || i >= std::min(Ref<int32_t>((uintptr_t)pool + 8), 256) || (Ref<uint8_t*>((uintptr_t)pool + 4)[i] & 0x80)) return nullptr;
+    return Ref<uint8_t*>((uintptr_t)pool) + (size_t)i * 0x44;
+}
+// A jump is known by its place (start and end boxes, camera): its slot changes when the world is loaded again in the
+// same game (the pool's new entries go on from the last slot it gave out)
+uint32_t JumpKey(const uint8_t* j) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 0x3C; ++i) h = (h ^ j[i]) * 16777619u;
+    return h;
+}
+
+void WriteSideProgress(Writer& w) {
+    std::vector<uint16_t> globals;
+    for (const GlobalRange& r : kSideGlobals)
+        for (uint16_t n = r.first; n <= r.last; ++n) globals.push_back(n);
+    for (const GlobalRange& r : kFlightGlobals)
+        for (uint16_t n = r.first; n <= r.last; ++n) globals.push_back(n);
+    w.U16((uint16_t)globals.size());
+    for (uint16_t n : globals) w.U16(n), w.I32(Global(n));
+    std::vector<uint16_t> gens(std::begin(kRewardGenerators), std::end(kRewardGenerators));
+    gens.insert(gens.end(), std::begin(kFlightGenerators), std::end(kFlightGenerators));
+    w.U8((uint8_t)gens.size());
+    for (uint16_t g : gens) {
+        uint8_t* gen = Generator(g);
+        w.U16(g);
+        w.U16(gen ? *(uint16_t*)(gen + 0x1A) : 0);  // CCarGenerator::m_nGenerateCount: 0 off
+        w.U8(gen ? gen[0x0D] & 0x08 : 0);           // bPlayerHasAlreadyOwnedCar
+    }
+    std::vector<std::pair<uint32_t, uint8_t>> jumps;
+    for (int i = 0; i < 256; ++i)
+        if (const uint8_t* j = StuntJump(i)) jumps.push_back({JumpKey(j), (uint8_t)((j[0x40] ? 1 : 0) | (j[0x41] ? 2 : 0))});
+    w.U16((uint16_t)jumps.size());
+    for (auto [key, bits] : jumps) w.U32(key), w.U8(bits);
+}
+
+struct SideProgress {
+    std::vector<std::pair<uint16_t, int32_t>> globals;
+    std::vector<std::tuple<uint16_t, uint16_t, uint8_t>> generators;
+    std::vector<std::pair<uint32_t, uint8_t>> jumps;  // the jump's key, done (1) and found (2)
+};
+
+void ReadSideProgress(Reader& r, SideProgress& p) {
+    for (int n = r.U16(); n > 0 && n <= 4096 && r.Ok(); --n) {
+        uint16_t g = r.U16();
+        p.globals.push_back({g, r.I32()});
+    }
+    for (int n = r.U8(); n > 0 && r.Ok(); --n) {
+        uint16_t g = r.U16(), count = r.U16();
+        p.generators.push_back({g, count, r.U8()});
+    }
+    for (int n = r.U16(); n > 0 && n <= 256 && r.Ok(); --n) {
+        uint32_t key = r.U32();
+        p.jumps.push_back({key, r.U8()});
+    }
+}
+
+void ApplySideProgress(const SideProgress& p) {
+    bool flight = Global(87) == 1;  // the world's "Learning to Fly" passed: read before anything is written
+    int globals = 0, generators = 0, jumps = 0, done = 0, pickups = 0;
+    for (auto [n, v] : p.globals)  // only the listed ones: a profile is a file from the server
+        if (Listed(kSideGlobals, n) || (flight && Listed(kFlightGlobals, n))) Global(n) = v, ++globals;
+    for (auto [g, count, owned] : p.generators) {
+        uint8_t* gen = Listed(kRewardGenerators, g) || (flight && Listed(kFlightGenerators, g)) ? Generator(g) : nullptr;
+        if (!gen || !count || *(uint16_t*)(gen + 0x1A)) continue;  // only one the partner earned and the world has off
+        Cmd(0x014C).I(Global(g)).I(count > 100 ? 101 : count).Run();  // SWITCH_CAR_GENERATOR (101: for good)
+        gen[0x0D] |= owned & 0x08;
+        ++generators;
+    }
+    for (int i = 0; i < 256; ++i) {
+        uint8_t* j = StuntJump(i);
+        if (!j) continue;
+        uint32_t key = JumpKey(j);
+        for (auto [k, bits] : p.jumps)
+            if (k == key) j[0x40] = bits & 1, j[0x41] = (bits >> 1) & 1, ++jumps;
+        done += j[0x40] != 0;
+    }
+    if (!p.jumps.empty()) Ref<int32_t>(0xA9A8A0) = done;  // CStuntJumpManager::m_iNumCompleted: all done pays the bonus
+    // a job's asset pays through a revenue pickup kept in the save: the host's world has the host's only
+    for (const Asset& a : kAssets) {
+        if (!Global(a.done)) continue;
+        bool there = false;
+        for (int i = 0; i < 620 && !there; ++i) {
+            uintptr_t pu = 0x9788C0 + (uintptr_t)i * 0x20;  // CPickups::aPickUps: +0x10 x/y/z in eighths, +0x1C type
+            CVector at{Ref<int16_t>(pu + 0x10) / 8.0f, Ref<int16_t>(pu + 0x12) / 8.0f, Ref<int16_t>(pu + 0x14) / 8.0f};
+            there = Ref<uint8_t>(pu + 0x1C) == 16 && (at - CVector{a.x, a.y, a.z}).Length() < 3.0f;  // PICKUP_ASSET_REVENUE
+        }
+        if (there) continue;
+        int h = -1;
+        Cmd(0x04A6).F(a.x).F(a.y).F(a.z).I(2000).I(2000).Out(&h).Run();  // CREATE_PROTECTION_PICKUP, as the job's script
+        ++pickups;
+    }
+    LOGI("Side progress back: %d values, %d reward cars, %d stunt jumps (%d done), %d asset pickups", globals, generators,
+         jumps, done, pickups);
+}
+
 std::vector<uint8_t> CaptureProfile() {
     CPlayerPed* me = FindPlayerPed(0);
     CPlayerInfo& info = PlayerInfos()[0];
@@ -145,7 +297,9 @@ std::vector<uint8_t> CaptureProfile() {
     w.U8(perks[5]);  // m_bGetOutOfJailFree
     w.U8(perks[6]);  // m_bFreeHealthCare
     w.U8(LookIsOwn());
-    w.U16(skin::Worn());
+    w.U8(Field<uint8_t>(me, 0x72E));  // CPed::m_nAllowedAttackMoves
+    WriteSideProgress(w);
+    w.U16(skin::Worn());  // the last (ProfileCharacter)
     return w.Buffer();
 }
 
@@ -175,6 +329,9 @@ bool ApplyProfile(const std::vector<uint8_t>& blob, bool& lookOwn) {
     if (version >= 2)
         for (uint8_t& b : perks) b = r.U8();
     uint8_t own = version >= 3 ? r.U8() : 0;
+    uint8_t moves = version >= 6 ? r.U8() : 0;
+    SideProgress side;
+    if (version >= 6) ReadSideProgress(r, side);
     uint16_t character = version >= 4 ? r.U16() : 0;
     if (!r.Ok() || stats.size() != kStatsSize || clothes.size() != kClothesSize) return false;
     lookOwn = own != 0;
@@ -188,6 +345,8 @@ bool ApplyProfile(const std::vector<uint8_t>& blob, bool& lookOwn) {
     memcpy((void*)kStatsBlock, stats.data(), kStatsSize);
     for (const auto& range : kWorldStats)
         for (int id = range[0]; id <= range[1]; ++id) Ref<int32_t>(kStatsBlock + (uintptr_t)(id - 120) * 4) = world[id - 120];
+    for (int id = 0; id < kWorldFloatStats; ++id)
+        Ref<int32_t>(kStatsBlock + kFloatStats + (uintptr_t)id * 4) = world[kFloatStats / 4 + id];  // the floats' bits
     memcpy(me->ClothesDesc(), clothes.data(), kClothesSize);
     skin::Wear(0);
     RebuildPlayer(me, false);  // body from the profile's fat/muscle stats
@@ -202,12 +361,14 @@ bool ApplyProfile(const std::vector<uint8_t>& blob, bool& lookOwn) {
     }
     Cmd(0x01B9).I(h).I(0).Run();  // fists in hand
     me->FightingStyle() = fight;
+    if (version >= 6) Field<uint8_t>(me, 0x72E) = moves;
     info.maxHealth = maxHealth;
     info.maxArmour = maxArmour;
     if (version >= 2) {  // the host's rewards came with its world: the partner has its own
         uint8_t* own = (uint8_t*)&info + 0x14C;
         own[0] = perks[0], own[1] = perks[1], own[2] = perks[2], own[5] = perks[3], own[6] = perks[4];
     }
+    if (version >= 6) ApplySideProgress(side);
     return true;
 }
 
@@ -215,6 +376,7 @@ struct RemoteLook {
     std::vector<uint8_t> desc;
     uint16_t model = 0;    // a skin mod's player model (SET_PLAYER_MODEL), 0 = CJ in his clothes
     std::string special;   // a special character's (models 290-299 are filled by name, each game its own)
+    uint8_t style = 0, moves = 0;  // the gym's fighting style (CPed +0x72D, +0x72E): the copy fights as its owner does
     int appliedTo = -1;    // handle of the ped it was last rebuilt on: a respawned ped can reuse the old one's address
     uint64_t waitMs = 0;   // a special character asked for here since
 };
@@ -226,8 +388,12 @@ void HandleLook(uint8_t from, Reader& r) {
     std::vector<uint8_t> desc = r.Bytes(kClothesSize);
     uint16_t model = r.U16();
     std::string special = r.Str(16);
+    uint8_t style = r.U8(), moves = r.U8();
     if (!r.Ok() || desc.size() != kClothesSize || from == Net().MyId()) return;
     RemoteLook& l = g_looks[from];
+    if (l.style != style) LOGI("Player %d fights in style %d (moves %d)", from, style, moves);
+    l.style = style;
+    l.moves = moves;
     if (l.desc != desc || l.model != model || l.special != special) l.appliedTo = -1, l.waitMs = 0;
     l.desc = std::move(desc);
     l.model = model;
@@ -365,15 +531,19 @@ public:
             m_newcomers = 0;
             std::vector<uint8_t> desc((uint8_t*)me->ClothesDesc(), (uint8_t*)me->ClothesDesc() + kClothesSize);
             uint16_t model = me->ModelIndex();
-            bool lookAll = desc != m_sentLook || model != m_sentModel || now - m_lookSentMs > 30000;
+            uint16_t fight = me->FightingStyle() | Field<uint8_t>(me, 0x72E) << 8;
+            bool lookAll = desc != m_sentLook || model != m_sentModel || fight != m_sentFight || now - m_lookSentMs > 30000;
             if (lookAll || newcomers) {
                 Writer w(proto::G_PLAYER_LOOK);
                 w.Bytes(desc.data(), desc.size());
                 w.U16(model);
                 w.Str(model >= 290 && model <= 299 ? Peds::Instance().SpecialName(model) : std::string(), 16);
+                w.U8((uint8_t)fight);
+                w.U8((uint8_t)(fight >> 8));
                 Net().SendTo(lookAll ? proto::kAllPlayers : newcomers, proto::CH_RELIABLE, w);
                 m_sentLook = std::move(desc);
                 m_sentModel = model;
+                m_sentFight = fight;
                 if (lookAll) m_lookSentMs = now;
             }
             std::vector<uint8_t> stats((uint8_t*)kStatsBlock, (uint8_t*)kStatsBlock + kStatsSize);
@@ -390,6 +560,7 @@ public:
         // remote looks: rebuild the remote ped once per new description (on foot: the rebuild swaps its clump)
         for (auto& [id, l] : g_looks) {
             RemotePlayer* rp = Players::Instance().Get(id);
+            if (rp && rp->ped && l.style) rp->ped->FightingStyle() = l.style, Field<uint8_t>(rp->ped, 0x72E) = l.moves;
             if (!rp || !rp->ped || (rp->pedHandle == l.appliedTo && !rp->lookStale) || rp->ped->InVehicle()) continue;
             int model = l.model;
             if (model >= 290 && model <= 299) {  // here it is in whichever slot holds that name
@@ -401,6 +572,7 @@ public:
                 }
             }
             bool skin = model != 0 && Players::SetModel(rp->ped, model);
+            if (skin) Peds::Instance().SpecialWorn(model);
             if (!skin) {
                 Players::SetModel(rp->ped, 0);
                 memcpy(rp->ped->ClothesDesc(), l.desc.data(), kClothesSize);
@@ -438,6 +610,7 @@ public:
 private:
     std::vector<uint8_t> m_profile, m_saved, m_sentLook, m_sentStats;
     uint16_t m_sentModel = 0;
+    uint16_t m_sentFight = 0;
     bool m_profileReceived = false, m_applied = false;
     bool m_resetPending = false, m_reset = false;  // a new game emptied the profile: applied in the next world
     uint64_t m_lastSaveMs = 0, m_lastLookMs = 0, m_lookSentMs = 0, m_statsSentMs = 0, m_quietUntil = 0;

@@ -256,7 +256,7 @@ void NetClient::ThreadMain(std::string host, uint16_t port) {
                     connected = true;
                     m_state = State::Connected;
                     m_connectEvent = true;
-                    LOGI("Соединение с сервером установлено");
+                    LOGI("Соединение с сервером установлено (MTU %u)", peer->mtu);
                     break;
                 case ENET_EVENT_TYPE_DISCONNECT: {
                     LOGW("Соединение с сервером %s", connected ? "потеряно" : "не установлено");

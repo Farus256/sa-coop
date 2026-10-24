@@ -75,6 +75,8 @@ private:
     void TellToWait(Player& p);
     void SendProfile(Player& p);
     void SaveProfile(Player& p, const std::vector<uint8_t>& data);
+    void WriteProfiles();      // the profile writer's thread
+    void WaitProfileWrites();  // returns once what is queued is on the disk
     void ResetProfiles();
 
     // [id][payload] goes to the players of the mask (but the sender) as [id][sender][payload]
@@ -121,6 +123,9 @@ private:
         uint64_t lastMs = 0;
     };
     std::map<uint32_t, Failures> m_failures;  // by address: wrong passwords
+    std::mutex m_writeMutex;
+    std::map<std::wstring, std::vector<uint8_t>> m_profileWrites;  // the latest for each file, to be written
+    bool m_writing = false;                                         // the writer's thread runs
 };
 
 }  // namespace coop::server

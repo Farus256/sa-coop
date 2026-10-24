@@ -1,0 +1,4 @@
+#define COOP_FILE_DESCRIPTION "SA:COOP ASI plugin loader (vorbisFile.dll proxy)"
+#define COOP_ORIGINAL_NAME "vorbisFile.dll"
+#define COOP_FILE_TYPE VFT_DLL
+#include "common/config/version/VersionInfo.rc"

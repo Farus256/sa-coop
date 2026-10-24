@@ -2,8 +2,9 @@
 chcp 65001 >nul
 rem SA:COOP: installs the ASI loader when the game has none. Run it from the game folder.
 cd /d "%~dp0"
-if not exist gta_sa.exe (
-    echo Здесь нет gta_sa.exe. Распакуйте архив SA-COOP прямо в папку игры и запустите install.bat оттуда.
+rem the game's own files, not its exe: some builds name it otherwise (gta-sa.exe), issue #54
+if not exist models\gta3.img (
+    echo Здесь нет файлов игры. Распакуйте архив SA-COOP прямо в папку игры и запустите install.bat оттуда.
     pause
     exit /b 1
 )

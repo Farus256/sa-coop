@@ -72,6 +72,23 @@ void __cdecl HookCreateMissionTrain(CVector pos, bool clockwise, uint32_t kind, 
 
 bool IsEngine(CVehicle* v) { return IsVehicleValid(v) && v->IsTrain() && (Flags(v) & kFrontCarriage); }
 
+// CTrain::CreateMissionTrain without a node takes the nearest node of all four tracks (CTrain::FindClosestTrackNode,
+// 0x6F6BD0) and drops the track it is given. Track 3 runs a few metres beside the main line through Los Santos: a copy
+// made there went onto the other track, where the owner's rail distance is another place ("Catalyst": the partner saw
+// only the tarp). The nearest node of the owner's own track keeps it there.
+int NearestNode(int track, const CVector& p) {
+    int n = Ref<int32_t>(0xC38014 + (uintptr_t)track * 4);               // NumTrackNodes
+    auto* nodes = Ref<const uint8_t*>(0xC38024 + (uintptr_t)track * 4);  // pTrackNodes: x, y, z in 1/8 m, 10 bytes each
+    int best = -1;
+    float bestD = 1e30f;
+    for (int i = 0; nodes && i < n; ++i) {
+        auto* xyz = (const int16_t*)(nodes + (size_t)i * 10);
+        float dx = xyz[0] / 8.0f - p.x, dy = xyz[1] / 8.0f - p.y, dz = xyz[2] / 8.0f - p.z;
+        if (float d = dx * dx + dy * dy + dz * dz; d < bestD) bestD = d, best = i;
+    }
+    return best;
+}
+
 void SendGone(uint16_t id) {
     Writer w(proto::G_TRAIN);
     w.U8(TRAIN_GONE);
@@ -153,10 +170,18 @@ void HandleTrain(uint8_t from, Reader& r) {
         it = g_copies.end();
     }
     if (it == g_copies.end()) {
-        for (int model : kTrainModels) LoadModelNow(model);
+        CVector at{p.x, p.y, p.z};
+        int node = NearestNode(track, at);
+        if (node < 0) return;  // no such track here
+        // asked and streamed in the background, the copy comes with a later state: six blocking loads at once (the
+        // whole streaming queue flushed) were a freeze each time a train came within 300 m
+        bool loaded = true;
+        for (int model : kTrainModels)
+            if (!IsModelLoaded(model)) RequestModel(model), loaded = false;
+        if (!loaded) return;
         CVehicle *first = nullptr, *last = nullptr;
         g_copying = true;
-        g_origCreateTrain(CVector{p.x, p.y, p.z}, clockwise, kind, &first, &last, -1, track, true);
+        g_origCreateTrain(at, clockwise, kind, &first, &last, node, track, true);
         g_copying = false;
         if (!first) {
             LOGW("Train %d of player %d (kind %d, track %d) could not be copied here", id, from, kind, track);

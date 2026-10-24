@@ -4,7 +4,8 @@
 // it shares (Peds): the model, how the object hangs on the person, its own animation, size and visibility. The other
 // game hangs the same object on its copy of that person, without collision. Let go (the canopy on landing), the object
 // stays where the owner's is until that one is gone. A thing goes to the players within kPropRange of it only, and to one
-// that comes near later then; out of range its copy goes.
+// that comes near later then; out of range its copy goes. The things a side activity leaves lying about (the pool balls,
+// the shooting range's targets, the quarry's rocks) go over the same way, as loose objects.
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -13,6 +14,7 @@
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "entities/mission/Mission.h"
 #include "entities/ped/Peds.h"
 #include "entities/player/Players.h"
 #include "entities/vehicle/VehicleState.h"
@@ -227,6 +229,12 @@ void Scan() {
             if (np && np->owner == my) holders[ped] = {BY_PED, np->netId};
         }
 
+    // our side activity's objects (its mission script's list): the host's story mission's go with Objects.cpp
+    std::vector<int32_t> activity;
+    if (!(Net().IsHost() && HostReplicating()))
+        for (int i = 0; i < 75; ++i)
+            if (uintptr_t e = kMissionCleanUp + (uintptr_t)i * 8; Ref<uint8_t>(e) == 3) activity.push_back(Ref<int32_t>(e + 4));
+
     std::vector<std::pair<CObject*, Prop>> found;
     for (auto& [ped, who] : holders) {
         void* t = HoldTask((CPed*)ped);
@@ -254,8 +262,13 @@ void Scan() {
                 int model = o->ModelIndex();
                 bool roadblock = Field<uint8_t>(o, 0x13C) == 3 &&  // OBJECT_TEMPORARY (our copies are 6)
                                  (model == Ref<int16_t>(0x8CD57C) || model == Ref<int16_t>(0x8CD580));  // MI_DYN_ROADBARRIER_6, MI_LA_FUCKCAR1
+                // A side activity's things lying about: its script made them in this game only, and the other player
+                // saw the pool played on an empty table. Not the one in a hand (the cue): found above.
+                bool ours = !roadblock && !activity.empty() &&
+                            std::find(activity.begin(), activity.end(), GetObjectRef(o)) != activity.end() &&
+                            std::none_of(found.begin(), found.end(), [o](const auto& x) { return x.first == o; });
                 int8_t area = o->AreaCode() == 13 ? 0 : o->AreaCode();  // 13: seen in every area (the roadblock's are)
-                if (!roadblock || RemoteDistance(o->GetPosition(), area) > 150.0f) continue;
+                if (!(roadblock || ours) || RemoteDistance(o->GetPosition(), area) > 150.0f) continue;
                 Prop p;
                 p.by = BY_PLAYER;
                 p.hang = HANG_LOOSE;
@@ -314,7 +327,8 @@ void Scan() {
     }
     for (auto& [o, p] : found) {
         int h = GetObjectRef(o);
-        if (h < 0 || MissionObject(h)) continue;
+        // the host's story mission objects go with Objects.cpp; a side activity's (the pool cue) and the partner's only here
+        if (h < 0 || (MissionObject(h) && HostReplicating())) continue;
         uint16_t id = g_nextId++;
         if (!g_nextId) g_nextId = 1;
         Owned& ow = g_owned[id];

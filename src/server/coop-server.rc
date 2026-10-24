@@ -1,0 +1,7 @@
+#define COOP_FILE_DESCRIPTION "SA:COOP server"
+#define COOP_ORIGINAL_NAME "coop-server.exe"
+#define COOP_FILE_TYPE VFT_APP
+#include "common/config/version/VersionInfo.rc"
+
+1 ICON "coop-server.ico"
+1 24 "coop-server.manifest"  // RT_MANIFEST: an ordinary program, no administrator rights

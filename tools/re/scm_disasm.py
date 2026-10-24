@@ -66,15 +66,17 @@ def disasm_one(data, pos, cmds):
     variadic = c and any(i.get("type") == "arguments" for i in c.get("input", [])) or (c and n == -1)
     count = n if n >= 0 else 99
     i = 0
+    ended = False  # the 00 terminator already read (START_NEW_SCRIPT with no arguments for the script)
     while i < count:
         a, p = read_arg(data, p)
         if a is None:  # end of variadic arguments
+            ended = True
             break
         args.append(a)
         i += 1
         if variadic and i >= count:
             break
-    if variadic and n >= 0:  # remaining variadic arguments until the 00 terminator
+    if variadic and n >= 0 and not ended:  # remaining variadic arguments until the 00 terminator
         while p < len(data) and data[p] != 0:
             a, p = read_arg(data, p)
             args.append(a)

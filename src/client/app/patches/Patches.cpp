@@ -116,6 +116,14 @@ RECT MonitorRect(HWND hwnd) {
 
 bool g_borderlessSet = false;
 
+// a framed window keeps to the work area (a borderless one takes the monitor, AdjustWindow)
+RECT WindowArea() {
+    RECT area{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
+    return area;
+}
+LONG WindowStyle() { return WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE; }
+
 void AdjustWindow(HWND hwnd, int w, int h) {
     auto& cfg = Cfg();
     if (g_borderlessSet) {
@@ -130,11 +138,11 @@ void AdjustWindow(HWND hwnd, int w, int h) {
     LONG style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
     SetWindowLongW(hwnd, GWL_STYLE, style);
     SetWindowLongW(hwnd, GWL_EXSTYLE, 0);
+    if (!cfg.windowTitle.empty()) SetWindowTextW(hwnd, Utf8ToWide(cfg.windowTitle).c_str());
     RECT rc{0, 0, (LONG)w, (LONG)h};
     AdjustWindowRectEx(&rc, style, FALSE, 0);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    RECT work;
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    RECT work = WindowArea();
     int x = cfg.windowX, y = cfg.windowY;
     if (x < 0 || y < 0) {
         x = work.left + ((work.right - work.left) - ww) / 2;
@@ -147,10 +155,9 @@ void AdjustWindow(HWND hwnd, int w, int h) {
 
 // Picks the largest size with the requested aspect that fits into the work area together with the frame.
 void FitToWorkArea(int& w, int& h) {
-    RECT work;
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    RECT work = WindowArea();
     RECT frame{0, 0, 100, 100};
-    AdjustWindowRectEx(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+    AdjustWindowRectEx(&frame, WindowStyle() & ~WS_VISIBLE, FALSE, 0);
     int maxW = (work.right - work.left) - ((frame.right - frame.left) - 100);
     int maxH = (work.bottom - work.top) - ((frame.bottom - frame.top) - 100);
     if (w <= maxW && h <= maxH) return;
@@ -455,20 +462,33 @@ OpenFileMappingWFn g_origOpenFileMappingW = nullptr;
 std::string UniqueA(LPCSTR name) { return std::string(name) + "#sacoop" + std::to_string(GetCurrentProcessId()); }
 std::wstring UniqueW(LPCWSTR name) { return std::wstring(name) + L"#sacoop" + std::to_wstring(GetCurrentProcessId()); }
 
+// Only the objects of the game and of its plugins (from its folder) get the suffix. A program hooked into the game from
+// outside opens its object by name from its own process: OBS's game capture never found its CaptureHook_* mapping.
+bool FromGameFolder(void* caller) {
+    HMODULE mod = nullptr;
+    wchar_t path[MAX_PATH];
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)caller,
+                            &mod) ||
+        !GetModuleFileNameW(mod, path, MAX_PATH))
+        return true;
+    static const std::wstring dir = ModuleDir();
+    return _wcsnicmp(path, dir.c_str(), dir.size()) == 0;
+}
+
 HANDLE WINAPI HookCreateFileMappingA(HANDLE f, LPSECURITY_ATTRIBUTES sa, DWORD prot, DWORD hi, DWORD lo, LPCSTR name) {
-    if (!name) return g_origCreateFileMappingA(f, sa, prot, hi, lo, name);
+    if (!name || !FromGameFolder(__builtin_return_address(0))) return g_origCreateFileMappingA(f, sa, prot, hi, lo, name);
     return g_origCreateFileMappingA(f, sa, prot, hi, lo, UniqueA(name).c_str());
 }
 HANDLE WINAPI HookCreateFileMappingW(HANDLE f, LPSECURITY_ATTRIBUTES sa, DWORD prot, DWORD hi, DWORD lo, LPCWSTR name) {
-    if (!name) return g_origCreateFileMappingW(f, sa, prot, hi, lo, name);
+    if (!name || !FromGameFolder(__builtin_return_address(0))) return g_origCreateFileMappingW(f, sa, prot, hi, lo, name);
     return g_origCreateFileMappingW(f, sa, prot, hi, lo, UniqueW(name).c_str());
 }
 HANDLE WINAPI HookOpenFileMappingA(DWORD access, BOOL inherit, LPCSTR name) {
-    if (!name) return g_origOpenFileMappingA(access, inherit, name);
+    if (!name || !FromGameFolder(__builtin_return_address(0))) return g_origOpenFileMappingA(access, inherit, name);
     return g_origOpenFileMappingA(access, inherit, UniqueA(name).c_str());
 }
 HANDLE WINAPI HookOpenFileMappingW(DWORD access, BOOL inherit, LPCWSTR name) {
-    if (!name) return g_origOpenFileMappingW(access, inherit, name);
+    if (!name || !FromGameFolder(__builtin_return_address(0))) return g_origOpenFileMappingW(access, inherit, name);
     return g_origOpenFileMappingW(access, inherit, UniqueW(name).c_str());
 }
 
@@ -482,15 +502,15 @@ CreateMutexAFn g_origCreateMutexA = nullptr;
 // gta_sa.exe creates the streaming semaphore with the global name "CdStream": two game copies would
 // share one kernel object and steal each other's read requests (the second copy hangs while loading).
 HANDLE WINAPI HookCreateSemaphoreA(LPSECURITY_ATTRIBUTES sa, LONG init, LONG max, LPCSTR name) {
-    if (!name) return g_origCreateSemaphoreA(sa, init, max, name);
+    if (!name || !FromGameFolder(__builtin_return_address(0))) return g_origCreateSemaphoreA(sa, init, max, name);
     return g_origCreateSemaphoreA(sa, init, max, UniqueA(name).c_str());
 }
 HANDLE WINAPI HookCreateEventA(LPSECURITY_ATTRIBUTES sa, BOOL manual, BOOL initial, LPCSTR name) {
-    if (!name) return g_origCreateEventA(sa, manual, initial, name);
+    if (!name || !FromGameFolder(__builtin_return_address(0))) return g_origCreateEventA(sa, manual, initial, name);
     return g_origCreateEventA(sa, manual, initial, UniqueA(name).c_str());
 }
 HANDLE WINAPI HookCreateMutexA(LPSECURITY_ATTRIBUTES sa, BOOL owner, LPCSTR name) {
-    if (!name) return g_origCreateMutexA(sa, owner, name);
+    if (!name || !FromGameFolder(__builtin_return_address(0))) return g_origCreateMutexA(sa, owner, name);
     return g_origCreateMutexA(sa, owner, UniqueA(name).c_str());
 }
 
@@ -659,6 +679,16 @@ void Apply() {
     // registered in CWorld::Players[1] only while it is processed. CGameLogic::IsCoopGameGoingOn -> false
     static const uint8_t retFalse[] = {0x33, 0xC0, 0xC3};  // xor eax,eax; ret
     mem::Write(0x441390, retFalse, sizeof(retFalse));
+    // The split screen's leash, CGameLogic::IsPlayerAllowedToGoInThisDirection, held that registered copy 20 m from our
+    // player: walking, swimming or driving away it stood still and slid after its owner, and a jump away (25 m) never
+    // started, so a climb up a wall showed as a glide. Always allowed.
+    static const uint8_t retTrue[] = {0xB0, 0x01, 0xC3};  // mov al,1; ret
+    mem::Write(0x441E10, retTrue, sizeof(retTrue));
+    // CGameLogic::IsPlayerUse2PlayerControls looks at both CWorld::Players itself, so the copy, processed in its slot,
+    // aimed by the split screen's rules: crouched, the stick was turned by the camera onto the copy's own axes, a roll
+    // to the side came out as a crouched step whenever the copy faced a few degrees off its owner's camera, and its aim
+    // heading was set from the stick every frame, still or not (the copy shook while crouched and aiming). Never.
+    mem::Write(0x442020, retFalse, sizeof(retFalse));
 
     if (cfg.multiInstance) {
         mem::Write(0x7468E0, retFalse, sizeof(retFalse));  // IsAlreadyRunning -> false

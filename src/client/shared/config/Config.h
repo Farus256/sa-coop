@@ -33,11 +33,14 @@ struct ClientConfig {
     float drawDistance = 4.0f;        // the far clip and fog of the time cycle times this (1 = the game's own, 4 the most)
     float lodDistance = 3.0f;         // the menu's draw distance (models' detail range) times this (3 the most)
     int streamingMemoryMb = 512;      // CStreaming::ms_memoryAvailable at least this (the game's 50 MB fill fast)
+    std::string windowTitle;          // the window's caption (empty: the game's): tells two copies apart to a recorder
     bool multiInstance = false;       // allow several game copies (testing)
     bool runInBackground = true;      // keep simulating when the window is not focused
     bool noPauseMenu = true;          // the world keeps running while the pause menu is open
     std::string userDir;              // custom "GTA San Andreas User Files" directory (empty = auto)
     bool skipIntro = true;
+    bool partnerBlip = true;          // the other players' marks on the radar and the map
+    bool nameTags = true;             // their names, health and armour over their heads (off for a blind shoot-out)
 
     // [voice]
     bool voiceEnabled = true;
@@ -58,7 +61,9 @@ struct ClientConfig {
 
     // [debug]
     bool debugOverlay = false;
+    bool cleanScreen = false;         // the mod draws nothing over the game (chat, names, menus): video recording
     bool verboseLog = false;
+    bool firewallPrompt = true;       // hosting: ask Windows to let the server through its firewall (off in test setups)
     std::string serverData = "server-data";  // the hosted server's folder in coop\ (test setups keep theirs apart)
 
     std::wstring coopDir;             // directory with coop.dll (…\coop\)

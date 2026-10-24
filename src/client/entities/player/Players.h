@@ -38,6 +38,12 @@ struct RemotePlayer {
     game::CVector enterPos{};    // where its copy was getting into a car, and since when it has not moved from there
     uint64_t enterStillMs = 0;
     bool deadShown = false;     // the owner reported death and the local ped plays it
+    uint64_t deadSinceMs = 0;   // the owner's state said dead (its death animation may come a moment later)
+    int16_t dieAnim = -1;       // the default group's animation its player fell with (G_PLAYER_DEATH), and when
+    uint64_t dieMs = 0;
+    game::CVector streetPos;  // where its owner was last seen in the street (its door into an interior: F8)
+    int8_t doorArea = 0;      // the area its door (CPed::m_pEnex) was set for, and on which ped
+    game::CPed* doorPed = nullptr;
     uint64_t jetpackMs = 0;     // when it was last given the jetpack
     std::vector<uint8_t> stats; // owner's CStats block (G_PLAYER_STATS): used while the ped is processed
     uint64_t heardMs = 0;       // its last voice frame was played (set by the voice feature)
@@ -56,6 +62,15 @@ struct RemotePlayer {
     alignas(4) uint8_t data[0xAC] = {};
     bool hasData = false;
     uint64_t groupWaitLogMs = 0;
+    uint64_t climbMs = 0;       // the copy climbed a wall by itself (CTaskSimpleClimb) last then
+    bool animHeld = false;      // a full-body activity of its owner plays on it (Anims): its own tasks keep off it
+    uint64_t overlapMs = 0;     // since when it stands inside our player (KeepApart)
+    bool hiddenOnSpot = false;  // hidden while both stand on one scripted spot (or gone in through a door)
+    uint64_t doorMs = 0;        // its owner goes through a door since (F2_DOOR), facing doorHeading then
+    float doorHeading = 0;
+    int8_t doorFromArea = 0;  // the area it was in then
+    bool goneInDoor = false;    // it turned from the door on its way in: out of sight until it is inside
+    uint64_t walkSetMs = 0;     // its body's walk set last asked for (KeepWalkSet)
 };
 
 class Players : public Module {
@@ -105,7 +120,8 @@ private:
     void ApplyState(RemotePlayer& rp);
     void ApplyVehicleSeat(RemotePlayer& rp);
     void DrawNameTag(RemotePlayer& rp);
-    void KeepApart(game::CPed* other);
+    void KeepApart(RemotePlayer& rp);
+    void KeepWalkSet(RemotePlayer& rp);
     bool RideTrain(RemotePlayer& rp);
     bool FollowAttach(RemotePlayer& rp);
     bool RideVehicle(RemotePlayer& rp);
@@ -124,10 +140,12 @@ private:
     game::CVehicle* m_enterReported = nullptr;
     bool m_exitReported = false;
     uint64_t m_followAt = 0;
-    game::CVehicle* m_bikeFor = nullptr;  // the host's bike the partner got one for
+    game::CVehicle* m_bikeFor = nullptr;  // the host's vehicle (no seat left in it) the partner got one for
     int m_lastCar = -1;
     bool m_downed = false, m_reviving = false;
     uint8_t m_downSeconds = 0;
+    int8_t m_knockOffSaved = -1;  // our player's own knock-off setting while it rides behind on the other player's bike
+    bool m_deathSent = false;     // our player's death animation went out (G_PLAYER_DEATH)
 };
 
 // helpers shared with other modules
@@ -138,6 +156,10 @@ constexpr const char* kGetUpAnim = "getup";
 // too (CPed::AttachPedToEntity registers it, nothing ever cleans it up), and a player's collision back.
 void DetachPed(game::CPed* ped);
 int ActivePrimaryTaskType(game::CPed* ped, void** taskOut = nullptr);
+bool TaskWalks(game::CPed* ped);  // a go-to task walks it (a door's walk-in, a script's), not its pad
+// our player was put into interior `area` at `inside` by the mod (a teleport, a follow): the street door it came
+// through, as a door's use sets it (SET_CHAR_HAS_USED_ENTRY_EXIT); `from`: where it stood before
+void UseStreetDoor(int area, const game::CVector& inside, const game::CVector& from);
 // The people on their way into v stop, before v is deleted: some of their tasks use it unchecked once it is gone (the
 // door opened from outside, MTA guards 0x646026).
 void StopEntering(game::CVehicle* v);

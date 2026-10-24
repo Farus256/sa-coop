@@ -14,4 +14,10 @@ bool HostReplicating();
 // the script (CRunningScript) whose commands run right now, or null
 void* CurrentScript();
 
+// the host's story mission script (not a side activity's mission, not a thread)
+bool StoryMission(void* script);
+
+// the mission script that runs in this game (m_bIsMission), or null: on the partner always its own side activity
+void* RunningMission();
+
 }  // namespace coop

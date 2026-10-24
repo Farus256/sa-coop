@@ -6,6 +6,7 @@
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "entities/mission/Mission.h"
 #include "entities/session/Flow.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/game/Game.h"
@@ -115,6 +116,9 @@ public:
         }
         // weather ids index fixed tables: never take an out-of-range one from the network. The pair is the host's
         // hour's: at the turn of the hour one game is in the next hour first and keeps its own pair until the other is
+        // the partner's own side activity forcing its weather (the flight school's, the boat school's) keeps it: the
+        // host's, written over it every second, undid it
+        if (RunningMission() && ForcedWeather() != -1) return;
         if (h == ClockHours() && oldW >= 0 && oldW < kNumWeatherTypes && newW >= 0 && newW < kNumWeatherTypes) {
             OldWeather() = oldW;
             NewWeather() = newW;

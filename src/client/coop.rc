@@ -1,0 +1,4 @@
+#define COOP_FILE_DESCRIPTION "SA:COOP: co-op mod for GTA San Andreas"
+#define COOP_ORIGINAL_NAME "coop.asi"
+#define COOP_FILE_TYPE VFT_DLL
+#include "common/config/version/VersionInfo.rc"

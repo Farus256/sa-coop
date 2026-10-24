@@ -17,6 +17,7 @@ import concurrent.futures as futures
 import json
 import os
 import re
+from array import array
 import shutil
 import subprocess
 import sys
@@ -69,7 +70,8 @@ def targets(extra=()):
         "includes": COMMON_INC + ["src/client", "third_party/minhook/include"],
         "defines": ["-DCOOP_CLIENT"], "cflags": [],
         "deps": [common, ENET, MINHOOK],
-        "libs": ["-lws2_32", "-lwinmm", "-lgdi32", "-luser32", "-lkernel32", "-lole32", "-lshell32", "-luuid", "-ldbghelp"],
+        "libs": ["-lws2_32", "-lwinmm", "-lgdi32", "-luser32", "-lkernel32", "-lole32", "-loleaut32", "-lshell32", "-luuid",
+                 "-ldbghelp", "-lwinhttp"],
     }
     server = {
         "name": "server", "kind": "exe", "out": "coop-server.exe",
@@ -85,6 +87,7 @@ def targets(extra=()):
     loader = {
         "name": "loader", "kind": "dll", "out": "vorbisFile.dll",
         "sources": glob("src/loader", "**/*.cpp"),
+        "rc": glob("src/loader", "*.rc"),
         "includes": ["src"], "defines": [], "cflags": [], "deps": [],
         "libs": ["-lkernel32", "-luser32"],
         "ldflags": [str(ROOT / "src" / "loader" / "app" / "entry" / "vorbisFile.def")],
@@ -187,6 +190,26 @@ def compile_target(t, debug, pool, compdb):
     return ok, objs
 
 
+def file_version():
+    """COOP_VERSION_STR of Version.h as the four numbers of a version resource: "0.2.7" -> "0,2,7,0"."""
+    text = (ROOT / "src" / "common" / "config" / "version" / "Version.h").read_text(encoding="utf-8")
+    nums = re.search(r'#define\s+COOP_VERSION_STR\s+"([\d.]+)"', text).group(1).split(".")
+    return ",".join((nums + ["0"] * 4)[:4])
+
+
+def set_pe_checksum(path: Path):
+    """The PE header's checksum, as MSVC's /RELEASE fills it in (lld leaves 0): antiviruses' learned models count an
+    empty one, like debug sections named /4, among a threat's marks."""
+    data = bytearray(path.read_bytes())
+    off = int.from_bytes(data[0x3C:0x40], "little") + 24 + 64  # IMAGE_OPTIONAL_HEADER32::CheckSum
+    data[off:off + 4] = bytes(4)
+    total = sum(array("H", bytes(data) + bytes(len(data) % 2)))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    data[off:off + 4] = ((total + len(data)) & 0xFFFFFFFF).to_bytes(4, "little")
+    path.write_bytes(data)
+
+
 def link_target(t, debug, objs, dep_objs):
     outdir = BUILD / ("debug" if debug else "release") / "bin"
     outdir.mkdir(parents=True, exist_ok=True)
@@ -195,8 +218,8 @@ def link_target(t, debug, objs, dep_objs):
     for rc in t.get("rc", []):
         res = BUILD / ("debug" if debug else "release") / "obj" / t["name"] / (Path(rc).stem + ".res.o")
         res.parent.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run([str(WINDRES), "-I", str(ROOT / "src"), str(ROOT / rc), "-O", "coff", "-o", str(res)],
-                           cwd=ROOT, capture_output=True, text=True)
+        r = subprocess.run([str(WINDRES), "-I", str(ROOT / "src"), "-D", f"COOP_FILEVERSION={file_version()}",
+                            str(ROOT / rc), "-O", "coff", "-o", str(res)], cwd=ROOT, capture_output=True, text=True)
         if r.returncode != 0:
             print(r.stdout + r.stderr)
             return False
@@ -210,6 +233,8 @@ def link_target(t, debug, objs, dep_objs):
     pdb = out.with_suffix(".pdb")
     cmd = [str(CXX), "-m32", "-static", "-g", "-gcodeview", f"-Wl,--pdb={pdb}", "-Wl,--gc-sections",
            "-o", str(out)] + t.get("ldflags", []) + [str(o) for o in all_objs] + t["libs"]
+    if not debug:
+        cmd.insert(1, "-Wl,--strip-debug")  # the DWARF sections (/4, /67...): the PDB holds what crash reports need
     if t["kind"] == "dll":
         cmd.insert(1, "-shared")
     if t.get("gui"):
@@ -219,6 +244,8 @@ def link_target(t, debug, objs, dep_objs):
         print(r.stdout + r.stderr)
         print(f"  [{t['name']}] link FAILED")
         return False
+    if not debug:
+        set_pe_checksum(out)
     listing.write_text(linked)
     print(f"  [{t['name']}] -> {out.relative_to(ROOT)}")
     return True

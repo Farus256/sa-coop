@@ -17,6 +17,11 @@ void Shutdown();
 // that drops IP fragments): a reliable packet that never gets through ends the connection 10-20 s later. The two sides
 // agree on the smaller MTU of the two (the connect handshake), so either one setting this is enough.
 constexpr enet_uint32 kMtu = 1200;
+// Through a TURN relay the server went silent from its first large send (the world, a cutscene) until the connection
+// ended 10-14 s later (issues #14, #50): there ENet's smallest datagrams and a narrow window (the server keeps at most
+// 8 KB unacknowledged towards such a peer: ENet derives its window from the bandwidth the peer announces).
+constexpr enet_uint32 kRelayMtu = 576;
+constexpr enet_uint32 kRelayBandwidth = 128 * 1024;  // bytes/s
 
 // Packet flags for a channel: reliable channels get ENET_PACKET_FLAG_RELIABLE.
 uint32_t FlagsForChannel(uint8_t channel);

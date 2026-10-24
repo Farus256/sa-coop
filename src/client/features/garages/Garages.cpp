@@ -17,6 +17,7 @@
 #include "common/api/protocol/Protocol.h"
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
+#include "entities/mission/Mission.h"
 #include "entities/player/Players.h"
 #include "entities/session/Flow.h"
 #include "entities/vehicle/Vehicles.h"
@@ -243,15 +244,21 @@ struct Door {
 };
 Door g_doors[kMaxGarages];
 
-bool DoorShared(uint8_t t) { return (t >= 2 && t <= 5) || (t >= 36 && t <= 38); }  // bomb shops, Pay 'n' Spray, mod shops
+// The doors a script opens and shuts (mission garages, the burglary lockup BURG_LK, the script-controlled ones): during
+// the host's story mission they are its mission's, and the partner's followed nothing. "Home Invasion" opens the
+// lockup for the van: shut in the partner's game, the van's copy was driven into it and the partner fell through.
+bool ScriptDoor(uint8_t t) { return t == 1 || t == 14 || t == 15 || (t >= 19 && t <= 21) || t == 23; }
+bool DoorShared(uint8_t t) { return (t >= 2 && t <= 5) || (t >= 36 && t <= 38) || ScriptDoor(t); }  // + bomb shops, Pay 'n' Spray, mod shops
 
 // Whose game drives the door: the player's whose car is in the garage; else of the players within 30 m (a mod shop
 // keeps its door open that near) one in a car before one on foot, the nearer before the farther (in steps of 5 m),
 // the host before the others, a lower number before a higher one; 255: nobody near, each game its own. Every game
-// comes to the same answer from the players' places.
+// comes to the same answer from the players' places. A script's door during the host's mission: the host's game
+// drives it in every game; out of a mission each game's own scripts do.
 uint8_t Controller(void* g) {
     CPlayerPed* me = FindPlayerPed(0);
     if (!me) return 255;
+    if (ScriptDoor(TypeOf(g))) return HostMissionRecent(0) ? Net().HostId() : 255;
     CVector c{(Field<float>(g, 0x28) + Field<float>(g, 0x2C)) / 2, (Field<float>(g, 0x30) + Field<float>(g, 0x34)) / 2,
               Field<float>(g, 0x08)};  // the middle of its box (m_fLeftCoord..m_fBackCoord), on the floor
     struct Claim {
@@ -306,7 +313,8 @@ void __fastcall HookGarageUpdate(void* g, void* edx, int id) {  // CGarages::Upd
     } else {
         // ours again: left shut, a Pay 'n' Spray or a bomb shop would respray or arm our car wherever it is, take our
         // money and clear our wanted level
-        if (d.mirroring && TypeOf(g) <= 5 && state != STATE_OPEN && state != STATE_OPENING && state != STATE_OPEN_WAITING)
+        if (d.mirroring && TypeOf(g) >= 2 && TypeOf(g) <= 5 && state != STATE_OPEN && state != STATE_OPENING &&
+            state != STATE_OPEN_WAITING)
             state = STATE_OPENING;
         g_origGarageUpdate(g, edx, id);
     }

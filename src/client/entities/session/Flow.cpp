@@ -22,6 +22,7 @@
 #include "shared/game/Game.h"
 #include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
+#include "shared/lib/firewall/Firewall.h"
 #include "shared/ui/chat/Chat.h"
 
 namespace coop::flow {
@@ -97,14 +98,37 @@ void StopLeftoverServers(const std::wstring& exe) {
     CloseHandle(snap);
 }
 
+// Friends reach the server through Windows Firewall, and many could not ("the server does not answer", on a home
+// network too): its "Windows Security Alert" stays behind the full-screen game, and cancelled or unseen it leaves rules
+// that block coop-server.exe; ticked for private networks only, it does not let it through on a public one. The host
+// is asked for Windows' permission (its UAC prompt) to allow the server on every network instead, at each start of the
+// server while it is still kept out.
+void LetServerThroughFirewall(const std::wstring& exe) {
+    firewall::State state = firewall::Check(exe);
+    LOGI("Windows Firewall for the server: %s", state == firewall::State::Allowed   ? "allowed"
+                                                : state == firewall::State::Blocked ? "blocked"
+                                                : state == firewall::State::NoRule  ? "no rule for it"
+                                                                                    : "not readable");
+    if ((state != firewall::State::Blocked && state != firewall::State::NoRule) || !Cfg().firewallPrompt) return;
+    ui::TheChat().AddSystem(TR("Брандмауэр Windows не пропускает друзей к серверу. Подтвердите запрос Windows, и мод разрешит coop-server.exe.",
+                               "Windows Firewall keeps friends from the server. Confirm the Windows prompt and the mod will allow coop-server.exe."));
+    if (!firewall::AllowElevated(exe))
+        ui::TheChat().AddError(TR("Без этого разрешения друг не подключится. Разрешите coop-server.exe в брандмауэре Windows вручную.",
+                                  "Without it your friend cannot connect. Allow coop-server.exe in Windows Firewall yourself."));
+}
+
 bool StartServerProcess(const std::wstring& worldPath, bool newGame) {
     auto& cfg = Cfg();
     std::wstring exe = cfg.coopDir + L"coop-server.exe";
     if (!FileExists(exe)) {
-        Fail(TR("Нет файла coop\\coop-server.exe. Переустановите мод.", "The file coop\\coop-server.exe is missing. Reinstall the mod."));
+        Fail(TR("Нет файла coop\\coop-server.exe. Скорее всего, его удалил антивирус: добавьте папку игры в исключения "
+                "антивируса и распакуйте архив мода заново.",
+                "The file coop\\coop-server.exe is missing. Most likely an antivirus removed it: add the game folder to the "
+                "antivirus exclusions and unpack the mod again."));
         return false;
     }
     StopLeftoverServers(exe);
+    LetServerThroughFirewall(exe);
     std::wstring cmd = L"\"" + exe + L"\" --port " + std::to_wstring(g_port) + L" --data \"" + cfg.coopDir +
                        Utf8ToWide(cfg.serverData) + L"\" --name \"" + Utf8ToWide(cfg.nickname) + L"\" --host \"" +
                        Utf8ToWide(cfg.nickname) + L"\"";
@@ -124,14 +148,19 @@ bool StartServerProcess(const std::wstring& worldPath, bool newGame) {
     PROCESS_INFORMATION pi{};
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
-    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
-                        cfg.coopDir.c_str(), &si, &pi)) {
-        Fail(Format(TR("Не удалось запустить сервер (ошибка %lu).", "Could not start the server (error %lu)."), GetLastError()));
+    // Started running, not suspended to be put in the job first: a process made suspended and resumed is how malware
+    // hollows one out, and antiviruses watch for it. The server starts no process of its own before the job takes it.
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, cfg.coopDir.c_str(), &si, &pi)) {
+        DWORD err = GetLastError();
+        bool av = err == ERROR_VIRUS_INFECTED || err == ERROR_VIRUS_DELETED || err == ERROR_ACCESS_DENIED;
+        Fail(av ? Format(TR("Антивирус не дал запустить coop-server.exe (ошибка %lu). Добавьте папку игры в исключения антивируса.",
+                            "An antivirus kept coop-server.exe from starting (error %lu). Add the game folder to the antivirus exclusions."),
+                         err)
+                : Format(TR("Не удалось запустить сервер (ошибка %lu).", "Could not start the server (error %lu)."), err));
         return false;
     }
     // the server dies together with the game
     AssignProcessToJobObject(g_serverJob, pi.hProcess);
-    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     g_serverProcess = pi.hProcess;
     LOGI("Local server started (pid %lu)", pi.dwProcessId);
@@ -425,10 +454,18 @@ namespace {
 void LoadHostWorld(const std::vector<uint8_t>& data);
 
 // a reload must not cut into anything: on foot, alive, no cutscene, no mission here or at the host's
+int WantedLevel() {
+    void* wanted = game::Call<0x56E230, void*>(-1);  // FindPlayerWanted
+    return wanted ? game::Field<int32_t>(wanted, 0x2C) : 0;  // CWanted::m_nWantedLevel
+}
+
+// Casino tables, the barber's chair, a meal, the gym's machines, basketball and the dance raise no mission flag: the
+// world reloaded under them. The player's own control and its plain on-foot task (type 0) say it does nothing of that.
 bool SafeToReload() {
     game::CPlayerPed* me = game::FindPlayerPed(0);
     return core::IsPlayerReady() && me && !me->InVehicle() && me->Health() > 0.0f && !game::Ref<uint8_t>(0xB5F851) &&
-           !core::IsOnMission() && !HostMissionRecent(5000);
+           !core::IsOnMission() && !HostMissionRecent(5000) && game::GetPad(0)->DisablePlayerControls == 0 &&
+           ActivePrimaryTaskType(me) == 0 && WantedLevel() == 0;  // the host's world wipes the stars of a chase
 }
 
 void SaveSpot() {
@@ -485,8 +522,10 @@ void Update() {
     switch (g_phase) {
         case Phase::StartingServer:
             if (!ServerProcessAlive()) {
-                Fail(TR("Сервер не запустился. Возможно, порт уже занят. Подробности в файле coop\\server-data\\server.log.",
-                        "The server did not start. Perhaps the port is taken. See coop\\server-data\\server.log for details."));
+                Fail(TR("Сервер не запустился: порт уже занят, или его остановил антивирус. Подробности в файле "
+                        "coop\\server-data\\server.log, а если он пустой, добавьте папку игры в исключения антивируса.",
+                        "The server did not start: the port is taken, or an antivirus stopped it. See coop\\server-data\\server.log, "
+                        "and if it is empty, add the game folder to the antivirus exclusions."));
                 break;
             }
             if (NowMs() - g_phaseTime > 400) {

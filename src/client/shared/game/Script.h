@@ -110,5 +110,7 @@ enum : uint16_t {
 };
 
 bool Running();  // one of our commands runs now (a game function it calls may ask)
+// tests: our commands count as a mission script's (m_bIsMission) while on, as the host's mission would run them
+void AsMission(bool on);
 
 }  // namespace game::script

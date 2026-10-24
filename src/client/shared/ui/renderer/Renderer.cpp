@@ -351,6 +351,7 @@ void Renderer::SetTexture(IDirect3DTexture9* t) {
 }
 
 void Renderer::Quad(float x, float y, float w, float h, float u0, float v0, float u1, float v1, uint32_t c) {
+    if (m_hidden) return;
     x -= 0.5f;
     y -= 0.5f;
     Vertex a{x, y, 0, 1, c, u0, v0}, b{x + w, y, 0, 1, c, u1, v0}, d{x, y + h, 0, 1, c, u0, v1},
@@ -635,7 +636,7 @@ float Renderer::GameTextWidth(GameFont font, std::string_view ascii, float heigh
 
 void Renderer::GameText(GameFont font, float x, float y, std::string_view ascii, float height, uint32_t argb,
                         uint32_t flags) {
-    if (!m_inFrame || ascii.empty()) return;
+    if (!m_inFrame || m_hidden || ascii.empty()) return;
     if (flags & (TEXT_CENTER | TEXT_RIGHT)) {
         float w = GameTextWidth(font, ascii, height);
         x -= (flags & TEXT_CENTER) ? w * 0.5f : w;

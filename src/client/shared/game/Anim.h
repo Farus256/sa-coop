@@ -12,7 +12,8 @@ namespace game::anim {
 constexpr uintptr_t kHierarchies = 0xB4EA40;  // CAnimManager::ms_aAnimations, 0x18 bytes each
 constexpr uintptr_t kBlocks = 0xB5D4A0;       // CAnimManager::ms_aAnimBlocks, 0x20 bytes each
 constexpr int kIfpBase = 25575;               // streaming id of the first IFP resource
-constexpr uint16_t F_LOOPED = 0x2, F_AUTO_REMOVE = 0x4, F_PARTIAL = 0x10, F_BLOCK_REFERENCED = 0x4000, F_INDESTRUCTIBLE = 0x8000;
+constexpr uint16_t F_LOOPED = 0x2, F_AUTO_REMOVE = 0x4, F_PARTIAL = 0x10, F_SECONDARY = 0x1000, F_BLOCK_REFERENCED = 0x4000,
+                   F_INDESTRUCTIBLE = 0x8000;
 
 inline void* First(void* clump) { return clump ? Call<0x4D15E0, void*>(clump) : nullptr; }  // RpAnimBlendClumpGetFirstAssociation
 inline void* Next(void* a) { return Call<0x4D6AB0, void*>(a); }                              // RpAnimBlendGetNextAssociation

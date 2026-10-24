@@ -66,6 +66,7 @@ struct OnFootState {
     uint8_t weapon = 0;
     uint16_t ammo = 0;
     uint16_t flags = 0;  // F_*
+    uint8_t flags2 = 0;  // F2_*
     int8_t area = 0;
     uint8_t moveState = 0;
     uint8_t wanted = 0;  // stars, shown on the name tag
@@ -81,7 +82,9 @@ struct OnFootState {
         F_DOWNED = 1024,     // wounded, lying where it fell until someone revives it (downSeconds left)
         F_REVIVING = 2048,   // it is reviving a wounded player
         F_ON_VEHICLE = 4096, // it stands on a vehicle (a car's roof, a truck's back): onVeh, onLocal
+        F_TASK_WALK = 8192,  // a task walks it, not its pad (a door's walk-in, a script's go-to)
     };
+    enum : uint8_t { F2_DOOR = 1 };  // F2_DOOR: going through a door of an entrance (CEntryExitManager::ms_exitEnterState)
     // F_ON_VEHICLE: the vehicle's net id and the place in its own frame (the other games put it on their copy there)
     uint16_t onVeh = 0;
     game::CVector onLocal{};

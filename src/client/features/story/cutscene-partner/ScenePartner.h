@@ -11,7 +11,8 @@
 namespace coop::scene {
 
 // POSE_WALK: along with CJ, behind him to one side (act: 0 left, 1 right, 2 right behind), as his root track goes
-enum Pose : uint8_t { POSE_STAND, POSE_LEAN, POSE_SIT, POSE_STEP, POSE_HIDDEN, POSE_WALK };
+// POSE_CAR: riding in a car of the scene, Spot::ground in the car's own frame, Spot::act the car's cutscene object
+enum Pose : uint8_t { POSE_STAND, POSE_LEAN, POSE_SIT, POSE_STEP, POSE_HIDDEN, POSE_WALK, POSE_CAR };
 
 struct Spot {
     game::CVector ground;  // where the feet are

@@ -89,6 +89,9 @@ Cmd& Cmd::End() {
 
 bool Running() { return g_depth > 0; }
 
+bool g_asMission = false;
+void AsMission(bool on) { g_asMission = on; }
+
 bool Cmd::Run() {
     if (m_overflow) {
         LOGE("script::Cmd overflow (opcode %04X)", *(uint16_t*)m_code);
@@ -110,7 +113,7 @@ bool Cmd::Run() {
     memset(g_script, 0, sizeof(g_script));
     CallMethod<kRunningScriptInit>(reinterpret_cast<void*>(g_script));
     memcpy(g_script + kOffName, "coop", 5);
-    g_script[kOffIsMission] = 0;
+    g_script[kOffIsMission] = g_asMission ? 1 : 0;
     g_script[kOffUseMissionCleanup] = 0;
     Field<uint8_t*>(g_script, kOffBaseIP) = m_code;
     Field<uint8_t*>(g_script, kOffCurIP) = m_code;

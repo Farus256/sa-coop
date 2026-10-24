@@ -63,7 +63,12 @@ The host starts a mission, but it only begins once every partner nearby stands i
 texts, subtitles, radar blips, markers, race checkpoints and timers, and the texts come in the language of the
 partner's own game. The partner also hears the lines characters say during missions outside cutscenes. Weapons
 the mission gives CJ go to the partner as well. Both players get the mission reward. Enemies attack both of them,
-and either player can hurt them.
+and either player can hurt them. If the mission moves CJ somewhere else after a cutscene, the partner ends up next
+to the host. The mission's limits on the wanted level apply to both players, and the gates and buildings a mission
+opens or changes change for the partner too, as do the parts of the map a mission adds, such as the weed field
+in "Are You Going To San Fierro?". The partner can also take the photos a mission asks for. A partner
+killed during a mission comes back next to the host. If the host gets on a bike or into a vehicle with no seat
+left, the same kind of vehicle appears next to the partner.
 
 | The host stands in the marker | The partner sees that the host is waiting |
 |---|---|
@@ -89,7 +94,13 @@ same weather. Pedestrians chat and swear the same way for both, and police roadb
 by both. When one player drives away, the pedestrians and cars near the other one move over to the other
 player's game instead of vanishing. Knocked-down lamp posts and signs, broken glass and crates, fire, gang
 territories, the building doors a mission opens and the doors of Pay 'n' Spray and mod shops look the same for
-both. Horseshoes, oysters, snapshots and tags count toward the shared world.
+both. Horseshoes, oysters, snapshots and tags count toward the shared world. New pedestrians and cars no longer
+appear right in front of the other player. Gang members from the two players' games fight each other, the police
+chase whoever is wanted, and SWAT officers slide down ropes from the helicopter for both. Police officers move
+the same way on both screens: they hold a pistol in both hands, crouch to shoot and sidestep around their target.
+The police helicopter's gun fires on both screens, and police cars no longer vanish for the partner when the host
+dies. Bodies and wrecks thrown by explosions lie in the same places for both.
+Pool balls, shooting range targets and other activity objects are seen by both.
 
 | The host's screen | The partner's screen |
 |---|---|
@@ -115,10 +126,13 @@ off). CJ getting into a car by himself calls nobody. What the story asks of CJ s
 
 Food and the gym, weapon and driving skills, clothes, haircuts, tattoos, money and side job rewards are separate
 for each player. What a player does at a diner, the gym, a barber's or a tattoo parlour, the other player sees as
-well, along with a tray of food, a cigarette, a phone at the ear and an open parachute. If a player changes their character model, for example with a skin selector, the other player sees the new
+well, along with a tray of food, a cigarette, a phone at the ear, a parachute jump, a fighting style learned at the
+gym, crouching with its rolls, reloading and walking in through shop doors. If a player changes their character model, for example with a skin selector, the other player sees the new
 model too. The friend comes into the host's world as their own CJ, in the clothes and with the tattoos their CJ
 has in their own game. If the friend joined from the main menu, the look comes from their latest save. When the
-host saves the game, the friend's progress is saved on the host's side as well.
+host saves the game, the friend's progress is saved on the host's side as well. The partner's school lessons and
+medals, side job levels, gym, unique stunt jumps and businesses stay with the partner after the host's world is
+loaded again.
 
 | The host sees the partner | The partner sees the host |
 |---|---|
@@ -128,7 +142,7 @@ host saves the game, the friend's progress is saved on the host's side as well.
 
 Before creating the game, the host can allow friendly fire with a checkbox in the F9 window. Then the players can
 hurt and kill each other with bullets, fists, explosions, fire and cars. Without the checkbox they cannot harm
-each other.
+each other, and a stealth kill with a knife from behind does not work either. A player knocked down falls and gets up on both screens.
 
 ### Wounded, not dead
 
@@ -217,12 +231,16 @@ F9 window, and each player picks their own: the host can play in Russian while t
 ### Everything else
 
 Side jobs (taxi, paramedic, firefighter, vigilante, pimp), races, schools, the shooting range, trucking and the
-quarry are played by each player in their own game. There is text chat and voice chat, and the farther away the
+quarry are played by each player in their own game. A side job or a race can be played together: within 20 seconds
+of its start press Y, and the other player gets an invitation (Y: yes, N: no). Whoever accepts sees its markers,
+checkpoints, timers and hints, can ride along and help, for example put out burning cars or shoot the criminals, and
+gets the same money at its end. The job's levels stay with the player who started it. There is text chat and voice chat, and the farther away the
 partner is, the quieter they sound. A waypoint one player sets on the map shows up on the other player's radar,
 and a house one player buys appears for both. Above the partner's head you see their health, armour, weapon and
 wanted stars. Only the host starts turf wars, but both players' kills of rival gang members provoke them. Cheats
 for the weather, traffic, pedestrians and game speed work for both players, while weapon, money and health cheats
-only work for the player who typed them.
+only work for the player who typed them. Theme cheats such as the beach party change the pedestrians for both,
+but only the player who typed the code gets the outfit and the katana.
 
 ![Chat, voice and the player list on the partner's screen](docs/images/en/chat-voice.jpg)
 
@@ -261,6 +279,11 @@ The server tries to open its UDP port on the router through UPnP, and the host's
 worked. If not, forward the port (7788/UDP by default) on the router by hand. If the provider keeps the host behind
 CGNAT, the window says so too: then nobody can connect from the internet, and you need a public IP or a VPN such as
 Radmin or ZeroTier (friends then connect to the VPN address).
+
+When the host creates a game, the mod checks Windows Firewall. If it would keep friends from the server, Windows
+asks to allow changes, and after "Yes" the mod allows `coop-server.exe` on every network. Without that the friend
+sees "The server does not answer", even on a home network. If an antivirus removed or blocked `coop.asi` or
+`coop-server.exe`, add the game folder to its exclusions and unpack the archive again.
 
 ## Keys
 
@@ -393,3 +416,9 @@ licenses, and their texts are in `third_party` and in the `coop\licenses` folder
 
 SA:COOP is not affiliated with Rockstar Games or Take-Two Interactive. You need your own copy of GTA San Andreas,
 and the repository contains no game files.
+
+## Support a project
+
+<p align="left">
+  <a href="https://dalink.to/itscavalier"><img src="https://img.shields.io/badge/DonationAlerts-F57507?style=for-the-badge" alt="Support"></a>
+</p>

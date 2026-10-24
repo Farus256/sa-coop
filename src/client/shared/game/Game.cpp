@@ -97,6 +97,28 @@ bool WorldToScreen(const CVector& world, float& sx, float& sy, float& depth) {
 }
 void WorldRemove(CEntity* e) { Call<0x563280>(e); }
 
+CVector DoorSpot(void* enex) {
+    const float* r = &Ref<float>((uintptr_t)enex + 0x08);  // CEntryExit::m_recEntrance
+    return CVector{(r[0] + r[2]) * 0.5f, (r[1] + r[3]) * 0.5f, Ref<float>((uintptr_t)enex + 0x18)};  // m_fEntranceZ
+}
+
+void* StreetDoorOf(int area, const CVector& inside, const CVector& hint) {
+    auto* pool = Ref<CPoolHeader*>(0x96A7D8);  // CEntryExitManager::mp_poolEntryExits
+    void* best = nullptr;
+    float bestD = 1e30f;
+    for (int i = 0; area != 0 && pool && i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        uintptr_t e = (uintptr_t)pool->objects + (uintptr_t)i * 0x3C;
+        uintptr_t link = Ref<uintptr_t>(e + 0x38);  // m_pLink: the door on the other side
+        if (Ref<int8_t>(e + 0x32) != 0 || !link || Ref<int8_t>(link + 0x32) != area) continue;  // m_nArea: on the street
+        CVector in = DoorSpot((void*)link);
+        if ((in - inside).Length2D() > 150.0f) continue;  // another building of that area
+        float d = (DoorSpot((void*)e) - hint).Length2D();
+        if (d < bestD) bestD = d, best = (void*)e;
+    }
+    return best;
+}
+
 void LightArea(int area, const CVector& pos) {
     int sky = 0;
     float best = 150.0f * 150.0f;

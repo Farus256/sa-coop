@@ -1,7 +1,6 @@
 #include "shared/lib/core/Core.h"
 
 #include <windows.h>
-#include <d3d9.h>
 
 #include <algorithm>
 
@@ -100,6 +99,8 @@ void RenderOverlay() {
         g_screenshotPath.clear();
     }
     if (!g.Begin()) return;
+    // a recording takes the game's picture alone: the modules still run (the cutscene partner is placed from here)
+    g.SetHidden(Cfg().cleanScreen);
     ui::In().UpdateMouse(g.Width(), g.Height());
     if (IsPlayerReady())
         for (auto* m : Modules()) m->OnRender();
@@ -114,7 +115,7 @@ void RenderOverlay() {
     }
 }
 
-bool g_overlayDrawn = false;  // by the game's own last 2D call since the last Present
+bool g_overlayDrawn = false;  // by the game's own last 2D call this frame (DrawOverlayIfMissed clears it)
 
 void __cdecl HookDebugTextIngame() {
     if (g_origDebugTextIngame) g_origDebugTextIngame();
@@ -129,27 +130,32 @@ void __cdecl HookDebugTextMenu() {
 }
 
 // The overlay is drawn from the game's last 2D call (Idle -> CDebug::DebugDisplayTextBuffer). A plugin that took that
-// call without passing it on left a player with no chat, no F9 window and no address to give: after 30 frames
-// without it (in the menu or in the game, not on a loading screen) it is drawn at IDirect3DDevice9::Present instead.
-using PresentFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
-PresentFn g_origPresent = nullptr;
-HRESULT WINAPI HookPresent(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND wnd, const RGNDATA* dirty) {
-    static int missed = 0;
+// call without passing it on left a player with no chat, no F9 window and no address to give: then it is drawn
+// right before the frame's camera update ends. (Drawn at IDirect3DDevice9::Present it ran outside any RenderWare
+// camera and crashed the game on its loading screens, issue #46.)
+using CameraEndUpdateFn = void*(__cdecl*)(void*);
+CameraEndUpdateFn g_origEndUpdateIngame = nullptr, g_origEndUpdateMenu = nullptr;
+
+void DrawOverlayIfMissed() {
     static bool said = false;
-    int state = game::GameState();
-    if (g_overlayDrawn) {
-        g_overlayDrawn = false;
-        missed = 0;
-    } else if ((state == game::GAME_STATE_IDLE || state == game::GAME_STATE_FRONTEND_IDLE) && ++missed > 30 &&
-               SUCCEEDED(dev->BeginScene())) {
+    if (!g_overlayDrawn) {
         if (!said) {
             said = true;
-            LOGW("The overlay's draw call is not reached (another plugin took it): drawn at Present instead");
+            LOGW("The overlay's draw call is not reached (another plugin took it): drawn as the frame ends instead");
         }
         RenderOverlay();
-        dev->EndScene();
     }
-    return g_origPresent(dev, src, dst, wnd, dirty);
+    g_overlayDrawn = false;
+}
+
+void* __cdecl HookEndUpdateIngame(void* camera) {
+    DrawOverlayIfMissed();
+    return g_origEndUpdateIngame(camera);
+}
+
+void* __cdecl HookEndUpdateMenu(void* camera) {
+    DrawOverlayIfMissed();
+    return g_origEndUpdateMenu(camera);
 }
 
 void __cdecl HookShutDownForRestart() {
@@ -207,9 +213,6 @@ void CommonFrame() {
     if (g_lastCommonFrame == g_frameNo) return;
     g_lastCommonFrame = g_frameNo;
 
-    if (!g_origPresent)
-        if (auto* dev = (IDirect3DDevice9*)game::D3DDevice())
-            g_origPresent = (PresentFn)mem::SwapVTable(*(void***)dev, 17, (void*)&HookPresent);  // IDirect3DDevice9::Present
     if (!ui::In().Installed()) {
         if (void* hwnd = game::GameWindow()) {
             ui::In().Install(hwnd);
@@ -388,6 +391,7 @@ bool OnKeyDown(int vk, bool repeat) {
     if (ui::TheChat().IsOpen()) return true;
     if (repeat) return false;
     if (vk == VK_ESCAPE && CutsceneSkipDecline()) return true;  // "watch on", not the pause menu
+    if ((vk == 'Y' || vk == 'N') && !game::MenuActive() && SideCallKey(vk == 'Y')) return true;  // a side activity's call
     if (vk == VK_F9) {
         ui::SetConnectMenuVisible(true);
         return true;
@@ -448,6 +452,20 @@ static std::string ToAnsiPath(const std::wstring& w) {
     return s;
 }
 
+// The game opens its files by relative paths (CGame::Init2 reads ANIM\PED.IFP and crashes in RwStreamRead when it
+// can't): a current folder left elsewhere by a plugin or a dialog crashed every start of a game on its loading screen
+void KeepGameFolder() {
+    std::string root = (const char*)0xB71AE0;  // CFileMgr::ms_rootDirName: the folder the game started in, with '\'
+    while (root.size() > 3 && root.back() == '\\') root.pop_back();
+    char cur[MAX_PATH];
+    DWORD n = GetCurrentDirectoryA(MAX_PATH, cur);
+    if (!root.empty() && (n == 0 || n >= MAX_PATH || _stricmp(cur, root.c_str()) != 0)) {
+        LOGW("The current folder was %s, not the game's %s: set back", n && n < MAX_PATH ? cur : "?", root.c_str());
+        SetCurrentDirectoryA(root.c_str());
+    }
+    if (GetFileAttributesA("anim\\ped.ifp") == INVALID_FILE_ATTRIBUTES) LOGW("anim\\ped.ifp is missing: the game can't start");
+}
+
 bool LoadSaveFile(const std::wstring& path) {
     if (!FileExists(path)) {
         LOGE("LoadSaveFile: no file %s", WideToUtf8(path).c_str());
@@ -475,6 +493,7 @@ bool LoadSaveFile(const std::wstring& path) {
     game::Ref<uint8_t>(0xB72910) = 0;         // CGame::bMissionPackGame
     game::Ref<uint8_t>(mm + 0x60) = 1;        // m_bLoadingData
     LOGI("Loading save %s", g_redirectPath.c_str());
+    KeepGameFolder();
     return true;
 }
 
@@ -486,6 +505,7 @@ bool StartNewGame() {  // what the menu's "Start new game, yes" does (MENU_ACTIO
     game::CallMethod<0x573330>((void*)mm);  // DoSettingsBeforeStartingAGame: m_bStartGameLoading
     game::Ref<uint8_t>(mm + 0x32) = 1;      // m_bDontDrawFrontEnd
     LOGI("Starting a new game");
+    KeepGameFolder();
     return true;
 }
 
@@ -573,6 +593,8 @@ void Init(void* hModule) {
     mem::RedirectCallFn(0x53E7A5, &HookMenuProcess, &g_origMenuProcess);      // FrontendIdle -> CMenuManager::Process
     mem::RedirectCallFn(0x53EBE4, &HookDebugTextIngame, &g_origDebugTextIngame);  // Idle -> DebugDisplayTextBuffer
     mem::RedirectCallFn(0x53E86C, &HookDebugTextMenu, &g_origDebugTextMenu);  // FrontendIdle -> DebugDisplayTextBuffer
+    mem::RedirectCallFn(0x53EBF5, &HookEndUpdateIngame, &g_origEndUpdateIngame);  // Idle -> RwCameraEndUpdate
+    mem::RedirectCallFn(0x53E87D, &HookEndUpdateMenu, &g_origEndUpdateMenu);      // FrontendIdle -> RwCameraEndUpdate
     mem::HookFn(0x6190A0, &HookGenerateGameFilename, &g_origGenerateGameFilename, "C_PcSave::GenerateGameFilename");
     mem::HookFn(0x53C550, &HookShutDownForRestart, &g_origShutDownForRestart, "CGame::ShutDownForRestart");
     mem::HookFn(0x53C680, &HookInitialiseWhenRestarting, &g_origInitWhenRestarting, "CGame::InitialiseWhenRestarting");
