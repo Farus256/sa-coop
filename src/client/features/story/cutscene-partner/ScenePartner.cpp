@@ -386,7 +386,7 @@ void Hold(CPed* ped, const Spot& s) {
     if ((ped->GetPosition() - at).Length() > 3.0f) Cmd(0x00A1).I(handle).F(at.x).F(at.y).F(at.z - 1.0f).Run();  // SET_CHAR_COORDINATES
     else SetEntityPosition(ped, at);
     float deg = s.heading * 57.29578f;
-    if (std::fabs(WrapAngle(s.heading - h.heading)) > 0.02f) {
+    if (h.heading > 1e8f || std::fabs(WrapAngle(s.heading - h.heading)) > 0.02f) {  // 1e9: not set yet
         Cmd(0x0173).I(handle).F(deg).Run();  // SET_CHAR_HEADING
         h.heading = s.heading;
     }
