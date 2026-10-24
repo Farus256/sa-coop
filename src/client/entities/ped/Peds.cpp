@@ -678,7 +678,7 @@ void Peds::ScanOwned() {
 }
 
 // The game keeps its ped pool only 8 short of full (CPopulation::RemovePedsIfThePoolGetsFull, 0x616300): with a crowd
-// doubled by mods (MixSets) a game sat between that and our reserve, and a copy waited for good ("Robbing Uncle Sam": the
+// doubled by mods (MixSets) a game sat between that and our reserve, and a copy waited for good (a mission's: the
 // mission's soldiers, announced last, never came). It takes the place of our own random ped the other game has no copy
 // of, out of view, the farthest: the free count stays where it was.
 static bool FreeRandomPed() {

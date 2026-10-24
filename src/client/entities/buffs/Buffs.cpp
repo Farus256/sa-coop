@@ -208,7 +208,7 @@ std::string Summary() {
     std::string s;
     auto add = [&](const char* name, uint64_t until) {
         if (!On(until)) return;
-        if (!s.empty()) s += " · ";
+        if (!s.empty()) s += "\n";  // one under another
         s += name;
         s += " " + Left(until);
     };

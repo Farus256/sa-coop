@@ -40,13 +40,14 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
   character there: CJ or a Grove Street homie
 - cheats can be typed in the chat (`/code HESOYAM`), and everyone sees who entered which code and what it does
 - the in-game scenes of missions (script cameras) show for the partners as for the host, and bring them next to him
-- the Las Venturas casinos take any bet up to $1,000,000 from the first visit
 - the car radio is the driver's, its passengers hear the same station; a passenger's mouse wheel picks the gun
 - a new sniper scope; the more players, the sharper and more numerous the enemies
-- gambling dens in Las Venturas, toy car races in San Fierro
 - goods at the 24/7 counter and at the bar with effects that last a while
 - tank battles (`/tanks`): shells fly, armour has a front and a rear, the game's tank crews fire, soldiers carry RPGs
 - ground battles (`/arena yakuza random 5`): waves of enemies in the missions' interiors and a boss at the end
+- a first-person view (F7 or `/fp`); the host can turn cheat codes off for everyone (`/cheats off`)
+- the original SA:COOP 0.3.0's changes: side jobs together, the other player's moves, the firewall prompt, mission
+  start points and map changes of the host's missions, and its fixes
 - Linux and macOS builds, server tests
 
 Not compatible with the original 0.2.x versions, everyone has to update. Playing with three or more people has
@@ -116,7 +117,7 @@ fire truck water, NPC drive-bys, trains and RC toys are seen by both players. Ei
 garage at a safe house, and the host's world keeps it.
 
 `G` takes the nearest free passenger seat, whoever's car it is. When the host's mission puts CJ in a car, the
-partners within 200 m take its free seats. When it stands CJ in the back of a truck ("Robbing Uncle Sam"), the
+partners within 200 m take its free seats. When it stands CJ in the back of a truck, the
 partners take the cab's seats and the rest stand next to CJ in the back and shoot at the chase (`F`/`Enter` gets
 off). CJ getting into a car by himself calls nobody. What the story asks of CJ stays the host's.
 
@@ -172,13 +173,6 @@ came in first:
 
 The time each effect has left shows on the right of the screen.
 
-Las Venturas has two underground gambling dens with their icons on the radar and the map. Each door is put by the
-nearest fitting shop front when a player first comes near.
-
-In San Fierro, by Zero's RC shop (the flag on the radar), there are toy car races: `E` at the start, and everyone
-who pressed it there within 8 seconds races round the blocks of Garcia through the checkpoints. Everyone sees the
-times and places; a finish pays $400-$1000.
-
 A blown-up security van spills $1000-$10000, and they are rarer. Going into shops and houses and out is quicker.
 
 A Grove Street homie another player's game made joins the gang of whoever called him (`G`), not the host's. When a
@@ -208,14 +202,16 @@ The host types `/arena <enemies> <place> <waves>`, e.g. `/arena yakuza random 5`
 palace, Madd Dogg's mansion, Caligula's and the Four Dragons casinos, the meat factory, a warehouse, the Jefferson
 motel, the atrium, Woozie's office, Liberty City, the police station, the Sherman dam, the Bloodbowl and Kickstart
 stadiums (`random`: any). Enemies: yakuza, ballas, vagos, aztecas, triads, mafia, rifa, bikers, police, swat, army.
-1 to 10 waves, each bigger, better armed and better aimed. The next wave comes 6 seconds after the last of this one
-falls. The last wave brings a boss: Tenpenny, Pulaski, Hernandez, Big Smoke, Ryder, OG Loc, T-Bone Mendez, Jizzy B
+1 to 10 waves, each bigger, better armed and better aimed. The next wave comes 6 seconds (30 in a big place) after
+the last of this one falls; `/skip` (or `/arena skip`) starts it at once. The last wave brings a boss: Tenpenny, Pulaski, Hernandez, Big Smoke, Ryder, OG Loc, T-Bone Mendez, Jizzy B
 or Mike Toreno, with an AK-47 (a gang's) or an M4 (the police's and Toreno), and with him, unannounced, his silent
-men working round the players. Enemies come in squads of 3-4 from different sides: one straight on, the others to
-the players' backs; squads have grenadiers and knifemen (a knife kills silently from behind), and more armour each
-wave. No wanted stars in an arena or a tank battle, and weapons taken up there are not kept after it.
-Weapons and body armour lie about the place before each wave (better each wave; less armour where drinks machines
-stand), and big places give 30 seconds between waves.
+men working round the players. Enemies come in squads of 3-4 from different sides of the place, away from the players
+(all over it in a big place): one straight on, the others to the players' backs. They take cover, pop up and shoot,
+wait, then push at the players as a squad; one stuck in a corner or at a door works its way out to them. Squads have
+grenadiers (who throw only when the grenade will get there), and knifemen come alone from elsewhere and kill silently
+from behind. More armour each wave. No wanted stars in an arena or a tank battle, and weapons taken up there are not kept after it.
+Weapons and body armour lie all over the place before each wave, the first one too, somewhere else each time
+(better each wave; less armour where drinks machines stand).
 A win pays everyone $1000 a wave, then takes everyone back where it stood. Everyone dead
 or gone: lost. `/arena stop` ends it. Offline, one can play an arena alone.
 
@@ -232,7 +228,7 @@ F9 window, and each player picks their own: the host can play in Russian while t
 
 Side jobs (taxi, paramedic, firefighter, vigilante, pimp), races, schools, the shooting range, trucking and the
 quarry are played by each player in their own game. A side job or a race can be played together: within 20 seconds
-of its start press Y, and the other player gets an invitation (Y: yes, N: no). Whoever accepts sees its markers,
+of its start press Y, and the other players get an invitation (Y: yes, N: no; one can join). Whoever accepts sees its markers,
 checkpoints, timers and hints, can ride along and help, for example put out burning cars or shoot the criminals, and
 gets the same money at its end. The job's levels stay with the player who started it. There is text chat and voice chat, and the farther away the
 partner is, the quieter they sound. A waypoint one player sets on the map shows up on the other player's radar,
@@ -336,8 +332,6 @@ A unique beginning of a nickname is enough.
   start over.
 - Whatever gets knocked down or broken on the streets stays that way for half an hour, then the map puts
   everything back, as in the normal game.
-- The gambling dens are put by shop fronts automatically: a door may not be where you would expect it. When no
-  spot for a door is found near, that den is missing (a "Venue" line in `coop\coop.log` says so).
 - The host needs an open UDP port, through UPnP or forwarded on the router. Hosting over mobile internet or behind
   CGNAT does not work without a VPN.
 - Only `gta_sa.exe` version 1.0 US is supported. The players' builds may differ, but mods that change the story or
@@ -417,7 +411,7 @@ licenses, and their texts are in `third_party` and in the `coop\licenses` folder
 SA:COOP is not affiliated with Rockstar Games or Take-Two Interactive. You need your own copy of GTA San Andreas,
 and the repository contains no game files.
 
-## Support a project
+## Support the author of the original SA:COOP
 
 <p align="left">
   <a href="https://dalink.to/itscavalier"><img src="https://img.shields.io/badge/DonationAlerts-F57507?style=for-the-badge" alt="Support"></a>

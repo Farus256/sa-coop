@@ -259,9 +259,13 @@ public:
         }
         if (!g_note.empty() && NowMs() - g_noteMs < 3500)
             g.Text(ui::FONT_NORMAL, g.Width() * 0.5f, g.Height() * 0.82f, g_note, ui::w::kSaBlue, ui::TEXT_CENTER | ui::TEXT_OUTLINE);
-        std::string buffs = buffs::Summary();
-        if (!buffs.empty())
-            g.Text(ui::FONT_SMALL, g.Width() - 16 * s, g.Height() * 0.28f, buffs, 0xE0FFFFFF, ui::TEXT_RIGHT | ui::TEXT_OUTLINE);
+        // the effects on, in a column at the right
+        float by = g.Height() * 0.28f;
+        for (const std::string& line : Split(buffs::Summary(), '\n')) {
+            if (line.empty()) continue;
+            g.Text(ui::FONT_SMALL, g.Width() - 16 * s, by, line, 0xE0FFFFFF, ui::TEXT_RIGHT | ui::TEXT_OUTLINE);
+            by += g.LineHeight(ui::FONT_SMALL);
+        }
     }
 };
 

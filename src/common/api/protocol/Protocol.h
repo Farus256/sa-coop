@@ -167,7 +167,7 @@ enum MsgId : uint8_t {
     G_LOBBY = 150,            // reliable: u8 op, u8 value: a newcomer asks (1), the host says whether the game is on
                               // (2), a partner is ready or not (3)
     G_RADIO = 151,            // reliable: u16 vehicle, i8 station: the radio its driver plays (its passengers tune to it)
-    G_RC_RACE = 153,          // reliable: u8 op and its data: a toy car race in San Fierro (join, start, a lap time)
+    // 153: free (the toy car race of a test build)
     G_TANK_SHOT = 155,        // reliable: u16 vehicle, vec3 muzzle, vec3 velocity: a Rhino fired a shell (seen here,
                               // its blast comes as an explosion of the shooter's game)
     G_TANK_HIT = 156,         // reliable, to the owner: u16 vehicle, f32 damage, vec3 from: a shell hit its tank

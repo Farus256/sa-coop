@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "common/lib/util/Util.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
 #include "features/aim-view/AimView.h"
@@ -73,6 +74,7 @@ constexpr uintptr_t kMouseMovedX = 0xB73418 + 0x0C;            // CPad::NewMouse
 using FollowCarFn = void(__fastcall*)(void*, void*, const CVector*, float, float, float, bool);
 FollowCarFn g_origFollowCar = nullptr;
 bool g_holding = false;   // the passenger's angle is kept
+uint64_t g_aimEndedUntil = 0;  // an aim out of the window just ended: the car camera takes the aim's look as it is
 float g_frontOffset = 0;  // the car camera's angle (Beta) less its look's (Front), to follow an aim's look
 float g_rel = 0.0f;       // the camera's angle from the car's heading
 CVehicle* g_holdCar = nullptr;
@@ -106,7 +108,7 @@ void __fastcall HookFollowCar(void* cam, void* edx, const CVector* target, float
     const CControllerState& pad = GetPad(0)->NewState;
     bool mouse = std::fabs(Ref<float>(kMouseMovedX)) > 0.0f;
     bool looking = pad.LeftShoulder2 || pad.RightShoulder2 || pad.ShockButtonR;  // looking aside or back: the game's
-    if (mouse) {  // the player turns it: the game's turn is the passenger's
+    if (mouse && NowMs() > g_aimEndedUntil) {  // the player turns it: the game's turn is the passenger's
         g_rel = Wrap(beta - CarAngle(v));
         return;
     }
@@ -128,10 +130,20 @@ void __fastcall HookFollowCar(void* cam, void* edx, const CVector* target, float
 // angle kept is the aim's, so that when the aim ends the car camera looks where the aim did - it went back to the
 // angle from before the aim, behind the car.
 constexpr uint16_t MODE_CAM_ON_A_STRING = 18;
+// When the aim ends the camera does not fly anywhere: the game's blend from the aim's camera to the car's (CCamera::
+// m_bTransitionState, +0x58) is cut, and the car camera starts where the aim looked (and stays there).
 void FollowAim() {
     CPlayerPed* me = FindPlayerPed(0);
     CVehicle* v = me ? me->VehicleIfIn() : nullptr;
-    if (!g_holding || !v || v != g_holdCar || v->Driver() == me || cam::Mode() == MODE_CAM_ON_A_STRING) return;
+    static uint16_t lastMode = 0;
+    uint16_t mode = cam::Mode();
+    bool passenger = v && v->Driver() != me;
+    if (passenger && mode == MODE_CAM_ON_A_STRING && lastMode != MODE_CAM_ON_A_STRING && lastMode != 0) {
+        Ref<uint8_t>(addr::TheCamera + 0x58) = 0;  // CCamera::m_bTransitionState: no blend
+        g_aimEndedUntil = NowMs() + 400;
+    }
+    lastMode = passenger ? mode : 0;
+    if (!g_holding || !v || v != g_holdCar || v->Driver() == me || mode == MODE_CAM_ON_A_STRING) return;
     CVector f = cam::Front();
     if (std::fabs(f.x) + std::fabs(f.y) < 0.01f) return;
     g_rel = Wrap(std::atan2(f.y, f.x) + g_frontOffset - CarAngle(v));

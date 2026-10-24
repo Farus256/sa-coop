@@ -162,14 +162,16 @@ const char* const kWordStop[2] = TRP("стоп", "stop");
 const char* const kWordRandom[2] = TRP("рандом", "random");
 const char* const kWordAny[2] = TRP("случайно", "any");
 const char* const kWordArena[2] = TRP("арена", "arena");
+const char* const kWordSkip[2] = TRP("скип", "skip");
 int Lang() { return Cfg().english ? 1 : 0; }
 
 // ---------------------------------------------------------------- the battle
-enum ArenaOp : uint8_t { A_START = 1, A_WAVE, A_LEFT, A_BOSS, A_END, A_ITEMS, A_PREP, A_MARK };
+enum ArenaOp : uint8_t { A_START = 1, A_WAVE, A_LEFT, A_BOSS, A_END, A_ITEMS, A_PREP, A_MARK, A_SKIP };
 struct Arena {
     bool on = false, host = false;
     int faction = 0, place = 0, waves = 5, wave = 0, left = 0, boss = -1;
     uint64_t startMs = 0, nextWaveMs = 0, waveMs = 0, outSince = 0, endAt = 0;
+    int itemsFor = 0;  // host: the wave whose weapons and armour are to be laid out (once the floor is known)
     bool won = false;
     // where this player stood, to go back
     int backArea = 0;
@@ -232,67 +234,242 @@ void TakeBack() {
     Teleport(g_arena.backArea, g_arena.back, g_arena.backHeading);
 }
 
+// ---------------------------------------------------------------- the place's floor
+// Where people can stand and walk in the place, worked out once by the host as the arena begins (a few hundred cells a
+// frame): from the middle, cell by cell (1.5 m apart, 2 m in a big place), a step to a neighbour is taken when there
+// is floor there within a metre up or down of this one (a ray down), no wall between them at the knees and at the
+// chest, and room over it for a body. What it reaches is the walkable place, its other rooms and floors too (stairs
+// are steps): the enemies come from cells of it far from the players and spread round them, the weapons and armour
+// lie on cells spread over it, the ones who got stuck are set one step on along it, and cover is looked for on it.
+struct ColPoint {
+    CVector point;
+    uint8_t rest[0x2C - 12];
+};
+bool Ray(const CVector& a, const CVector& b, CVector& at) {  // the first wall or floor on the way (buildings, objects)
+    ColPoint cp{};
+    CEntity* hit = nullptr;
+    bool struck = Call<0x56BA00, bool>(&a, &b, &cp, &hit, true, false, false, true, false, false, false, false);  // ProcessLineOfSight
+    if (struck) at = cp.point;
+    return struck;
+}
+bool Clear(const CVector& a, const CVector& b) {
+    return Call<0x56A490, bool>(&a, &b, true, false, false, true, false, false, false);  // GetIsLineOfSightClear
+}
+
+struct Cell {
+    CVector p;              // the floor
+    std::vector<int> next;  // the cells a step away
+};
+std::vector<Cell> g_cells;
+std::map<int64_t, int> g_cellAt;  // (column, row, storey) -> cell
+std::vector<int> g_open;          // the cells whose neighbours are still to be tried
+float g_step = 1.5f;
+int g_reachCells = 0;
+bool g_gridDone = false;
+
+int64_t CellKey(int i, int j, float z) { return ((int64_t)(i + 512) << 40) | ((int64_t)(j + 512) << 20) | (int64_t)((z + 2000.0f) / 2.2f); }
+
+bool FloorBelow(float x, float y, float fromZ, float& z) {
+    CVector at;
+    if (!Ray({x, y, fromZ}, {x, y, fromZ - 3.5f}, at)) return false;
+    z = at.z;
+    return true;
+}
+
+void StartGrid() {
+    g_cells.clear();
+    g_cellAt.clear();
+    g_open.clear();
+    g_gridDone = false;
+    const Place& pl = kPlaces[g_arena.place];
+    g_step = pl.reach > 25.0f ? 2.0f : 1.5f;
+    g_reachCells = (int)(pl.reach * 1.2f / g_step) + 1;
+    float z = 0;
+    if (!FloorBelow(pl.pos.x, pl.pos.y, pl.pos.z + 1.0f, z)) z = pl.pos.z - 1.0f;
+    g_cells.push_back({{pl.pos.x, pl.pos.y, z}, {}});
+    g_cellAt[CellKey(0, 0, z)] = 0;
+    g_open.push_back(0);
+}
+
+void GridStep() {  // a part of it each frame
+    const Place& pl = kPlaces[g_arena.place];
+    for (int budget = 40; budget > 0 && !g_open.empty() && g_cells.size() < 3000; --budget) {
+        int ci = g_open.back();
+        g_open.pop_back();
+        CVector c = g_cells[(size_t)ci].p;
+        int i0 = (int)std::lround((c.x - pl.pos.x) / g_step), j0 = (int)std::lround((c.y - pl.pos.y) / g_step);
+        for (int di = -1; di <= 1; ++di)
+            for (int dj = -1; dj <= 1; ++dj) {
+                if (!di && !dj) continue;
+                int i = i0 + di, j = j0 + dj;
+                if (std::abs(i) > g_reachCells || std::abs(j) > g_reachCells) continue;
+                float x = pl.pos.x + (float)i * g_step, y = pl.pos.y + (float)j * g_step, z = 0;
+                if (!FloorBelow(x, y, c.z + 1.3f, z) || std::fabs(z - c.z) > 1.0f) continue;
+                CVector n{x, y, z};
+                auto known = g_cellAt.find(CellKey(i, j, z));
+                if (known != g_cellAt.end()) {  // a way to a cell found before
+                    auto& a = g_cells[(size_t)ci].next;
+                    if (std::find(a.begin(), a.end(), known->second) == a.end() && Clear(c + CVector{0, 0, 0.9f}, n + CVector{0, 0, 0.9f}))
+                        a.push_back(known->second), g_cells[(size_t)known->second].next.push_back(ci);
+                    continue;
+                }
+                if (!Clear(c + CVector{0, 0, 0.9f}, n + CVector{0, 0, 0.9f}) || !Clear(c + CVector{0, 0, 1.5f}, n + CVector{0, 0, 1.5f}) ||
+                    !Clear(n + CVector{0, 0, 0.2f}, n + CVector{0, 0, 1.85f}))
+                    continue;
+                int ni = (int)g_cells.size();
+                g_cells.push_back({n, {ci}});
+                g_cells[(size_t)ci].next.push_back(ni);
+                g_cellAt[CellKey(i, j, z)] = ni;
+                g_open.push_back(ni);
+            }
+    }
+    if (g_open.empty() || g_cells.size() >= 3000) {
+        g_gridDone = true;
+        LOGI("Arena: %d cells of floor found in %s", (int)g_cells.size(), kPlaces[g_arena.place].name[1]);
+    }
+}
+bool GridUsable() { return g_gridDone && g_cells.size() >= 15; }
+
+int CellNear(const CVector& p, float within = 3.0f) {
+    int best = -1;
+    float bestD = within;
+    for (size_t k = 0; k < g_cells.size(); ++k) {
+        CVector d = g_cells[k].p - p;
+        if (std::fabs(d.z + 1.0f) > 2.5f) continue;  // p is a body (a metre over its feet)
+        float l = d.Length2D();
+        if (l < bestD) bestD = l, best = (int)k;
+    }
+    return best;
+}
+
+// steps from every cell to cell `to` (BFS), -1 where it does not lead
+std::vector<int> StepsTo(int to) {
+    std::vector<int> dist(g_cells.size(), -1);
+    if (to < 0) return dist;
+    std::vector<int> q{to};
+    dist[(size_t)to] = 0;
+    for (size_t h = 0; h < q.size(); ++h)
+        for (int n : g_cells[(size_t)q[h]].next)
+            if (dist[(size_t)n] < 0) dist[(size_t)n] = dist[(size_t)q[h]] + 1, q.push_back(n);
+    return dist;
+}
+
+std::vector<CVector> PlayerSpots() {  // the live players in the place
+    std::vector<CVector> at;
+    int area = kPlaces[g_arena.place].area;
+    if (CPlayerPed* me = FindPlayerPed(0); me && me->Health() > 0.0f && me->AreaCode() == area) at.push_back(me->GetPosition());
+    for (auto& [id, rp] : Players::Instance().All())
+        if (rp.hasState && !(rp.state.flags & OnFootState::F_DEAD) && rp.state.area == area) at.push_back(rp.state.pos);
+    if (at.empty()) at.push_back(kPlaces[g_arena.place].pos);
+    return at;
+}
+float DistToPlayers(const CVector& p, const std::vector<CVector>& players) {
+    float d = 1e9f;
+    for (const CVector& q : players) d = std::min(d, (q - p).Length());
+    return d;
+}
+float AngleDiff(float a, float b) {
+    float d = std::fmod(std::fabs(a - b), 6.2831853f);
+    return d > 3.14159265f ? 6.2831853f - d : d;
+}
+
 // ---------------------------------------------------------------- the enemies
 constexpr int WEAPON_KNIFE = 4, WEAPON_GRENADE = 16, WEAPON_PISTOL = 22;
-enum Role : uint8_t { R_GUN, R_GRENADIER, R_KNIFE };
+enum Role : uint8_t { R_GUN, R_GRENADIER, R_KNIFE, R_BOSS };
+// what one does now: fights as the game has it, goes round to a back, runs to cover, holds it (down, up and shooting,
+// down), pushes on at the players
+enum Mode : uint8_t { M_FIGHT, M_FLANK, M_COVER_GO, M_COVER_HOLD, M_PUSH };
 struct Enemy {
     int squad = 0;
     Role role = R_GUN;
-    int weapon = 0;          // its gun
-    bool flanking = false;   // on its way round to a player's back
-    uint64_t flankUntil = 0;
+    int weapon = 0;  // its gun
+    Mode mode = M_FIGHT;
+    uint64_t modeUntil = 0, nextCoverMs = 0;
+    bool popped = false;  // up and shooting in its cover
+    uint64_t popUntil = 0;
+    CVector cover;
     uint64_t grenadeUntil = 0;  // throwing till then
     uint64_t throwAt = 0;       // the grenade leaves the hand then
+    float throwFlight = 1.0f;
     int grenades = 0;
-    CPed* throwAt_ = nullptr;   // at whom
+    CPed* throwTarget = nullptr;
     float spawnHealth = 0;
-    CPed* after = nullptr;   // the player it was set on
+    CPed* after = nullptr;  // the player it was set on
+    CVector lastPos;        // where it was when it last moved on
+    uint64_t lastMoveMs = 0;
 };
 struct Squad {
-    float angle = 0;         // where round the player it goes (degrees, 180 = behind)
+    float angle = 0;  // where round the player it goes (degrees, 180 = behind)
     bool flank = false;
-    uint64_t nextGrenadeMs = 0;
+    uint64_t nextGrenadeMs = 0, nextPushMs = 0;
 };
 std::map<CPed*, Enemy> g_info;
 std::vector<Squad> g_squads;
+std::vector<CVector> g_lastSpawns, g_spawnsNow;  // where the last wave's and this wave's came from (the next ones elsewhere)
 
-bool OnFloor(CVector& p, float baseZ) {
+bool OnFloor(CVector& p, float baseZ) {  // the fallback without the floor's cells
     float z = -100.0f;
     Cmd(0x02CE).F(p.x).F(p.y).F(baseZ + 2.0f).Out(&z).Run();  // GET_GROUND_Z_FOR_3D_COORD
     if (z < baseZ - 4.0f || z > baseZ + 3.0f) return false;
     p.z = z + 1.0f;
     return true;
 }
-bool Clear(const CVector& a, const CVector& b) {
-    return Call<0x56A490, bool>(&a, &b, true, false, false, true, false, false, false);  // GetIsLineOfSightClear
-}
-float NearestPlayerDist(const CVector& p) {
-    float nearest = 1e9f;
-    if (CPlayerPed* me = FindPlayerPed(0)) nearest = (me->GetPosition() - p).Length();
-    for (auto& [id, rp] : Players::Instance().All())
-        if (rp.ped) nearest = std::min(nearest, (rp.ped->GetPosition() - p).Length());
-    return nearest;
-}
 
-// where a squad comes from: towards `angle` from the middle, as far out as the place goes, on the floor and in
-// sight of the middle, not on top of a player
-CVector SquadSpot(float angle) {
+// A spot to come from, towards `angle` round the players (radians), far from them, apart from the other spots of
+// this wave and the last one; `minApart` from those. Off the cells (too few): towards the angle from the middle.
+CVector SpawnSpot(float angle, float halfSector, float minApart) {
     const Place& pl = kPlaces[g_arena.place];
+    std::vector<CVector> players = PlayerSpots();
+    CVector mid{};
+    for (const CVector& q : players) mid = mid + q;
+    mid = mid * (1.0f / (float)players.size());
+    if (GridUsable()) {
+        float safe = pl.big ? 18.0f : 9.0f;
+        for (int pass = 0; pass < 3; ++pass, safe *= 0.6f, halfSector *= 2.0f, minApart *= 0.5f) {
+            int best = -1;
+            float bestScore = -1e9f;
+            for (size_t k = 0; k < g_cells.size(); ++k) {
+                const CVector& c = g_cells[k].p;
+                float dp = DistToPlayers(c, players);
+                if (dp < safe) continue;
+                float a = std::atan2(c.y - mid.y, c.x - mid.x);
+                if (AngleDiff(a, angle) > halfSector) continue;
+                bool apart = true;
+                for (const CVector& s : g_spawnsNow) apart &= (s - c).Length() >= minApart;
+                if (!apart) continue;
+                float score = std::min(dp, 40.0f) + Rand(0.0f, 8.0f);
+                for (const CVector& s : g_lastSpawns) score -= std::max(0.0f, 10.0f - (s - c).Length());  // not where they came from
+                if (score > bestScore) bestScore = score, best = (int)k;
+            }
+            if (best >= 0) {
+                CVector p = g_cells[(size_t)best].p + CVector{0, 0, 1.0f};
+                g_spawnsNow.push_back(p);
+                return p;
+            }
+        }
+    }
     CVector best = pl.pos;
     float bestScore = -1.0f;
-    CVector from = pl.pos + CVector{0, 0, 0.5f};
     for (int t = 0; t < 24; ++t) {
         float a = angle + Rand(-0.35f, 0.35f), d = Rand(pl.reach * 0.45f, pl.reach);
         CVector p = pl.pos + CVector{std::cos(a) * d, std::sin(a) * d, 0.0f};
-        if (!OnFloor(p, pl.pos.z) || !Clear(from, p)) continue;
-        float nearest = NearestPlayerDist(p);
-        float score = std::min(nearest, 25.0f) + d * 0.3f;
-        if (nearest > 6.0f && score > bestScore) bestScore = score, best = p;
+        if (!OnFloor(p, pl.pos.z)) continue;
+        float dp = DistToPlayers(p, players), score = std::min(dp, 25.0f) + d * 0.3f;
+        if (dp > 6.0f && score > bestScore) bestScore = score, best = p;
     }
+    g_spawnsNow.push_back(best);
     return best;
 }
-// a member's place by its squad's
+// a member's place by its squad's (a cell a few metres off it)
 CVector MemberSpot(const CVector& anchor, int k) {
+    if (GridUsable()) {
+        std::vector<int> close;
+        for (size_t i = 0; i < g_cells.size(); ++i) {
+            CVector d = g_cells[i].p + CVector{0, 0, 1.0f} - anchor;
+            if (d.Length2D() > 0.9f && d.Length2D() < 4.0f && std::fabs(d.z) < 1.5f) close.push_back((int)i);
+        }
+        if (!close.empty()) return g_cells[(size_t)close[(size_t)RandInt(0, (int)close.size() - 1)]].p + CVector{0, 0, 1.0f};
+    }
     for (int t = 0; t < 8; ++t) {
         float a = Rand(0.0f, 6.2831853f), d = Rand(1.2f, 2.6f);
         CVector p = anchor + CVector{std::cos(a) * d, std::sin(a) * d, 0.0f};
@@ -334,7 +511,7 @@ void SetOn(CPed* p, Enemy& e, CPed* target) {
     if (!target) return;
     int h = GetPedRef(p), t = GetPedRef(target);
     const Squad& sq = g_squads[(size_t)e.squad];
-    if (e.flanking) {
+    if (e.mode == M_FLANK) {
         // round to the player's back (the offset turns with the player), then the fight
         Cmd(0x06A8).I(h).I(t).I(14000).F(e.role == R_KNIFE ? 1.0f : 7.0f).F(sq.angle).Run();  // TASK_GOTO_CHAR_OFFSET
     } else {
@@ -352,6 +529,7 @@ int MakeEnemy(int model, int weapon, int health, int armour, int accuracy, const
     Cmd(0x087E).I(h).I(0).Run();                             // SET_CHAR_DROPS_WEAPONS_WHEN_DEAD: none
     Cmd(0x0223).I(h).I(health).Run();                        // SET_CHAR_HEALTH
     Cmd(0x02E2).I(h).I(accuracy).Run();                      // SET_CHAR_ACCURACY
+    Cmd(0x060F).I(h).F(60.0f).Run();                         // SET_SENSE_RANGE: it sees across the place
     if (silent) Cmd(0x094E).I(h).I(1).Run();                 // DISABLE_CHAR_SPEECH
     if (role == R_KNIFE) {
         Give(h, WEAPON_KNIFE, 1);
@@ -360,7 +538,7 @@ int MakeEnemy(int model, int weapon, int health, int armour, int accuracy, const
         Give(h, weapon, 500);
         weapon = GunFor(weapon);
     }
-    if (weapon) Cmd(0x01B9).I(h).I(weapon).Run();            // SET_CURRENT_CHAR_WEAPON
+    if (weapon) Cmd(0x01B9).I(h).I(weapon).Run();  // SET_CURRENT_CHAR_WEAPON
     CPed* ped = GetPed(h);
     if (!ped) return h;
     ped->Armour() = (float)armour;
@@ -369,9 +547,12 @@ int MakeEnemy(int model, int weapon, int health, int armour, int accuracy, const
     e.role = role;
     e.weapon = weapon;
     e.spawnHealth = (float)health;
-    e.grenades = role == R_GRENADIER ? 4 : 0;
-    e.flanking = g_squads[(size_t)squad].flank || role == R_KNIFE;
-    e.flankUntil = NowMs() + 14000;
+    e.grenades = role == R_GRENADIER ? 6 : 0;
+    e.mode = g_squads[(size_t)squad].flank || role == R_KNIFE ? M_FLANK : M_FIGHT;
+    e.modeUntil = NowMs() + 14000;
+    e.nextCoverMs = NowMs() + (uint64_t)RandInt(3000, 8000);
+    e.lastPos = at;
+    e.lastMoveMs = NowMs();
     g_info[ped] = e;
     g_enemies.insert(ped);
     if (role == R_KNIFE) knife::MarkKnifeman(ped);
@@ -379,24 +560,24 @@ int MakeEnemy(int model, int weapon, int health, int armour, int accuracy, const
     return h;
 }
 
-// a squad of 3-4 towards angle `dir` (radians round the middle), going round to `aroundDeg` (180: the back) or not
-int MakeSquad(float dir, bool flank, float aroundDeg, int size, int wave, bool minions) {
+// a squad of 3-4 towards angle `dir` (radians round the players), going round to `aroundDeg` (180: the back) or not
+int MakeSquad(float dir, float halfSector, bool flank, float aroundDeg, int size, int wave, bool minions) {
     const Faction& f = kFactions[g_arena.faction];
     float progress = g_arena.waves > 1 ? (float)(wave - 1) / (float)(g_arena.waves - 1) : 1.0f;
     int gunTier = std::clamp((int)std::lround(progress * 3.0f) + (minions ? 1 : 0), 0, 3);
     Squad sq;
     sq.angle = aroundDeg;
     sq.flank = flank;
-    sq.nextGrenadeMs = NowMs() + 8000 + (uint64_t)RandInt(0, 4000);
+    sq.nextGrenadeMs = NowMs() + (uint64_t)RandInt(4000, 7000);
+    sq.nextPushMs = NowMs() + (uint64_t)RandInt(18000, 26000);
     g_squads.push_back(sq);
     int squad = (int)g_squads.size() - 1;
-    CVector anchor = SquadSpot(dir);
-    bool scatter = kPlaces[g_arena.place].big && !minions;  // a big place: its members come from all over it
+    CVector anchor = SpawnSpot(dir, halfSector, 8.0f);
+    bool scatter = kPlaces[g_arena.place].big && !minions;  // a big place: its members come from all over their side
     int made = 0;
     for (int k = 0; k < size; ++k) {
-        Role role = R_GUN;
-        if (k == 1 && wave >= 2) role = R_GRENADIER;
-        CVector at = k == 0 ? anchor : scatter ? SquadSpot(dir + Rand(-1.4f, 1.4f)) : MemberSpot(anchor, k);
+        Role role = k == 1 ? R_GRENADIER : R_GUN;
+        CVector at = k == 0 ? anchor : scatter ? SpawnSpot(dir, halfSector * 1.3f, 6.0f) : MemberSpot(anchor, k);
         int weapon = f.weapons[std::clamp(gunTier - (k == 2 ? 1 : 0), 0, 3)];
         int model = f.models[(size_t)RandInt(0, 3)];
         int health = 100 + 15 * wave, armour = std::min(250, 25 * wave + (minions ? 50 : 0));
@@ -406,14 +587,31 @@ int MakeSquad(float dir, bool flank, float aroundDeg, int size, int wave, bool m
     return made;
 }
 
-// a knifeman, alone, from somewhere else than the squads: silent, round to a player's back
-void MakeKnifeman(float dir, int wave) {
+// A knifeman comes alone, from a spot far from the squads (and from the players), silent, round to a player's back
+void MakeKnifeman(int wave) {
     const Faction& f = kFactions[g_arena.faction];
     Squad sq;
     sq.angle = 180.0f;
     sq.flank = true;
     g_squads.push_back(sq);
-    MakeEnemy(f.models[(size_t)RandInt(0, 3)], 4, 100 + 15 * wave, std::min(250, 25 * wave), 60, SquadSpot(dir),
+    std::vector<CVector> players = PlayerSpots();
+    CVector at;
+    bool found = false;
+    if (GridUsable()) {
+        float best = -1;
+        for (const Cell& c : g_cells) {
+            CVector p = c.p + CVector{0, 0, 1.0f};
+            float fromSquads = 1e9f;
+            for (const CVector& s : g_spawnsNow) fromSquads = std::min(fromSquads, (s - p).Length());
+            float dp = DistToPlayers(p, players);
+            if (fromSquads < 10.0f || dp < 10.0f) continue;
+            float score = std::min(fromSquads, dp) + Rand(0.0f, 5.0f);
+            if (score > best) best = score, at = p, found = true;
+        }
+    }
+    if (!found) at = SpawnSpot(Rand(0.0f, 6.2831853f), 3.2f, 10.0f);
+    else g_spawnsNow.push_back(at);
+    MakeEnemy(f.models[(size_t)RandInt(0, 3)], WEAPON_KNIFE, 100 + 15 * wave, std::min(250, 25 * wave), 60, at,
               (int)g_squads.size() - 1, R_KNIFE, true);
 }
 
@@ -448,9 +646,11 @@ int PlayersIn() {
 }
 
 // ---------------------------------------------------------------- things to pick up
-// Before each wave the host lays weapons and body armour about the place (A_ITEMS: every game makes the same pickups,
-// and one taken is gone for all, Pickups): better ones as the waves go on, more in a big place, the sniper rifle and
-// the rocket launcher only in a big one; where drinks machines stand (health from them) less armour.
+// Before each wave (the first one too, once the floor is known) the host lays weapons and body armour about the place
+// (A_ITEMS: every game makes the same pickups, and one taken is gone for all, Pickups): better ones as the waves go
+// on, more in a big place, the sniper rifle and the rocket launcher only in a big one; where drinks machines stand
+// (health from them) less armour. They lie spread over the whole place, each away from the others and from where the
+// last wave's lay, so every wave they are somewhere else.
 struct Loot {
     int weapon, model, ammo;
 };
@@ -464,7 +664,8 @@ struct Item {
     uint16_t model = 0, ammo = 0;
     CVector pos;
 };
-std::vector<int> g_pickups;  // this game's pickups of the arena (handles)
+std::vector<int> g_pickups;          // this game's pickups of the arena (handles)
+std::vector<CVector> g_lastItemsAt;  // host: where the last ones lay
 
 // drinks machines in the place (the game's objects near its middle)
 int Machines() {
@@ -510,12 +711,26 @@ void PlaceItems(int forWave) {
     int armour = soda ? (forWave % 2 == 0 ? 1 : 0) + (pl.big ? 1 : 0) : 1 + forWave / 3 + (pl.big ? 1 : 0);
     guns = std::min(guns, 7), armour = std::min(armour, 4);
     std::vector<Item> items;
+    std::vector<CVector> players = PlayerSpots();
+    // the next spot: of the place's cells the farthest from those taken and from the last wave's (a little luck too)
     auto spot = [&](CVector& out) {
-        CVector from = pl.pos + CVector{0, 0, 0.5f};
+        if (GridUsable()) {
+            float best = -1;
+            for (const Cell& c : g_cells) {
+                if (DistToPlayers(c.p, players) < 3.0f) continue;
+                float apart = 1e9f;
+                for (const Item& it : items) apart = std::min(apart, (it.pos - c.p).Length());
+                for (const CVector& q : g_lastItemsAt) apart = std::min(apart, (q - c.p).Length() + 2.0f);
+                if (apart > 1e8f) apart = 30.0f;
+                float score = std::min(apart, 40.0f) + Rand(0.0f, 6.0f);
+                if (score > best) best = score, out = c.p + CVector{0, 0, 0.7f};
+            }
+            return best >= 0;
+        }
         for (int t = 0; t < 20; ++t) {
             float a = Rand(0.0f, 6.2831853f), d = Rand(2.0f, pl.reach * 0.9f);
             CVector p = pl.pos + CVector{std::cos(a) * d, std::sin(a) * d, 0.0f};
-            if (!OnFloor(p, pl.pos.z) || !Clear(from, p)) continue;
+            if (!OnFloor(p, pl.pos.z)) continue;
             bool apart = true;
             for (const Item& it : items) apart &= (it.pos - p).Length() > 3.5f;
             if (!apart) continue;
@@ -543,6 +758,8 @@ void PlaceItems(int forWave) {
         it.model = MODEL_ARMOUR;
         items.push_back(it);
     }
+    g_lastItemsAt.clear();
+    for (const Item& it : items) g_lastItemsAt.push_back(it.pos);
     Send(A_ITEMS, [&](Writer& w) {
         w.U8((uint8_t)items.size());
         for (const Item& it : items) {
@@ -552,30 +769,33 @@ void PlaceItems(int forWave) {
         }
     });
     MakeItems(items);
-    LOGI("Arena: %d weapons and %d armour laid out (drinks machines: %d)", guns, armour, soda ? 1 : 0);
+    LOGI("Arena: %d of %d weapons and %d armour laid out for wave %d (drinks machines: %d)", (int)items.size() - armour, guns,
+         armour, forWave, soda ? 1 : 0);
 }
 
-uint64_t PrepMs(bool first) { return kPlaces[g_arena.place].big ? (first ? 20000 : 30000) : (first ? 7000 : 6000); }
+uint64_t PrepMs(bool first) { return kPlaces[g_arena.place].big ? (first ? 20000 : 30000) : (first ? 8000 : 6000); }
 
 void SpawnWave() {
     ReleaseDead();
     ++g_arena.wave;
     g_bossPed = nullptr;
+    g_lastSpawns = g_spawnsNow;
+    g_spawnsNow.clear();
     int w = g_arena.wave;
     int count = std::min(14, 2 + w * 2 + PlayersIn());
-    // squads of 3-4, spread evenly round the place; the first comes straight on, the others go round; the knifemen
-    // (one in three waves' worth: 1 from 6 enemies, 2 from 11) alone, from between the squads
+    // squads of 3-4, spread evenly round the players; the first comes straight on, the others go round; the knifemen
+    // (1 from 6 enemies, 2 from 11) alone, from elsewhere
     int knives = count >= 11 ? 2 : count >= 6 ? 1 : 0;
     count -= knives;
     int squads = std::max(1, (count + 3) / 4);
-    float base = Rand(0.0f, 6.2831853f);
+    float base = Rand(0.0f, 6.2831853f), half = 3.14159265f / (float)squads;
     const float around[] = {180.0f, 135.0f, 225.0f, 90.0f, 270.0f};
     for (int i = 0; i < squads; ++i) {
         int size = count / squads + (i < count % squads ? 1 : 0);  // 3-4 each (fewer only in a small first wave)
-        float dir = base + 6.2831853f * (float)i / (float)squads + Rand(-0.25f, 0.25f);
-        MakeSquad(dir, i > 0, around[(size_t)(i - 1 + 5) % 5], size, w, false);
+        float dir = base + 6.2831853f * (float)i / (float)squads;
+        MakeSquad(dir, half, i > 0, around[(size_t)(i - 1 + 5) % 5], size, w, false);
     }
-    for (int k = 0; k < knives; ++k) MakeKnifeman(base + 6.2831853f * ((float)k + 0.5f) / (float)squads + 3.14159f / (float)squads, w);
+    for (int k = 0; k < knives; ++k) MakeKnifeman(w);
     std::string bossLine;
     if (w == g_arena.waves) {
         int b = PickBoss(g_arena.faction);
@@ -587,12 +807,12 @@ void SpawnWave() {
         g_squads.push_back(Squad{});
         int bossSquad = (int)g_squads.size() - 1;
         int h = MakeEnemy(model, kBosses[b].weapon, kBosses[b].health + 150 * (PlayersIn() - 1), 100 + 30 * g_arena.waves, 85,
-                          SquadSpot(base + 3.14159f), bossSquad, R_GUN, false);
+                          SpawnSpot(base + 3.14159f, 1.0f, 8.0f), bossSquad, R_BOSS, false);
         if (CPed* p = h >= 0 ? GetPed(h) : nullptr) g_bossPed = p;
         // his men: once, unannounced, silent, round to the players' backs
         int men = std::min(6, 3 + PlayersIn() - 1);
-        MakeSquad(base + 3.14159f + 1.2f, true, 150.0f, std::min(4, men), w, true);
-        if (men > 4) MakeSquad(base + 3.14159f - 1.2f, true, 210.0f, men - 4, w, true);
+        MakeSquad(base + 3.14159f + 1.2f, 0.8f, true, 150.0f, std::min(4, men), w, true);
+        if (men > 4) MakeSquad(base + 3.14159f - 1.2f, 0.8f, true, 210.0f, men - 4, w, true);
         g_arena.boss = b;
         bossLine = BossName(b);
     }
@@ -611,10 +831,13 @@ void SpawnWave() {
 // ---- grenades
 // The game's people do not throw a grenade by themselves in a scripted fight, so the grenadier throws it here: he
 // turns to the player, plays the throw (GRENADE.ifp, WEAPON_throw), and as the arm comes over the grenade leaves his
-// hand (CProjectileInfo::AddProjectile in his name) on an arc that comes down where the player will be: flight
-// 0.7-1.5 s by the distance, gravity as the game's (0.008 a frame squared: 20 m/s/s), leading a moving player.
+// hand (CProjectileInfo::AddProjectile in his name) on an arc that comes down where the player will be, leading a
+// moving player, gravity as the game's (0.008 a frame squared: 20 m/s/s). He sees the arc first: of the flights
+// 0.8-1.9 s (higher lobs for the longer ones) the first whose arc meets nothing on the way (a ceiling, a wall, a
+// doorframe) till it comes down by the player is taken; none: no throw (it bounced back at his feet).
 constexpr uintptr_t kProjectileInfos = 0xC891A8;  // gaProjectileInfo[32], 0x24 bytes, m_bActive at +0x10
 constexpr uintptr_t kProjectiles = 0xC89110;      // CProjectileInfo::ms_apProjectile[32]
+constexpr float kGravity = 20.0f;
 uint32_t ActiveProjectiles() {
     uint32_t mask = 0;
     for (int i = 0; i < 32; ++i)
@@ -632,31 +855,64 @@ bool EnsureBlock(const char* block) {
     return Ref<uint8_t>(b + 0x10) != 0;
 }
 
-void StartThrow(CPed* p, Enemy& e, CPed* t) {
+CVector ThrowFrom(CPed* p, const CVector& at) {  // the hand as the arm comes over, towards `at`
+    CVector to = at - p->GetPosition();
+    float len = std::max(0.1f, to.Length2D());
+    return p->GetPosition() + CVector{to.x / len, to.y / len, 0.0f} * 0.5f + CVector{0, 0, 0.75f};
+}
+CVector ThrowVel(const CVector& from, const CVector& aim, float flight) {
+    return {(aim.x - from.x) / flight, (aim.y - from.y) / flight, (aim.z - from.z + 0.5f * kGravity * flight * flight) / flight};
+}
+// the arc reaches the player: nothing in the way before it comes down within 3 m of it
+bool ArcClear(const CVector& from, CVector vel, float flight, const CVector& aim) {
+    CVector pos = from;
+    constexpr float dt = 0.05f;
+    for (float t = 0; t < flight + 0.2f; t += dt) {
+        CVector prev = pos;
+        vel.z -= kGravity * dt;
+        pos = pos + vel * dt;
+        CVector hit;
+        if (Ray(prev, pos, hit)) return (hit - aim).Length() < 3.0f && t > flight * 0.55f;
+    }
+    return true;
+}
+// the flight whose arc is clear, 0 when none
+float ClearFlight(const CVector& from, const CVector& aim) {
+    float dist = (aim - from).Length2D();
+    for (float f : {0.8f, 1.0f, 1.25f, 1.5f, 1.9f}) {
+        if (dist / f > 22.0f) continue;  // a throw that hard is no throw
+        if (ArcClear(from, ThrowVel(from, aim, f), f, aim)) return f;
+    }
+    return 0.0f;
+}
+
+bool StartThrow(CPed* p, Enemy& e, CPed* t) {
+    CVector aim = t->GetPosition() - CVector{0, 0, 0.8f};
+    if ((aim - p->GetPosition()).Length2D() < 8.0f) return false;  // not at his own feet
+    float flight = ClearFlight(ThrowFrom(p, aim), aim);
+    if (flight <= 0.0f) return false;
     int h = GetPedRef(p);
     CVector to = t->GetPosition() - p->GetPosition();
     Cmd(0x0173).I(h).F(std::atan2(-to.x, to.y) * 57.29578f).Run();  // SET_CHAR_HEADING: at the player
     if (EnsureBlock("GRENADE")) Cmd(0x0605).I(h).S("WEAPON_throw").S("GRENADE").F(8.0f).I(0).I(0).I(0).I(0).I(-1).Run();  // TASK_PLAY_ANIM
     e.throwAt = NowMs() + 380;
-    e.throwAt_ = t;
+    e.throwTarget = t;
+    e.throwFlight = flight;
     e.grenadeUntil = NowMs() + 1300;
     --e.grenades;
+    return true;
 }
 
 void Release(CPed* p, Enemy& e) {
     e.throwAt = 0;
-    CPed* t = e.throwAt_;
+    CPed* t = e.throwTarget;
     if (!t || !IsPedValid(t) || !IsPedValid(p) || p->Health() <= 0.0f || !LoadModelNow(342)) return;
-    float hd = p->GetHeading();
-    CVector fwd{-std::sin(hd), std::cos(hd), 0.0f};
-    CVector from = p->GetPosition() + fwd * 0.5f + CVector{0, 0, 0.75f};
-    CVector aim = t->GetPosition() - CVector{0, 0, 0.8f};  // at its feet
-    float dist = (aim - from).Length2D();
-    float flight = std::clamp(dist / 16.0f, 0.7f, 1.5f);
-    aim = aim + t->MoveSpeed() * 50.0f * flight * 0.8f;  // where it will be
-    constexpr float g = 20.0f;
-    CVector vel{(aim.x - from.x) / flight, (aim.y - from.y) / flight, (aim.z - from.z + 0.5f * g * flight * flight) / flight};
-    CVector dir = vel.Normalized();
+    CVector aim = t->GetPosition() - CVector{0, 0, 0.8f};  // at its feet, where it will be
+    aim = aim + t->MoveSpeed() * 50.0f * e.throwFlight * 0.8f;
+    CVector from = ThrowFrom(p, aim);
+    float flight = ArcClear(from, ThrowVel(from, aim, e.throwFlight), e.throwFlight, aim) ? e.throwFlight : ClearFlight(from, aim);
+    if (flight <= 0.0f) return;  // the player stepped behind something meanwhile: he keeps it
+    CVector vel = ThrowVel(from, aim, flight), dir = vel.Normalized();
     uint32_t before = ActiveProjectiles();
     game::challenge::SetNextThrow(true, from, vel * (1.0f / 50.0f));  // metres a frame; Fire sets it (and sends it)
     bool ok = Call<0x737C80, bool>((CEntity*)p, WEAPON_GRENADE, from, 1.0f, &dir, (CEntity*)nullptr);  // AddProjectile
@@ -667,8 +923,7 @@ void Release(CPed* p, Enemy& e) {
             if (added & (1u << i))
                 if (auto* obj = Ref<CPhysical*>(kProjectiles + (uintptr_t)i * 4)) obj->SetPositionRaw(f), obj->MoveSpeed() = sp;
     }
-    if (!ok) return;
-    LOGD("Arena: a grenade thrown %.0f m", dist);
+    if (ok) LOGD("Arena: a grenade thrown %.0f m, %.2f s", (aim - from).Length2D(), flight);
 }
 
 void Throws() {  // every frame: the grenades that leave the hand now
@@ -677,50 +932,180 @@ void Throws() {  // every frame: the grenades that leave the hand now
         if (e.throwAt && now >= e.throwAt) Release(p, e);
 }
 
-// The squads' doings (every 0.5 s): the ones going round turn to the fight when they are there (or close, or hurt,
-// or 14 s on); the grenadiers throw when it makes sense; a new target when the old one is down.
+// ---- how they fight
+// Every 0.5 s each one: the ones going round turn to the fight when they are there (or close, hurt, 14 s on). In the
+// fight one with the player in sight within 28 m now and then runs to cover (a cell of the floor within 9 m where,
+// crouched, nothing of it shows to the player and, standing, it sees the player) and holds it some 5-10 s: down, then
+// up shooting for 2 s, down again; then it pushes on at the player for a while (the game's own fight: it runs at it
+// shooting), and later looks for the next cover. A squad pushes all together every 18-26 s. The grenadiers throw when
+// the arc is clear. One that has not moved for 4 s while the player is out of its sight is stuck (a corner, a door
+// it does not find): it is set one step on along the floor's cells towards the player.
+std::vector<int> g_stepsTo;  // steps to the cell of g_stepsFor (a player), cached for a while
+CPed* g_stepsFor = nullptr;
+uint64_t g_stepsMs = 0;
+
+bool FindCover(CPed* p, CPed* t, CVector& out) {
+    if (!GridUsable()) return false;
+    CVector eye = t->GetPosition() + CVector{0, 0, 0.6f}, here = p->GetPosition();
+    float best = -1e9f;
+    int tries = 0;
+    for (const Cell& c : g_cells) {
+        CVector d = c.p - here;
+        if (d.Length2D() > 9.0f || std::fabs(d.z + 1.0f) > 2.0f) continue;
+        float toT = (c.p - t->GetPosition()).Length();
+        if (toT < 7.0f || toT > 26.0f) continue;
+        bool taken = false;
+        for (auto& [q, e] : g_info)
+            if (q != p && (e.mode == M_COVER_GO || e.mode == M_COVER_HOLD) && (e.cover - c.p).Length() < 1.6f) taken = true;
+        if (taken || ++tries > 60) continue;
+        if (Clear(eye, c.p + CVector{0, 0, 0.6f}) || !Clear(eye, c.p + CVector{0, 0, 1.5f})) continue;  // hidden down, seeing up
+        float score = -d.Length2D() - toT * 0.3f + Rand(0.0f, 2.0f);
+        if (score > best) best = score, out = c.p;
+    }
+    return best > -1e8f;
+}
+
+void Unstick(CPed* p, CPed* t) {
+    if (!GridUsable()) return;
+    if (g_stepsFor != t || NowMs() - g_stepsMs > 2000) {
+        g_stepsTo = StepsTo(CellNear(t->GetPosition()));
+        g_stepsFor = t;
+        g_stepsMs = NowMs();
+    }
+    int here = CellNear(p->GetPosition());
+    if (here < 0 || g_stepsTo[(size_t)here] < 0) {  // off the floor's cells: onto the nearest that leads somewhere
+        int best = -1;
+        float bestD = 6.0f;
+        for (size_t k = 0; k < g_cells.size(); ++k) {
+            float d = (g_cells[k].p - p->GetPosition()).Length();
+            if (g_stepsTo[k] >= 0 && d < bestD) bestD = d, best = (int)k;
+        }
+        here = best;
+    } else {  // two steps on along the way
+        for (int s = 0; s < 2; ++s) {
+            int next = here;
+            for (int n : g_cells[(size_t)here].next)
+                if (g_stepsTo[(size_t)n] >= 0 && g_stepsTo[(size_t)n] < g_stepsTo[(size_t)next]) next = n;
+            here = next;
+        }
+    }
+    if (here < 0) return;
+    CVector to = g_cells[(size_t)here].p;
+    Cmd(0x00A1).I(GetPedRef(p)).F(to.x).F(to.y).F(to.z).Run();  // SET_CHAR_COORDINATES (feet on the floor)
+    LOGD("Arena: an enemy stuck for 4 s set on towards its player");
+}
+
 void Tactics() {
     uint64_t now = NowMs();
+    // a squad's push: all of it at the players together
+    for (auto& [p, e] : g_info) {
+        Squad& sq = g_squads[(size_t)e.squad];
+        if (sq.nextPushMs && now >= sq.nextPushMs && (e.mode == M_FIGHT || e.mode == M_COVER_HOLD || e.mode == M_COVER_GO)) {
+            e.mode = M_PUSH;
+            e.modeUntil = now + (uint64_t)RandInt(7000, 11000);
+            e.after = nullptr;  // set on again below
+        }
+    }
+    for (auto& sq : g_squads)
+        if (sq.nextPushMs && now >= sq.nextPushMs) sq.nextPushMs = now + (uint64_t)RandInt(18000, 26000);
+
     for (CPed* p : g_enemies) {
         if (!IsPedValid(p) || p->Health() <= 0.0f) continue;
         auto it = g_info.find(p);
         if (it == g_info.end()) continue;
         Enemy& e = it->second;
+        int h = GetPedRef(p);
         // its player, or a nearer one by 5 m (no going back and forth between two)
         CPed* t = e.after && IsPedValid(e.after) && e.after->Health() > 0.0f && e.after->AreaCode() == p->AreaCode() ? e.after : nullptr;
         CPed* n = NearestPlayer(p->GetPosition());
         if (!t || (n && (n->GetPosition() - p->GetPosition()).Length() + 5.0f < (t->GetPosition() - p->GetPosition()).Length())) t = n;
         if (!t) continue;
         float d = (t->GetPosition() - p->GetPosition()).Length();
-        // hurt, close, or long enough on the way: into the fight (the knifeman keeps going for the back)
-        if (e.flanking) {
-            bool close = d < (e.role == R_KNIFE ? 2.5f : 9.0f);
-            bool hurt = p->Health() < e.spawnHealth - 1.0f;
-            if ((close && e.role != R_KNIFE) || hurt || now > e.flankUntil) {
-                e.flanking = false;
-                SetOn(p, e, t);
-                continue;
-            }
-        }
-        // the throw done: back to the fight
-        if (e.grenadeUntil && now > e.grenadeUntil && !e.throwAt) {
-            e.grenadeUntil = 0;
+        CVector eye = p->GetPosition() + CVector{0, 0, 0.6f}, at = t->GetPosition() + CVector{0, 0, 0.4f};
+        bool sees = Clear(eye, at);
+        // stuck: no step on in 4 s, the player out of its sight and not next to it
+        if ((p->GetPosition() - e.lastPos).Length() > 0.7f || e.mode == M_COVER_HOLD || sees || d < 4.0f) {
+            e.lastPos = p->GetPosition();
+            e.lastMoveMs = now;
+        } else if (now - e.lastMoveMs > 4000 && !e.grenadeUntil) {
+            Unstick(p, t);
+            e.lastPos = p->GetPosition();
+            e.lastMoveMs = now;
+            if (e.mode == M_COVER_GO || e.mode == M_COVER_HOLD) e.mode = M_FIGHT;
             SetOn(p, e, t);
             continue;
         }
-        if (t != e.after && !e.grenadeUntil) SetOn(p, e, t);
-        // a grenade: 9-24 m, the player in sight from head height, none of its own near the player
+        // the throw done: back to what it did
+        if (e.grenadeUntil) {
+            if (now > e.grenadeUntil && !e.throwAt) {
+                e.grenadeUntil = 0;
+                if (e.mode == M_COVER_HOLD) Cmd(0x05C5).I(h).I(1500).Run();  // TASK_DUCK
+                else SetOn(p, e, t);
+            }
+            continue;
+        }
+        switch (e.mode) {
+            case M_FLANK: {
+                bool close = d < (e.role == R_KNIFE ? 2.5f : 9.0f);
+                bool hurt = p->Health() < e.spawnHealth - 1.0f;
+                if ((close && e.role != R_KNIFE) || hurt || now > e.modeUntil) {
+                    e.mode = M_FIGHT;
+                    SetOn(p, e, t);
+                    continue;
+                }
+                break;
+            }
+            case M_FIGHT:
+                if (e.role != R_KNIFE && sees && d < 28.0f && now >= e.nextCoverMs) {
+                    e.nextCoverMs = now + (uint64_t)RandInt(6000, 12000);
+                    if (RandInt(0, 99) < 60 && FindCover(p, t, e.cover)) {
+                        e.mode = M_COVER_GO;
+                        e.modeUntil = now + 6000;
+                        Cmd(0x05D3).I(h).F(e.cover.x).F(e.cover.y).F(e.cover.z).I(6).I(6000).Run();  // TASK_GO_STRAIGHT_TO_COORD, running
+                        continue;
+                    }
+                }
+                break;
+            case M_COVER_GO:
+                if ((p->GetPosition() - e.cover).Length2D() < 1.3f || now > e.modeUntil) {
+                    e.mode = M_COVER_HOLD;
+                    e.modeUntil = now + (uint64_t)RandInt(5000, 10000);
+                    e.popped = false;
+                    e.popUntil = now + 1200;
+                    Cmd(0x05C5).I(h).I(1500).Run();  // TASK_DUCK
+                }
+                continue;
+            case M_COVER_HOLD:
+                if (now > e.modeUntil || d < 6.0f) {  // waited enough, or the player is on it: at it
+                    e.mode = M_PUSH;
+                    e.modeUntil = now + (uint64_t)RandInt(6000, 10000);
+                    SetOn(p, e, t);
+                    continue;
+                }
+                if (now >= e.popUntil) {
+                    e.popped = !e.popped;
+                    if (e.popped) {
+                        Cmd(0x074D).I(h).I(GetPedRef(t)).I(2000).Run();  // TASK_SHOOT_AT_CHAR: up and shooting
+                        e.popUntil = now + 2000;
+                    } else {
+                        Cmd(0x05C5).I(h).I(1800).Run();  // TASK_DUCK: down again
+                        e.popUntil = now + (uint64_t)RandInt(1200, 2200);
+                    }
+                }
+                break;
+            case M_PUSH:
+                if (now > e.modeUntil) e.mode = M_FIGHT, e.nextCoverMs = now + (uint64_t)RandInt(3000, 6000);
+                break;
+        }
+        if (t != e.after && e.mode != M_COVER_HOLD) SetOn(p, e, t);
+        // a grenade: 8-26 m, the player in sight, none of its own near the player, the arc clear (StartThrow)
         Squad& sq = g_squads[(size_t)e.squad];
-        if (e.role == R_GRENADIER && !e.flanking && !e.grenadeUntil && now >= sq.nextGrenadeMs && d > 8.0f && d < 26.0f &&
+        if (e.role == R_GRENADIER && e.mode != M_FLANK && e.mode != M_COVER_GO && now >= sq.nextGrenadeMs && d > 8.0f && d < 26.0f &&
             e.grenades > 0 && !p->InVehicle()) {
-            CVector eye = p->GetPosition() + CVector{0, 0, 0.7f}, at = t->GetPosition() + CVector{0, 0, 0.5f};
             bool ownNear = false;
             for (CPed* q : g_enemies)
                 if (q != p && IsPedValid(q) && q->Health() > 0.0f && (q->GetPosition() - t->GetPosition()).Length() < 6.0f) ownNear = true;
-            if (!ownNear && Clear(eye, at)) {
-                sq.nextGrenadeMs = now + 12000 + (uint64_t)RandInt(0, 5000);
-                StartThrow(p, e, t);
-            }
+            if (!ownNear && StartThrow(p, e, t)) sq.nextGrenadeMs = now + (uint64_t)RandInt(6000, 9000);
         }
     }
 }
@@ -823,14 +1208,24 @@ void Start(int faction, int place, int waves) {
     g_arena.nextWaveMs = NowMs() + PrepMs(true);
     game::challenge::Begin();
     TakeIn();
-    if (g_arena.host) PlaceItems(1);
+    g_lastSpawns.clear(), g_spawnsNow.clear(), g_lastItemsAt.clear();
+    if (g_arena.host) {
+        StartGrid();  // the floor's cells, over the next frames (the scene's collision is in by then)
+        g_arena.itemsFor = 1;
+    }
     ui::TheChat().AddSystem(Format(TR("Арена: %s, %s, волн: %d. Первая волна через %d секунд — соберите оружие и броню!",
                                       "Arena: %s at %s, %d waves. The first wave in %d seconds: pick up weapons and armour!"),
                                    FactionName(faction).c_str(), PlaceName(place).c_str(), waves, (int)(PrepMs(true) / 1000)));
 }
 
+void Skip(uint8_t by);
+
 void Handle(uint8_t from, Reader& r) {
     uint8_t op = r.U8();
+    if (r.Ok() && op == A_SKIP) {  // a player asks the host to start the next wave now
+        if (g_arena.on && g_arena.host) Skip(from);
+        return;
+    }
     if (!r.Ok() || !core::IsPlayerReady() || from != Net().HostId()) return;
     if (op == A_START) {
         uint8_t f = r.U8(), p = r.U8(), w = r.U8();
@@ -892,6 +1287,11 @@ void Update() {
         return;
     }
     if (!g_arena.host) return;
+    if (!g_gridDone && now - g_arena.startMs > 1500) GridStep();
+    if (g_arena.itemsFor && (g_gridDone || now - g_arena.startMs > 6000)) {
+        PlaceItems(g_arena.itemsFor);
+        g_arena.itemsFor = 0;
+    }
     int left = CountLeft();
     if (left != g_arena.left) {
         if (left < g_arena.left) g_lastKillMs = now;
@@ -947,7 +1347,7 @@ void Update() {
         if (!g_arena.nextWaveMs) {
             int secs = (int)(PrepMs(false) / 1000);
             g_arena.nextWaveMs = now + PrepMs(false);
-            PlaceItems(g_arena.wave + 1);
+            g_arena.itemsFor = g_arena.wave + 1;
             Send(A_PREP, [secs](Writer& w) { w.U8((uint8_t)secs); });
             ui::TheChat().AddSystem(Format(TR("Волна отбита! Следующая через %d секунд.", "The wave is beaten! The next one in %d seconds."), secs));
         }
@@ -956,6 +1356,16 @@ void Update() {
             SpawnWave();
         }
     }
+}
+
+// /skip: the wait before the next wave ends now (the host's game decides; another player asks it)
+void Skip(uint8_t by) {
+    if (!g_arena.on || g_arena.endAt || !g_arena.nextWaveMs || NowMs() >= g_arena.nextWaveMs) return;
+    g_arena.nextWaveMs = NowMs();
+    std::string who = by == Net().MyId() || !Net().Online() ? std::string(TR("Вы", "You")) : Net().PeerName(by);
+    std::string line = Format(TR("%s: ожидание пропущено, волна начинается.", "%s skipped the wait: the wave begins."), who.c_str());
+    ui::TheChat().AddSystem(line);
+    LOGI("Arena: the wait skipped by player %d", by);
 }
 
 void List() {
@@ -1007,10 +1417,17 @@ public:
     }
     bool OnCommand(const std::string& cmd, const std::vector<std::string>& args) override {
         std::string c = LowerRu(cmd);
-        if (!Matches(c, kWordArena)) return false;
-        std::string a0 = args.empty() ? "" : LowerRu(args[0]);
+        bool skipCmd = Matches(c, kWordSkip);  // /skip alone too
+        if (!Matches(c, kWordArena) && !skipCmd) return false;
+        std::string a0 = skipCmd ? std::string("skip") : args.empty() ? "" : LowerRu(args[0]);
         if (a0.empty() || Matches(a0, kWordList) || a0 == "help") {
             List();
+            return true;
+        }
+        if (Matches(a0, kWordSkip)) {
+            if (!g_arena.on) ui::TheChat().AddError(TR("Арена не идёт.", "No arena is on."));
+            else if (Hosting()) Skip(Net().MyId());
+            else Send(A_SKIP);
             return true;
         }
         if (!Hosting()) {

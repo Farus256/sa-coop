@@ -363,6 +363,13 @@ void PredictImpact(CVehicle* v) {
     }
 }
 
+// And the gun's button answers nothing inside the game's tank control (CPad::CarGunJustDown, its only way to the
+// game's shot): the shot's timer alone did not keep it from firing every click.
+bool g_gunMuted = false;
+using GunDownFn = int16_t(__fastcall*)(void*, void*);
+GunDownFn g_origGunDown = nullptr;
+int16_t __fastcall HookCarGunJustDown(void* pad, void* edx) { return g_gunMuted ? 0 : g_origGunDown(pad, edx); }
+
 using TankControlFn = void(__fastcall*)(CVehicle*, void*);
 TankControlFn g_origTankControl = nullptr;
 void __fastcall HookTankControl(CVehicle* v, void* edx) {
@@ -375,7 +382,9 @@ void __fastcall HookTankControl(CVehicle* v, void* edx) {
     bool mine = me && v->Driver() == me && v->Status() == 0 /* STATUS_PLAYER */;
     float yaw0 = Field<float>(v, kTurretYaw), pitch0 = Field<float>(v, kTurretPitch);
     bool fire = mine && CallMethod<0x53FFE0, int16_t>(GetPad(0)) != 0;  // CPad::CarGunJustDown
+    g_gunMuted = true;
     g_origTankControl(v, edx);
+    g_gunMuted = false;
     last0 = saved0, last1 = saved1;  // the planes' guns use it too
     if (!mine) return;
     AimTurret(v, yaw0, pitch0, std::clamp(TimeStep() / 50.0f, 0.0f, 0.1f));
@@ -792,6 +801,7 @@ public:
     const char* Name() const override { return "Tanks"; }
     void OnInstallHooks() override {
         mem::HookFn(0x6AE850, &HookTankControl, &g_origTankControl, "CAutomobile::TankControl");
+        mem::HookFn(0x53FFE0, &HookCarGunJustDown, &g_origGunDown, "CPad::CarGunJustDown");
         Net().SetHandler(proto::G_TANK_SHOT, &HandleShot);
         Net().SetHandler(proto::G_TANK_HIT, &HandleHit);
         Net().SetHandler(proto::G_TANK_BATTLE, &HandleBattle);

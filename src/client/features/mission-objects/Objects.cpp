@@ -41,7 +41,7 @@ struct NetObject {
     bool broken = false;
     bool adopted = false;  // partner: its world had this object already (the host's world brought it)
     // attached to a vehicle in the host's game (a box in a van, a tarp on a train): there it never touches its vehicle,
-    // here a solid copy sat inside the vehicle's copy and lifted it ("Robbing Uncle Sam": the van floated)
+    // here a solid copy sat inside the vehicle's copy and lifted it (a van floated)
     bool attached = false;
     float scale = 1.0f;  // CObject::m_fScale (SET_OBJECT_SCALE)
     uint64_t sentMs = 0;
