@@ -65,9 +65,10 @@ float HeadingOf(const Quat& q) {  // the forward axis' direction on the map (rad
 }
 
 float WrapPi(float a) {
-    while (a > 3.14159265f) a -= 6.2831853f;
-    while (a < -3.14159265f) a += 6.2831853f;
-    return a;
+    // in one step: subtracting 2pi in a loop never ends for a large angle (1e9, the "not set yet" heading of a held
+    // cutscene partner, is a multiple of the float step there and froze the game in the cutscene)
+    if (!std::isfinite(a)) return 0.0f;
+    return std::remainder(a, 6.2831853f);
 }
 
 bool HasSteeredWheels(CVehicle* v) {
