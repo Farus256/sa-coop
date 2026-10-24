@@ -11,6 +11,8 @@
 //  * the game's new passers-by come a little farther off: in sight 46-53 m away instead of 42.5-50.5, and out of
 //    sight 37-46 m away instead of 15-25 (CPopulation::AddToPopulation): they no longer appear right behind a player
 //    who looks away and back. Out of sight they are kept to 50 m (the game dropped them past 25 m within 4 s).
+//    Nobody new comes nearer than 42 m to a player, in sight or not, and none goes within 40 m of one (FreeRandomPed of
+//    Peds frees only one farther off).
 #include <algorithm>
 #include <cmath>
 
@@ -206,6 +208,10 @@ void __cdecl HookPossiblyRemoveVehicle(CVehicle* v) {
     // kept for the other player while this game has ground under it (see HookManagePed), then given to it; a wreck
     // goes as usual (kept, they filled the vehicle pool around two players)
     uint8_t who = 0;
+    // with its people, it does not go within 40 m of this game's player either
+    if (v && v->Status() != 5 /* STATUS_WRECKED */ && v->Driver() && FindPlayerPed(0) &&
+        (v->GetPosition() - FindPlayerPed(0)->GetPosition()).Length() < 40.0f)
+        return;
     if (Net().Online() && v && v->Status() != 5 /* STATUS_WRECKED */)
         if (const CVector* r = NearestRemote(v->GetPosition(), 140.0f, v->AreaCode(), &who)) {
             float local = (v->GetPosition() - FindPlayerPed(0)->GetPosition()).Length2D();
@@ -314,9 +320,10 @@ using AddToPopulationFn = bool(__cdecl*)(float, float, float, float);
 AddToPopulationFn g_origAddToPopulation = nullptr;
 bool __cdecl HookAddToPopulation(float minOn, float maxOn, float minOff, float maxOff) {
     if (maxOn > minOn && minOn > 30.0f)  // the usual call (the start of the game's spreads them from 10 m: left alone)
-        minOn = std::min(minOn * 1.08f, maxOn * 1.05f - 1.0f), maxOn *= 1.05f;
-    // out of sight: 15-25 m was right behind the player, and 5 of them stood there as soon as it looked back
-    if (maxOff > minOff && minOff >= 10.0f) minOff = std::max(minOff, maxOff * 1.48f), maxOff *= 1.85f;
+        minOn = std::max(42.0f, std::min(minOn * 1.08f, maxOn * 1.05f - 1.0f)), maxOn = std::max(maxOn * 1.05f, minOn + 6.0f);
+    // out of sight: 15-25 m was right behind the player, and 5 of them stood there as soon as it looked back; no
+    // nearer than 42 m now
+    if (maxOff > minOff && minOff >= 10.0f) minOff = std::max({minOff, maxOff * 1.48f, 42.0f}), maxOff = std::max(maxOff * 1.85f, minOff + 6.0f);
     return g_origAddToPopulation(minOn, maxOn, minOff, maxOff);
 }
 

@@ -29,7 +29,14 @@ private:
         std::wstring text;
         uint32_t color;
         uint64_t time;
+        uint64_t id;  // its number (the selection names the messages by it)
     };
+    void Copy();
+    uint64_t m_nextId = 1;
+    // the messages picked with the mouse (from the one pressed on to the one under the mouse), 0: none
+    uint64_t m_selFrom = 0, m_selTo = 0;
+    bool m_dragging = false;
+    uint64_t m_copiedAt = 0;
     std::deque<Line> m_lines;
     std::wstring m_input;
     size_t m_cursor = 0;

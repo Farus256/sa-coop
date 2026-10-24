@@ -3,12 +3,14 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cwctype>
 
 #include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
 #include "shared/config/Config.h"
 #include "shared/ui/input/Input.h"
 #include "shared/ui/renderer/Renderer.h"
+#include "shared/ui/widgets/Widgets.h"
 
 namespace coop::ui {
 
@@ -24,7 +26,7 @@ static constexpr uint64_t kFadeAfterMs = 30000;
 
 void Chat::Add(const std::string& text, uint32_t argb) {
     LOGI("[chat] %s", text.c_str());
-    m_lines.push_back({Widen(text), argb, NowMs()});
+    m_lines.push_back({Widen(text), argb, NowMs(), m_nextId++});
     while (m_lines.size() > kMaxLines) m_lines.pop_front();
 }
 
@@ -36,14 +38,58 @@ void Chat::Open() {
     m_cursor = 0;
     m_histPos = -1;
     m_scroll = 0;
+    m_selFrom = m_selTo = 0;
+    m_dragging = false;
     In().SetKeyboardCapture(true);
+    In().SetMouseCapture(true);  // the mouse is the chat's: scroll its history, pick messages to copy
 }
 
 void Chat::Close() {
     if (!m_open) return;
     m_open = false;
     m_scroll = 0;
+    m_selFrom = m_selTo = 0;
+    m_dragging = false;
     In().SetKeyboardCapture(false);
+    In().SetMouseCapture(false);
+}
+
+// the picked messages to the clipboard, one a line, without their colour codes
+void Chat::Copy() {
+    if (!m_selFrom) return;
+    uint64_t a = std::min(m_selFrom, m_selTo), b = std::max(m_selFrom, m_selTo);
+    std::wstring out;
+    for (const Line& l : m_lines) {
+        if (l.id < a || l.id > b) continue;
+        std::wstring t;
+        for (size_t i = 0; i < l.text.size(); ++i) {
+            if (l.text[i] == L'{' && i + 7 < l.text.size() && l.text[i + 7] == L'}') {  // {RRGGBB}
+                bool hex = true;
+                for (size_t k = 1; k <= 6; ++k) hex &= iswxdigit(l.text[i + k]) != 0;
+                if (hex) {
+                    i += 7;
+                    continue;
+                }
+            }
+            t += l.text[i];
+        }
+        if (!out.empty()) out += L"\r\n";
+        out += t;
+    }
+    if (out.empty() || !OpenClipboard((HWND)In().Hwnd())) return;
+    EmptyClipboard();
+    if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (out.size() + 1) * sizeof(wchar_t))) {
+        if (auto* p = (wchar_t*)GlobalLock(h)) {
+            std::copy(out.begin(), out.end(), p);
+            p[out.size()] = 0;
+            GlobalUnlock(h);
+            if (!SetClipboardData(CF_UNICODETEXT, h)) GlobalFree(h);
+        } else {
+            GlobalFree(h);
+        }
+    }
+    CloseClipboard();
+    m_copiedAt = NowMs();
 }
 
 static std::wstring ReadClipboard() {
@@ -129,6 +175,12 @@ void Chat::ProcessInput() {
             case VK_NEXT:
                 m_scroll = std::max(0, m_scroll - 5);
                 break;
+            case 'C':
+                if (st.ctrl && m_selFrom) Copy();
+                break;
+            case 'A':
+                if (st.ctrl && !m_lines.empty() && m_input.empty()) m_selFrom = m_lines.front().id, m_selTo = m_lines.back().id;
+                break;
             case 'V':
                 if (st.ctrl) {
                     std::wstring clip = ReadClipboard();
@@ -167,6 +219,7 @@ void Chat::Render() {
         std::wstring text;
         uint32_t color;
         float alpha;
+        uint64_t id;
     };
     std::vector<Vis> vis;
     int skip = m_scroll;
@@ -183,14 +236,35 @@ void Chat::Render() {
                 --skip;
                 continue;
             }
-            vis.push_back({*w, it->color, alpha});
+            vis.push_back({*w, it->color, alpha, it->id});
         }
     }
     if (m_open) {
         g.Rect(x - 8 * s, y - 6 * s, width + 16 * s, lh * kVisibleLines + 12 * s, 0x60000000);
     }
+    // the mouse: a press on a message picks it, a drag picks the ones between; Ctrl+C copies them (Ctrl+A: all)
+    if (m_open) {
+        auto& st = In().State();
+        uint64_t under = 0;
+        if (st.mouseX >= x - 8 * s && st.mouseX <= x + width + 8 * s) {
+            float ry = y + lh * (kVisibleLines - 1);
+            for (auto& v : vis) {
+                if (st.mouseY >= ry && st.mouseY < ry + lh) under = v.id;
+                ry -= lh;
+            }
+        }
+        bool inLog = st.mouseX >= x - 8 * s && st.mouseX <= x + width + 8 * s && st.mouseY >= y - 6 * s && st.mouseY <= y + lh * kVisibleLines + 6 * s;
+        if (st.lmbPressed) {
+            if (under) m_selFrom = m_selTo = under, m_dragging = true;
+            else if (inLog) m_selFrom = m_selTo = 0;
+        }
+        if (m_dragging && st.lmb && under) m_selTo = under;
+        if (!st.lmb) m_dragging = false;
+    }
+    uint64_t selA = std::min(m_selFrom, m_selTo), selB = std::max(m_selFrom, m_selTo);
     float cy = y + lh * (kVisibleLines - 1);
     for (auto& v : vis) {
+        if (m_open && m_selFrom && v.id >= selA && v.id <= selB) g.Rect(x - 6 * s, cy, width + 12 * s, lh, 0x704A78C8);
         g.TextW(FONT_NORMAL, x, cy, v.text, WithAlpha(v.color, v.alpha), TEXT_OUTLINE);
         cy -= lh;
     }
@@ -209,6 +283,11 @@ void Chat::Render() {
         if (((now - m_openTime) / 500) % 2 == 0) g.Rect(x - offset + caretX, iy + 5 * s, 2 * s, lh - 2 * s, 0xFFFFFFFF);
         if (m_scroll > 0)
             g.Text(FONT_SMALL, x + width, y - 4 * s, Format("▲ %d", m_scroll), 0xFFB0B0B0, TEXT_RIGHT | TEXT_SHADOW);
+        std::string hint = now - m_copiedAt < 1500 ? std::string(TR("Скопировано", "Copied"))
+                         : m_selFrom ? std::string(TR("Ctrl+C — копировать", "Ctrl+C: copy"))
+                                     : std::string(TR("Колесо — история, мышь — выбрать сообщения", "Wheel: history, mouse: pick messages"));
+        g.Text(FONT_SMALL, x + width, iy + ih + 4 * s, hint, 0xFFB0B0B0, TEXT_RIGHT | TEXT_SHADOW);
+        w::DrawCursor();
     }
 }
 

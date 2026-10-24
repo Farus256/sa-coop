@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstring>
+#include <string>
 
 #include "common/lib/log/Log.h"
 #include "shared/game/Game.h"
@@ -16,6 +17,40 @@ Input& In() {
 }
 
 static WNDPROC g_origProc = nullptr;
+
+// The game's DirectInput mouse (psGlobal: window, instance, fullScreen, lastMousePos, ?, the DirectInput interface,
+// then the mouse). Acquired, it holds the system's cursor where it is (exclusive), and our menu's and the chat's
+// cursor did not move: while the mouse is ours it is let go (Unacquire, every frame: the game acquires it again on
+// its own), and taken again after. Found as the second pointer there that is a DirectInput object (its vtable in
+// dinput8.dll), so a wrong guess at the layout leaves it alone.
+static bool InDinput(const void* p) {
+    HMODULE mod = nullptr;
+    wchar_t path[MAX_PATH] = {};
+    if (!p || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)p, &mod) ||
+        !GetModuleFileNameW(mod, path, MAX_PATH))
+        return false;
+    std::wstring name = path;
+    CharLowerBuffW(name.data(), (DWORD)name.size());
+    return name.find(L"dinput") != std::wstring::npos;
+}
+static void* GameMouse() {
+    void* ps = game::Ref<void*>(game::addr::RsGlobal + 0x14);
+    if (!ps || IsBadReadPtr(ps, 0x30)) return nullptr;
+    int found = 0;
+    for (uintptr_t off = 0x10; off <= 0x28; off += 4) {
+        void* obj = game::Field<void*>(ps, off);
+        if (!obj || IsBadReadPtr(obj, 4) || IsBadReadPtr(*(void**)obj, 0x40) || !InDinput(*(void**)obj)) continue;
+        if (++found == 2) return obj;
+    }
+    return nullptr;
+}
+static void MouseDevice(bool acquire) {
+    void* dev = GameMouse();
+    if (!dev) return;
+    using Fn = long(__stdcall*)(void*);
+    Fn fn = (Fn)(*(void***)dev)[acquire ? 7 : 8];  // IDirectInputDevice8::Acquire / Unacquire
+    fn(dev);
+}
 
 static LRESULT CALLBACK CoopWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (In().OnMessage(msg, wp, lp)) return 0;
@@ -47,6 +82,8 @@ void Input::SetKeyboardCapture(bool on) {
 void Input::SetMouseCapture(bool on) {
     if (on == m_mouseCapture) return;
     m_mouseCapture = on;
+    MouseDevice(!on);
+    if (on) ClipCursor(nullptr);
     if (on) {
         // put the cursor in the middle so the user sees it
         RECT rc;
@@ -68,6 +105,7 @@ void Input::EndFrame() {
 
 void Input::UpdateMouse(float bbW, float bbH) {
     if (!m_hwnd) return;
+    if (m_mouseCapture && game::IsForeground()) MouseDevice(false);  // the game may have taken it again
     POINT p;
     GetCursorPos(&p);
     ScreenToClient((HWND)m_hwnd, &p);

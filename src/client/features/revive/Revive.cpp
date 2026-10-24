@@ -507,9 +507,15 @@ public:
     const char* Name() const override { return "Revive"; }
     void OnInstallHooks() override {
         mem::HookFn(0x4B3210, &HookWillKill, &g_origWillKill, "CPedDamageResponseCalculator::ComputeWillKillPed");
-        mem::HookFn(0x52B730, &HookCameraProcess, &g_origCameraProcess, "CCamera::Process");
         mem::HookFn(0x485A50, &HookDeathArrestCheck, &g_origDeathArrest, "CRunningScript::DoDeathArrestCheck");
         Net().SetHandler(proto::G_REVIVE, &HandleRevive);
+    }
+    // CCamera::Process is hooked only once the game runs: plugins that tell the game's version by its first bytes
+    // (Hooks.asi of the first-person mod looks at 0x52B730 for "sub esp, 0A0h") said "unknown game version" when our
+    // hook was there before they loaded
+    void OnGameStarted() override {
+        static bool hooked = false;
+        if (!hooked) hooked = mem::HookFn(0x52B730, &HookCameraProcess, &g_origCameraProcess, "CCamera::Process");
     }
     void OnSessionEnd() override { ResetAll(); }
     void OnGameShutdown() override {

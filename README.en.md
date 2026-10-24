@@ -45,7 +45,10 @@ It is based on the original 0.2.7 and keeps everything from it. Added:
 - goods at the 24/7 counter and at the bar with effects that last a while
 - tank battles (`/tanks`): shells fly, armour has a front and a rear, the game's tank crews fire, soldiers carry RPGs
 - ground battles (`/arena yakuza random 5`): waves of enemies in the missions' interiors and a boss at the end
-- a first-person view (F7 or `/fp`); the host can turn cheat codes off for everyone (`/cheats off`)
+- the First Person mod (BoPoH, DK22Pac, DenSpb, Crspy, Junior_Djjr; installed on its own) works with it: one can walk
+  back in its first-person view, the aiming mod (imCamAim) keeps out of its way, and it no longer says "unknown game
+  version"; the host can turn cheat codes off for everyone (`/cheats off`)
+- the mouse in the chat: the wheel scrolls its history, the mouse picks messages, `Ctrl+C` copies them
 - the original SA:COOP 0.3.0's changes: side jobs together, the other player's moves, the firewall prompt, mission
   start points and map changes of the host's missions, and its fixes
 - Linux and macOS builds, server tests
@@ -190,26 +193,33 @@ player with four wanted stars or more. Without friendly fire the players' tanks 
 
 **A tank battle**: the host types `/tanks`. Every player within 400 m of the host gets a Rhino by the road, and 12
 seconds later three waves of enemy tanks come from 250-350 m away (as many as the players, one more each wave; they
-drive in to 140 m and fight from there, marked on the radar). Soldiers with rocket launchers come on foot with each
+drive in to 140 m and fight from there, marked red on the radar and on the screen). Soldiers with rocket launchers come on foot with each
 wave (2, 3, 4): a rocket takes 30% of a tank's armour. The next wave comes only when every tank and soldier of this
 one is down. All three waves destroyed: $5000 to everyone in the
 battle. Everyone in it dead, or 15 minutes: lost. `/tanks join` joins it later, `/tanks stop` (the host) ends it.
+While it is on there are no passers-by and no traffic for its players: they go and none come till it ends. The
+enemies always know where the players are.
 
 ### Ground battles
 
 The host types `/arena <enemies> <place> <waves>`, e.g. `/arena yakuza random 5` or `/arena ballas crack 3`
 (`/arena list` lists them all). Every player is taken into an interior of the story's missions: Big Smoke's crack
-palace, Madd Dogg's mansion, Caligula's and the Four Dragons casinos, the meat factory, a warehouse, the Jefferson
-motel, the atrium, Woozie's office, Liberty City, the police station, the Sherman dam, the Bloodbowl and Kickstart
-stadiums (`random`: any). Enemies: yakuza, ballas, vagos, aztecas, triads, mafia, rifa, bikers, police, swat, army.
+palace, Madd Dogg's mansion, the meat factory, the Jefferson motel, the atrium, Liberty City, the
+police station, the Sherman dam, the Kickstart stadium (`random`: any). Enemies: yakuza, ballas, vagos, aztecas, triads, mafia, rifa, bikers, police, swat, army.
 1 to 10 waves, each bigger, better armed and better aimed. The next wave comes 6 seconds (30 in a big place) after
 the last of this one falls; `/skip` (or `/arena skip`) starts it at once. The last wave brings a boss: Tenpenny, Pulaski, Hernandez, Big Smoke, Ryder, OG Loc, T-Bone Mendez, Jizzy B
 or Mike Toreno, with an AK-47 (a gang's) or an M4 (the police's and Toreno), and with him, unannounced, his silent
-men working round the players. Enemies come in squads of 3-4 from different sides of the place, away from the players
-(all over it in a big place): one straight on, the others to the players' backs. They take cover, pop up and shoot,
-wait, then push at the players as a squad; one stuck in a corner or at a door works its way out to them. Squads have
-grenadiers (who throw only when the grenade will get there), and knifemen come alone from elsewhere and kill silently
-from behind. More armour each wave. No wanted stars in an arena or a tank battle, and weapons taken up there are not kept after it.
+men working round the players; the boss is as tough as the SWAT, no headshot kills him at once. Enemies come in squads
+of 3-4 from all sides of the place, away from the players and not from where the last wave came (the mod works out
+the place's floor), and never out of a wall. They know no fear and always know where the players are: out of sight
+they come along the floor instead of walking into walls; in sight they fight, take cover, pop up and shoot, wait and
+push at the players as a squad; one stuck works its way out. Squads have grenadiers (who throw only when the grenade
+will get there). Knifemen come alone and steal up to a player's back out of its sight (waiting for it to look away),
+run as CJ does and stab from behind with the game's own animation; the police's and the SWAT's knifeman is Cerberus
+from Manhunt when his model (`cerberus.dff` and `cerberus.txd`) is added to `gta3.img` or to modloader. The last two
+waves bring snipers: they stand far off and shoot from there, and move on when they lose sight of the players. More
+armour each wave (half of it for the SWAT). The arena's doors out are shut while it is on, and the armour is gone
+after it. No wanted stars in an arena or a tank battle, and weapons taken up there are not kept after it.
 Weapons and body armour lie all over the place before each wave, the first one too, somewhere else each time
 (better each wave; less armour where drinks machines stand).
 A win pays everyone $1000 a wave, then takes everyone back where it stood. Everyone dead
@@ -286,10 +296,10 @@ sees "The server does not answer", even on a home network. If an antivirus remov
 | Key | What it does |
 |---|---|
 | F9 | the SA:COOP window |
-| T | chat: Enter sends a message, Esc closes the chat |
+| T | chat: Enter sends a message, Esc closes the chat; the mouse wheel scrolls its history, the mouse picks messages, Ctrl+C copies them |
 | B | voice chat while the key is held |
 | G | take the nearest free passenger seat; by a Grove Street homie (another game's too): call him into your gang |
-| E | revive a wounded partner next to you; wounded: hold to give up; by a clerk or a barman: the menu, `1`-`4` to buy; by Zero's shop: a race |
+| E | revive a wounded partner next to you; wounded: hold to give up; by a clerk or a barman: the menu, `1`-`4` to buy; |
 | Left mouse button in a tank | fire (4 s to reload) |
 | Mouse wheel | as a passenger: pick the gun to shoot out of the window |
 | Right mouse button | as a passenger: lean out of the window with the gun, fire with the left button |
@@ -308,7 +318,7 @@ Chat commands:
 | `/draw [0.5-4] [detail]` | draw distance (4 by default, 1 is the game's own) |
 | `/tanks` | host: a tank battle; `/tanks join` joins it, `/tanks stop` ends it |
 | `/arena` | host: a ground battle, `/arena yakuza random 5`; `/arena list` lists, `/arena stop` ends it |
-| `/fp`, F7 | first-person view on and off |
+| `/skip` | the arena: start the next wave now |
 | `/cheats off`, `/cheats on` | host: turn cheat codes off or on for everyone |
 | `/sync` | the sync's state: ping, the delay to each player, how many people and cars your game runs |
 | `/code <cheat>` | enter a cheat, for example `/code HESOYAM` |

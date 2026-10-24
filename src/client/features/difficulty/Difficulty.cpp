@@ -102,7 +102,7 @@ void Elite() {
         Cmd(0x060F).I(h).F(80.0f).Run();  // SET_SENSE_RANGE
         p->WeaponAccuracy() = 95;
         Field<uint8_t>(p, 0x719) = 120;   // CPed::m_nWeaponShootingRate: how far it opens fire
-        if (p->Armour() < 100.0f) p->Armour() = 100.0f;
+        if (p->Armour() < 50.0f) p->Armour() = 50.0f;  // half a vest (a full one with no headshots was too much)
     }
 }
 

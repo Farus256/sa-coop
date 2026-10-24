@@ -694,7 +694,9 @@ static bool FreeRandomPed() {
             continue;
         if (float d = (p->GetPosition() - me->GetPosition()).Length(); d > farD) farD = d, far = p;
     }
-    if (!far) return false;
+    if (!far || farD < 40.0f) return false;  // none goes within 40 m of a player
+    for (auto& [id, rp] : Players::Instance().All())
+        if (rp.hasState && (rp.state.pos - far->GetPosition()).Length() < 40.0f) return false;
     LOGD("Ped pool full: our passer-by %.0f m away makes room for a copy", farD);
     Call<0x610F20>(far);  // CPopulation::RemovePed
     return true;

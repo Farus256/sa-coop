@@ -51,17 +51,47 @@ CVector Forward(CPed* p) {
     return {-std::sin(h), std::cos(h), 0.0f};
 }
 
-// this game's player dies of the knife
+// This game's player dies of the knife as in the game's own stealth kill: no control, the stab
+// (KILL_Knife_Ped_Damage) as the knifeman's blade goes in, then the fall (TASK_DIE_NAMED_ANIM KILL_Knife_Ped_Die), and
+// only when it lies on the ground the health is gone. Setting the health to nothing at once had the game take it for
+// an ordinary death: CJ just dropped, with no stab and no fall of the knife.
+uint64_t g_stabAt = 0, g_fallAt = 0, g_deadAt = 0;
 void DieHere() {
     CPlayerPed* me = FindPlayerPed(0);
     if (!me || me->Health() <= 0.0f || me->InVehicle() || NowMs() < g_victimSafeUntil) return;
     g_victimSafeUntil = NowMs() + 6000;
-    if (!EnsureBlock("KNIFE")) return;
-    int h = GetPedRef(me);
-    Cmd(0x0829).I(h).S("KILL_Knife_Ped_Die").S("KNIFE").F(8.0f).I(-1).Run();  // TASK_DIE_NAMED_ANIM
-    me->Health() = 0.0f;
+    uint64_t now = NowMs();
+    g_stabAt = now + 150;
+    g_fallAt = now + 950;
+    g_deadAt = now + 2600;
     me->Armour() = 0.0f;
+    Cmd(0x01B4).I(0).I(0).Run();  // SET_PLAYER_CONTROL: off
     LOGI("Killed silently with a knife");
+}
+
+void Dying() {  // every frame while it goes on
+    if (!g_stabAt && !g_fallAt && !g_deadAt) return;
+    CPlayerPed* me = FindPlayerPed(0);
+    uint64_t now = NowMs();
+    if (!me) {
+        g_stabAt = g_fallAt = g_deadAt = 0;
+        return;
+    }
+    int h = GetPedRef(me);
+    if (g_stabAt && now >= g_stabAt) {
+        g_stabAt = 0;
+        if (EnsureBlock("KNIFE"))
+            Cmd(0x0812).I(h).S("KILL_Knife_Ped_Damage").S("KNIFE").F(8.0f).I(0).I(0).I(0).I(1).I(-1).Run();  // TASK_PLAY_ANIM_NON_INTERRUPTABLE
+    }
+    if (g_fallAt && now >= g_fallAt) {
+        g_fallAt = 0;
+        if (EnsureBlock("KNIFE")) Cmd(0x0829).I(h).S("KILL_Knife_Ped_Die").S("KNIFE").F(4.0f).I(-1).Run();  // TASK_DIE_NAMED_ANIM
+    }
+    if (g_deadAt && now >= g_deadAt) {
+        g_deadAt = 0;
+        Cmd(0x01B4).I(0).I(1).Run();  // SET_PLAYER_CONTROL: back (the death takes it anyway)
+        if (me->Health() > 0.0f) me->Health() = 0.0f;
+    }
 }
 
 void HandleKnife(uint8_t from, Reader& r) {
@@ -142,9 +172,11 @@ public:
         g_marked.clear();
         g_knifeReady.clear();
         g_copySafeUntil.clear();
+        g_stabAt = g_fallAt = g_deadAt = 0;
     }
     void OnPostProcess() override {
         if (!core::IsPlayerReady()) return;
+        Dying();
         static uint64_t scanMs = 0;
         if (NowMs() - scanMs < 100) return;
         scanMs = NowMs();

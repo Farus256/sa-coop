@@ -1,17 +1,20 @@
 // The sniper rifle's scope is drawn sharp and round ([game] better_scope = 0: the game's own). The cameras on foot and
 // aiming out of a car's window are the game's own; a passenger's car camera stays where the player turned it.
-// A first-person view, as the mods have it (F7, [keys] first_person, or /fp): the game's camera works as ever (the mouse
-// turns it, it aims as it aims), but it looks from the player's eyes: after each camera's work (CCam::Process) its
-// place is the head's (a little ahead of the face), the crosshair in the middle of the screen.
+// The first-person view is the first-person mod's (installed on its own, V); here it gets a walk back and keeps the
+// aiming mod out of its way (below).
+#include <windows.h>
+
 #include <algorithm>
 #include <cmath>
 
+#include "common/lib/log/Log.h"
 #include "common/lib/util/Util.h"
 #include "shared/api/net-session/Session.h"
 #include "shared/config/Config.h"
-#include "features/aim-view/AimView.h"
 #include "shared/game/Game.h"
+#include "shared/game/Anim.h"
 #include "shared/game/Im2D.h"
+#include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
 #include "shared/ui/chat/Chat.h"
@@ -21,6 +24,7 @@ namespace coop {
 namespace {
 using namespace game;
 using namespace im2d;
+using game::script::Cmd;
 
 // The sniper rifle's scope, drawn here instead of the game's: its texture is a 210x210 picture stretched to the
 // screen's proportions (an oval on a wide screen) with a blurry edge. A round sight, sharp at any resolution: black
@@ -150,45 +154,102 @@ void FollowAim() {
     g_rel = Wrap(std::atan2(f.y, f.x) + g_frontOffset - CarAngle(v));
 }
 
-// ---- the first-person view
-bool g_firstPerson = false;
-float g_savedCrossX = 0.53f, g_savedCrossY = 0.4f;
-bool FirstPersonMode(uint16_t mode) {
-    switch (mode) {
-    case 4: case 18: case 22: case 53: case 55: case 65:  // on foot, a car, a boat, aiming on foot / from a car / attached
-        return true;
+// ---- with the first-person mod
+// The first-person view is the mod of BoPoH (Voron295) with DK22Pac, DenSpb, Crspy and Junior_Djjr's fixes, installed
+// on its own (V changes the camera to it, Alt+B its settings). Its view is seen here as the camera standing at the
+// player's head (judged on foot without aiming and in a car's camera; while aiming it is what it was before).
+//  * Backwards: in that view S turned CJ round to walk at the camera, and the camera at his head turned with him: one
+//    could not walk back. Holding S there (not aiming) CJ keeps facing where the camera looks and steps back
+//    (GunMove_BWD, the game's own walk back with a gun, from its root motion), unless the mod walks him back itself.
+//  * The aiming mod (imCamAim.SA.asi, Advanced Aiming Mod) moves the aiming camera off the shoulder: in the
+//    first-person view it pulled the camera out of the head and the two fought. Its call in CCam::Process (of
+//    CCam::Process_AimWeapon, which it takes over) goes straight to the game's again while the first-person view is on,
+//    and back to it in the third person.
+bool g_fpView = false;
+bool g_backing = false;
+uint32_t g_bwdKey = 0;
+
+CVector HeadOf(CPed* p) {
+    CVector head;
+    CallMethod<0x5E4280>(p, &head, 5 /* BONE_HEAD */, true);  // CPed::GetBonePosition
+    return head;
+}
+CVector CameraPos() {  // TheCamera's own place (its matrix), whatever camera made it
+    CMatrix* m = Field<CMatrix*>((void*)addr::TheCamera, 0x14);
+    return m ? m->pos : Ref<CVector>(addr::TheCamera + 0x04);
+}
+
+void UpdateFpView() {
+    CPlayerPed* me = FindPlayerPed(0);
+    uint16_t mode = cam::Mode();
+    if (!me || me->Health() <= 0.0f || cam::WideScreenOn()) {
+        g_fpView = false;
+        return;
+    }
+    if (mode != 4 /* FOLLOWPED */ && mode != 18 /* CAM_ON_A_STRING */) return;  // aiming and the rest: as it was
+    CVector head = HeadOf(me);
+    if (head.Length() < 1.0f) return;
+    g_fpView = (CameraPos() - head).Length() < 0.7f;
+}
+
+bool ModWalksBack(CPed* me) {  // the mod's own strafing walk back is on
+    if (!g_bwdKey) g_bwdKey = Call<0x53CF30, uint32_t>("GunMove_BWD");  // CKeyGen::GetUppercaseKey
+    for (void* a = anim::First(me->RwObject()); a; a = anim::Next(a)) {
+        void* hier = Field<void*>(a, 0x14);  // CAnimBlendAssociation::m_pHierarchy
+        if (hier && Field<uint32_t>(hier, 0) == g_bwdKey) return true;  // CAnimBlendHierarchy::m_hashKey
     }
     return false;
 }
 
-using CamProcessFn = void(__fastcall*)(void*, void*);
-CamProcessFn g_origCamProcess = nullptr;
-void __fastcall HookCamProcess(void* cam, void* edx) {
-    g_origCamProcess(cam, edx);
-    if (!g_firstPerson || (uintptr_t)cam != cam::Active() || cam::WideScreenOn() || !core::IsPlayerReady()) return;
-    CPlayerPed* me = FindPlayerPed(0);
-    uint16_t mode = Field<uint16_t>(cam, 0x0C);
-    if (!me || me->Health() <= 0.0f || !FirstPersonMode(mode)) return;
-    CVector head;
-    CallMethod<0x5E4280>(me, &head, 5 /* BONE_HEAD */, true);  // CPed::GetBonePosition
-    if (head.Length() < 1.0f) return;
-    CVector& front = Field<CVector>(cam, kFront);
-    CVector flat{front.x, front.y, 0.0f};
-    float len = flat.Length();
-    if (len > 0.01f) flat = flat * (1.0f / len);
-    Field<CVector>(cam, kSource) = head + flat * 0.22f + CVector{0, 0, 0.06f};  // the eyes, ahead of the face
+void StopBacking(CPlayerPed* me) {
+    if (!g_backing) return;
+    g_backing = false;
+    if (me) Cmd(0x0792).I(GetPedRef(me)).Run();  // CLEAR_CHAR_TASKS_IMMEDIATELY: the walk back off
 }
 
-void SetFirstPerson(bool on) {
-    if (on == g_firstPerson) return;
-    g_firstPerson = on;
-    if (on) {
-        g_savedCrossX = cam::CrosshairMultX(), g_savedCrossY = cam::CrosshairMultY();
-    } else {
-        cam::CrosshairMultX() = g_savedCrossX, cam::CrosshairMultY() = g_savedCrossY;
+void WalkBack() {
+    CPlayerPed* me = FindPlayerPed(0);
+    if (!me) return;
+    const CControllerState& pad = GetPad(0)->NewState;
+    bool want = g_fpView && !me->InVehicle() && me->Health() > 0.0f && !MenuActive() && pad.LeftStickY > 60 && !pad.RightShoulder1 &&
+                std::fabs(me->MoveSpeed().z) < 0.05f;  // on the ground
+    if (!want) return StopBacking(me);
+    CVector f = cam::Front();
+    if (std::fabs(f.x) + std::fabs(f.y) < 0.01f) return;
+    int h = GetPedRef(me);
+    if (!g_backing) {
+        if (ModWalksBack(me)) return;
+        g_backing = true;
+        Cmd(0x0605).I(h).S("GunMove_BWD").S("PED").F(4.0f).I(1).I(1).I(1).I(0).I(-1).Run();  // TASK_PLAY_ANIM: looped, moving
     }
-    ui::TheChat().AddSystem(on ? TR("Вид от первого лица (F7 — обратно).", "First-person view (F7: back).")
-                               : TR("Вид от третьего лица.", "Third-person view."));
+    Cmd(0x0173).I(h).F(std::atan2(-f.x, f.y) * 57.29578f).Run();  // SET_CHAR_HEADING: facing where the camera looks
+}
+
+uintptr_t g_aimModCall = 0;  // the aiming mod's function at CCam::Process's call of Process_AimWeapon
+bool g_aimModOff = false;
+constexpr uintptr_t kAimWeaponCall = 0x527A95, kProcessAimWeapon = 0x521500;
+void AimModFor(bool firstPerson) {
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        uintptr_t t = mem::CallTarget(kAimWeaponCall);
+        HMODULE mod = nullptr;
+        wchar_t path[MAX_PATH] = {};
+        if (t && t != kProcessAimWeapon &&
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)t, &mod) && mod &&
+            GetModuleFileNameW(mod, path, MAX_PATH)) {
+            std::wstring name = path;
+            CharLowerBuffW(name.data(), (DWORD)name.size());
+            if (name.find(L"camaim") != std::wstring::npos) {
+                g_aimModCall = t;
+                LOGI("The aiming mod is in (imCamAim): off in the first-person view");
+            }
+        }
+    }
+    if (!g_aimModCall || firstPerson == g_aimModOff) return;
+    g_aimModOff = firstPerson;
+    void* prev = nullptr;
+    mem::RedirectCall(kAimWeaponCall, firstPerson ? (const void*)kProcessAimWeapon : (const void*)g_aimModCall, &prev);
 }
 
 class AimView : public Module {
@@ -197,18 +258,17 @@ public:
     void OnInstallHooks() override {
         mem::HookFn(0x58E020, &HookCrossHairs, &g_origCrossHairs, "CHud::DrawCrossHairs");
         mem::HookFn(0x5245B0, &HookFollowCar, &g_origFollowCar, "CCam::Process_FollowCar_SA");
-        mem::HookFn(0x526FC0, &HookCamProcess, &g_origCamProcess, "CCam::Process");
     }
-    void OnGameShutdown() override { g_holding = false, g_holdCar = nullptr; }
+    void OnGameShutdown() override {
+        g_holding = false, g_holdCar = nullptr;
+        g_backing = false, g_fpView = false;
+    }
     void OnPostProcess() override {
         if (!core::IsPlayerReady()) return;
         FollowAim();
-        if (g_firstPerson) cam::CrosshairMultX() = 0.5f, cam::CrosshairMultY() = 0.5f;  // the shot goes where the eyes look
-    }
-    bool OnCommand(const std::string& cmd, const std::vector<std::string>&) override {
-        if (cmd != "fp" && cmd != "firstperson") return false;
-        SetFirstPerson(!g_firstPerson);
-        return true;
+        UpdateFpView();
+        WalkBack();
+        AimModFor(g_fpView);
     }
 };
 
@@ -218,12 +278,5 @@ struct Reg {
 } g_reg;
 }  // namespace
 
-namespace aimview {
-bool KeyDown(int vk) {
-    if (vk != Cfg().firstPersonKey || !core::IsPlayerReady() || MenuActive()) return false;
-    SetFirstPerson(!g_firstPerson);
-    return true;
-}
-}  // namespace aimview
 
 }  // namespace coop

@@ -133,46 +133,60 @@ void DrawFigure(float cx, float footY, float h, const skin::Choice& c) {
 }
 
 // Beside the lobby: the window with the character this player will play, its name, and the arrows under it
+// Beside the lobby: every character at once, side by side (the game's own look of the Grove Street ones, CJ drawn),
+// the one this player will play lit; a click on one picks it (the arrows under them too)
 void CharacterWindow(float x, float y, float W, float H) {
     auto& g = Gfx();
+    auto& st = In().State();
     float s = g.Scale();
     int count = 0;
     const skin::Choice* list = skin::Choices(count);
     int index = std::clamp(skin::ChosenIndex(), 0, count - 1);
-    const skin::Choice& c = list[index];
     g.Rect(x, y, W, H, 0xF0000000);
     g.RectOutline(x, y, W, H, w::kSaLine, std::max(1.0f, s));
     float cx = x + 24 * s, cw = W - 48 * s, cy = y + 26 * s;
     g.Text(FONT_BIG, cx, cy, TR("Персонаж", "Character"), w::kSaBlue, TEXT_SHADOW);
     cy += g.LineHeight(FONT_BIG) + 4 * s;
-    g.Text(FONT_SMALL, cx, cy, TR("Выберите стрелками внизу", "Pick with the arrows below"), w::kSaMuted, TEXT_SHADOW);
+    g.Text(FONT_SMALL, cx, cy, TR("Нажмите на того, за кого будете играть", "Click the one you will play"), w::kSaMuted, TEXT_SHADOW);
     cy += g.LineHeight(FONT_SMALL) + 12 * s;
     float selH = g.LineHeight(FONT_MENU) + 12 * s;
     float nameH = g.LineHeight(FONT_NORMAL) * 2 + 8 * s;
-    float stageH = y + H - 22 * s - selH - nameH - 10 * s - cy;
-    // the stage: dark, lighter towards the floor, a glow of the character's colour under its feet
-    g.Rect(cx, cy, cw, stageH, 0xFF07090C);
-    for (int i = 0; i < 12; ++i) {
-        float k = i / 12.0f;
-        g.Rect(cx, cy + stageH * k, cw, stageH / 12.0f + 1, WithAlpha(0xFF1A2230, k * 0.8f));
+    float areaH = y + H - 22 * s - selH - nameH - 10 * s - cy;
+    // the cards: two rows of two (more: a row more each two)
+    int cols = count <= 1 ? 1 : 2, rows = (count + cols - 1) / cols;
+    float gap = 10 * s, cardW = (cw - gap * (cols - 1)) / cols, cardH = (areaH - gap * (rows - 1)) / rows;
+    static std::map<uint16_t, int> images;  // model -> the renderer's picture
+    for (int k = 0; k < count; ++k) {
+        const skin::Choice& c = list[k];
+        float bx = cx + (k % cols) * (cardW + gap), by = cy + (k / cols) * (cardH + gap);
+        bool hover = st.mouseX >= bx && st.mouseX < bx + cardW && st.mouseY >= by && st.mouseY < by + cardH;
+        bool lit = k == index;
+        // the stage: dark, lighter towards the floor, a glow of the character's colour under its feet
+        g.Rect(bx, by, cardW, cardH, 0xFF07090C);
+        for (int i = 0; i < 10; ++i) {
+            float t = i / 10.0f;
+            g.Rect(bx, by + cardH * t, cardW, cardH / 10.0f + 1, WithAlpha(lit ? 0xFF22304A : 0xFF1A2230, t * (hover || lit ? 0.95f : 0.7f)));
+        }
+        float foot = by + cardH * 0.86f, standH = cardH * 0.80f;
+        g.Ellipse(bx + cardW * 0.5f, foot, cardW * 0.34f, cardH * 0.04f, WithAlpha(c.shirt, lit ? 0.35f : 0.15f));
+        int pw = 0, ph = 0;
+        const uint32_t* px = c.model ? skin::Picture(c.model, pw, ph) : nullptr;
+        if (px && pw > 0 && ph > 0) {
+            auto it = images.find(c.model);
+            if (it == images.end()) it = images.emplace(c.model, g.AddImage(px, pw, ph)).first;
+            float h = standH, w = h * (float)pw / (float)ph;
+            if (w > cardW * 0.94f) h *= cardW * 0.94f / w, w = cardW * 0.94f;
+            g.Image(it->second, bx + cardW * 0.5f - w * 0.5f, foot - h + cardH * 0.01f, w, h);
+        } else {
+            DrawFigure(bx + cardW * 0.5f, foot, standH * 0.98f, c);
+        }
+        std::string label = Format("%d", k + 1);
+        g.Text(FONT_SMALL, bx + 6 * s, by + 4 * s, label, lit ? w::kSaBlue : w::kSaMuted, TEXT_SHADOW);
+        g.RectOutline(bx, by, cardW, cardH, lit ? w::kSaBlue : hover ? 0xFF6A7A8B : w::kSaLine, std::max(1.0f, (lit ? 2.0f : 1.0f) * s));
+        if (hover && st.lmbPressed && !lit) skin::SetChoice(k);
     }
-    g.RectOutline(cx, cy, cw, stageH, w::kSaLine, std::max(1.0f, s));
-    float foot = cy + stageH * 0.93f;
-    g.Ellipse(cx + cw * 0.5f, foot, cw * 0.36f, stageH * 0.05f, WithAlpha(c.shirt, 0.18f));
-    // the game's own look of the character (a picture of its model); CJ, who has none, drawn
-    int pw = 0, ph = 0;
-    const uint32_t* px = c.model ? skin::Picture(c.model, pw, ph) : nullptr;
-    if (px && pw > 0 && ph > 0) {
-        static std::map<uint16_t, int> images;  // model -> the renderer's picture
-        auto it = images.find(c.model);
-        if (it == images.end()) it = images.emplace(c.model, g.AddImage(px, pw, ph)).first;
-        float h = stageH * 0.86f, w = h * (float)pw / (float)ph;
-        if (w > cw * 0.92f) h *= cw * 0.92f / w, w = cw * 0.92f;
-        g.Image(it->second, cx + cw * 0.5f - w * 0.5f, foot - h + stageH * 0.01f, w, h);
-    } else {
-        DrawFigure(cx + cw * 0.5f, foot, stageH * 0.84f, c);
-    }
-    cy += stageH + 10 * s;
+    cy += areaH + 10 * s;
+    const skin::Choice& c = list[std::clamp(skin::ChosenIndex(), 0, count - 1)];
     float ty = cy;
     for (const std::wstring& line : g.Wrap(FONT_NORMAL, Widen(TR(c.name.ru, c.name.en)), cw)) {
         g.TextW(FONT_NORMAL, cx + cw * 0.5f, ty, line, 0xFFFFFFFF, TEXT_CENTER | TEXT_SHADOW);

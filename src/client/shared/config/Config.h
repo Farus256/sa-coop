@@ -56,7 +56,6 @@ struct ClientConfig {
     int chatKey = 0x54;               // T
     int passengerKey = 0x47;          // G
     int playerListKey = 0x71;         // F2
-    int firstPersonKey = 0x76;        // F7: the first-person view on and off
     int reviveKey = 0x45;             // E: revive a wounded partner (held while wounded: give up)
 
     // [debug]

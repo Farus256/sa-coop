@@ -19,6 +19,9 @@
 // counts its own, the others are told). All waves beaten: everyone in the battle gets paid. Everyone in it dead, or
 // 15 minutes: lost. /tanks stop ends it. No wanted stars in it, and what a player took up there it does not keep
 // (game::challenge); the soldiers drop nothing.
+// While the battle is on, the games of the players in it make no passers-by and no traffic and clear away the ones
+// they have (EmptyStreets), every enemy tank is marked on the screen (a red mark over it, an arrow at the edge when it
+// is aside), and the enemies always know where the players are.
 #include <windows.h>
 
 #include <algorithm>
@@ -44,6 +47,7 @@
 #include "shared/lib/core/Core.h"
 #include "shared/lib/memory/Memory.h"
 #include "shared/ui/chat/Chat.h"
+#include "shared/ui/marks/Marks.h"
 #include "shared/ui/renderer/Renderer.h"
 #include "shared/ui/widgets/Widgets.h"
 
@@ -576,6 +580,8 @@ void SpawnSoldiers(int count, float side) {
         Cmd(0x01B9).I(h).I(WEAPON_RLAUNCHER).Run();        // SET_CURRENT_CHAR_WEAPON
         Cmd(0x0223).I(h).I(150).Run();                     // SET_CHAR_HEALTH
         Cmd(0x02E2).I(h).I(55).Run();                      // SET_CHAR_ACCURACY
+        Cmd(0x060F).I(h).F(400.0f).Run();                  // SET_SENSE_RANGE: it knows where the players are
+        Cmd(0x060B).I(h).I(65542).Run();                   // SET_CHAR_DECISION_MAKER "Empty": no fear
         if (CPed* ped = GetPed(h)) g_battleSoldiers.insert(ped);
     }
     MarkModelNotNeeded(MODEL_ROCKETLA);
@@ -615,6 +621,7 @@ void SpawnWave() {
         Cmd(0x0129).I(car).I(PED_TYPE_MISSION1).I(MODEL_ARMY).Out(&crew).Run();         // CREATE_CHAR_INSIDE_CAR
         Cmd(0x020A).I(car).I(2).Run();                                                   // LOCK_CAR_DOORS: locked
         if (crew >= 0) Cmd(0x039E).I(crew).I(1).Run();                                   // SET_CHAR_CANT_BE_DRAGGED_OUT
+        if (crew >= 0) Cmd(0x060B).I(crew).I(65542).Run();                               // SET_CHAR_DECISION_MAKER: no bailing out
         if (CPed* made = crew >= 0 ? GetPed(crew) : nullptr) Peds::Instance().Share(made);
         Cmd(0x00AD).I(car).F(12.0f).Run();                                               // SET_CAR_CRUISE_SPEED
         Cmd(0x00AE).I(car).I(2).Run();                                                   // SET_CAR_DRIVING_STYLE: around cars
@@ -653,6 +660,8 @@ int CountLeft() {
 }
 int EnemiesLeft() { return g_battle.left; }
 
+void EmptyStreets(bool on);
+
 void EndBattle(bool won, bool tell) {
     if (!g_battle.on) return;
     if (tell && g_battle.host) SendBattle(B_END, [won](Writer& w) { w.U8(won); });
@@ -679,6 +688,7 @@ void EndBattle(bool won, bool tell) {
         game::challenge::End();
     }
     for (int k = 0; k < 16; ++k) radar::RemoveIcon(9600 + k);
+    EmptyStreets(false);
     LOGI("Tank battle over (%s)", won ? "won" : "lost");
     g_battle = Battle{};
 }
@@ -718,21 +728,79 @@ void HandleBattle(uint8_t from, Reader& r) {
     }
 }
 
-void UpdateBattle() {
-    if (!g_battle.on) return;
-    // the enemies on the radar of everyone in it (the host: its own tanks and soldiers)
-    std::vector<CVector> marks;
+// The streets of a battle: no passers-by and no traffic made (densities 0, set again every second: a script may set
+// its own), and this game's own random people and traffic cleared away (not the players', not the copies of the other
+// games' - those games clear their own); the parked and the empty cars stay. Back to as ever when it ends.
+bool g_emptied = false;
+void EmptyStreets(bool on) {
+    if (!on) {
+        if (!g_emptied) return;
+        g_emptied = false;
+        Cmd(0x03DE).F(1.0f).Run();  // SET_PED_DENSITY_MULTIPLIER
+        Cmd(0x01EB).F(1.0f).Run();  // SET_CAR_DENSITY_MULTIPLIER
+        LOGI("Tank battle: the streets fill again");
+        return;
+    }
+    if (!g_emptied) LOGI("Tank battle: the streets are emptied");
+    g_emptied = true;
+    Cmd(0x03DE).F(0.0f).Run();
+    Cmd(0x01EB).F(0.0f).Run();
+    CPlayerPed* me = FindPlayerPed(0);
+    int peds = 0, cars = 0;
+    if (CPoolHeader* pool = VehiclePool())
+        for (int i = 0; i < pool->size; ++i) {
+            if (pool->byteMap[i] < 0) continue;
+            auto* v = (CVehicle*)(pool->objects + (size_t)i * kVehiclePoolElemSize);
+            if (v->CreatedBy() != 1 /* RANDOM_VEHICLE */ || !v->Driver() || g_battleTanks.count(v) || (me && me->VehicleIfIn() == v)) continue;  // the traffic
+            if (NetVehicle* nv = Vehicles::Instance().Find(v); nv && Vehicles::Instance().IsMirror(*nv)) continue;  // another game's
+            bool players = false;
+            auto isPlayer = [](CPed* q) { return q && (q->IsPlayer() || Players::Instance().FindByPed(q) != nullptr); };
+            players |= isPlayer(v->Driver());
+            for (int k = 0; k < 8; ++k) players |= isPlayer(v->Passengers()[k]);
+            if (players) continue;
+            Cmd(0x00A6).I(GetVehicleRef(v)).Run();  // DELETE_CAR (its people with it)
+            ++cars;
+        }
+    if (CPoolHeader* pool = PedPool())
+        for (int i = 0; i < pool->size; ++i) {
+            if (pool->byteMap[i] < 0) continue;
+            auto* p = (CPed*)(pool->objects + (size_t)i * kPedPoolElemSize);
+            if (p->IsPlayer() || p->CreatedBy() != 1 /* PED_GAME */ || p->InVehicle() || Players::Instance().FindByPed(p)) continue;
+            if (NetPed* np = Peds::Instance().Find(p); np && np->owner != Net().MyId()) continue;  // another game's
+            if (!CallMethod<0x5DF100, bool>(p)) continue;  // CPed::CanBeDeleted
+            Call<0x610F20>(p);  // CPopulation::RemovePed
+            ++peds;
+        }
+    if (peds || cars) LOGD("Tank battle: %d people and %d cars cleared away", peds, cars);
+}
+
+// where the enemy tanks are (the host: its own; the others: by their net ids)
+std::vector<CVector> EnemyTanks() {
+    std::vector<CVector> at;
     if (g_battle.host) {
         for (CVehicle* v : g_battleTanks)
-            if (TankFights(v)) marks.push_back(v->GetPosition());
-        for (CPed* p : g_battleSoldiers)
-            if (SoldierFights(p)) marks.push_back(p->GetPosition());
+            if (TankFights(v)) at.push_back(v->GetPosition());
     } else {
         for (uint16_t id : g_battle.enemies) {
             NetVehicle* nv = Vehicles::Instance().Find(id);
-            if (nv && Vehicles::Alive(*nv) && (Field<uint8_t>(nv->veh, 0x36) >> 3) != STATUS_WRECKED) marks.push_back(nv->veh->GetPosition());
+            if (nv && Vehicles::Alive(*nv) && (Field<uint8_t>(nv->veh, 0x36) >> 3) != STATUS_WRECKED) at.push_back(nv->veh->GetPosition());
         }
     }
+    return at;
+}
+
+void UpdateBattle() {
+    if (!g_battle.on) return;
+    static uint64_t emptyMs = 0;
+    if ((g_battle.joined || g_battle.host) && NowMs() - emptyMs > 1000) {
+        emptyMs = NowMs();
+        EmptyStreets(true);
+    }
+    // the enemies on the radar of everyone in it (the host: its own tanks and soldiers)
+    std::vector<CVector> marks = EnemyTanks();
+    if (g_battle.host)
+        for (CPed* p : g_battleSoldiers)
+            if (SoldierFights(p)) marks.push_back(p->GetPosition());
     for (int k = 0; k < 16; ++k) {
         if (k < (int)marks.size()) radar::SetIcon(9600 + k, marks[k], 19 /* ENEMYATTACK */);
         else radar::RemoveIcon(9600 + k);
@@ -757,13 +825,13 @@ void UpdateBattle() {
             if ((t.pos - v->GetPosition()).Length() > 140.0f) Cmd(0x00A7).I(h).F(t.pos.x).F(t.pos.y).F(t.pos.z).Run();  // CAR_GOTO_COORDINATES
             else Cmd(0x00A9).I(h).Run();                                                                                  // CAR_SET_IDLE
         }
-        static std::map<CPed*, CPed*> after;  // whom each soldier is after
+        static std::map<CPed*, std::pair<CPed*, uint64_t>> after;  // whom each soldier is after, since when
         for (CPed* p : g_battleSoldiers) {
             if (!SoldierFights(p)) continue;
             CPed* target = NearestPlayer(p->GetPosition());
-            if (!target || after[p] == target) continue;
-            after[p] = target;
-            Cmd(0x05E2).I(GetPedRef(p)).I(GetPedRef(target)).Run();  // TASK_KILL_CHAR_ON_FOOT
+            if (!target || (after[p].first == target && now - after[p].second < 9000)) continue;
+            after[p] = {target, now};
+            Cmd(0x05E2).I(GetPedRef(p)).I(GetPedRef(target)).Run();  // TASK_KILL_CHAR_ON_FOOT (given again now and then)
         }
         for (auto it = after.begin(); it != after.end();) it = g_battleSoldiers.count(it->first) ? std::next(it) : after.erase(it);
     }
@@ -861,6 +929,7 @@ public:
             g.Text(ui::FONT_SMALL, g.Width() * 0.5f, y + g.LineHeight(ui::FONT_NORMAL), Format(TR("Броня %.0f%%", "Armour %.0f%%"), armour),
                    armour > 40 ? 0xE0FFFFFF : 0xFFFF6060, ui::TEXT_CENTER | ui::TEXT_OUTLINE);
         }
+        if (g_battle.on && (g_battle.joined || g_battle.host)) ui::DrawWorldMarks(EnemyTanks(), 0xE0FF3030, 3.2f, 1.3f);
         if (g_battle.on) {
             std::string line = g_battle.wave ? Format(TR("ТАНКОВОЕ СРАЖЕНИЕ · ВОЛНА %d/%d · ВРАГОВ: %d", "TANK BATTLE · WAVE %d/%d · ENEMIES: %d"),
                                                       g_battle.wave, kWaves, EnemiesLeft())

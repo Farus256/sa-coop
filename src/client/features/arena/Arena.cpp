@@ -1,19 +1,22 @@
 // Ground battles: /arena <enemies> <place> <waves> (the host; or alone, offline).
 //
-//   /arena yakuza random 5      /arena баллас склад 3      /arena list      /arena stop
+//   /arena yakuza random 5      /arena баллас притон 3      /arena list      /arena stop      /skip
 //
 // Every player is taken into the place: an interior of the story's missions (Big Smoke's crack palace, Madd Dogg's
 // mansion, the casinos, the meat factory, the stadiums...) or a random one of them. Waves of the chosen gang or force
 // come at them there (more each wave, with better guns, aim and armour); a wave is beaten when every one of it is
 // down, and the next comes 6 s later.
-// They come in squads of 3-4 from around the place, spread evenly: the first squad straight at the players, the others
-// round them, to their backs (TASK_GOTO_CHAR_OFFSET behind the player as it faces), and only then into the fight. From
-// the second wave each squad has a grenadier who throws when a player is 9-24 m away in sight and none of his own are
-// near it; squads of four have a knifeman, silent, who goes for a player's back (StealthKnife kills from there).
+// They come in squads of 3-4 from all over the place, away from the players and from where the last wave came (the
+// host's game works out the place's floor first), some going round to the players' backs. Each squad has a grenadier
+// who throws when the arc to the player is clear; knifemen come alone and steal up to a back out of the players' sight
+// (StealthKnife kills from there); the last two waves bring snipers who shoot from far off. They know no fear and
+// always know where the players are: out of sight they come along the floor, in sight they fight, take cover, wait
+// and push on all together.
 // The last wave brings a boss: Tenpenny, Pulaski, Hernandez, Big Smoke, Ryder, OG Loc, T-Bone, Jizzy or Toreno (one
 // that fits the enemies, when there is one) with an AK-47 (a gang's) or an M4 (the state's), and with him, once and
 // unannounced, his men: they say nothing and work round the players. All waves beaten: everyone gets $1000 a wave
-// and is taken back where it stood. Everyone dead or out of the place: lost. /arena stop ends it.
+// and is taken back where it stood. Everyone dead or out of the place: lost. /arena stop ends it. The place's doors
+// out are shut meanwhile, and the armour of the battle is gone after it.
 // No wanted stars meanwhile, and the weapons the players took up there they do not keep (game::challenge); the enemies
 // drop none.
 //
@@ -24,9 +27,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
+#include <queue>
 #include <random>
 #include <set>
 #include <string>
@@ -46,6 +52,7 @@
 #include "shared/game/Script.h"
 #include "shared/lib/core/Core.h"
 #include "shared/ui/chat/Chat.h"
+#include "shared/ui/marks/Marks.h"
 #include "shared/ui/renderer/Renderer.h"
 #include "shared/ui/widgets/Widgets.h"
 
@@ -57,6 +64,8 @@ using game::script::Cmd;
 
 constexpr int PED_TYPE_MISSION1 = 24;
 constexpr int kBossSlot = 10, kBossModel = 290 + kBossSlot - 1;  // the special characters' models: 290-299
+constexpr int kKnifeSlot = 9, kKnifeSpecial = 290 + kKnifeSlot - 1;  // the police's and SWAT's knifeman (Cerberus)
+int g_knifeModel = -1;  // that special character, when the game has it
 std::mt19937 g_rng{(uint32_t)GetTickCount() ^ 0xA2E7u};
 int RandInt(int a, int b) { return a + (int)(g_rng() % (uint32_t)(b - a + 1)); }
 float Rand(float a, float b) { return a + (b - a) * (float)(g_rng() % 10001) / 10000.0f; }
@@ -88,18 +97,17 @@ struct Boss {
     const char* special;  // the special character's name
     const char* name[2];
     int weapon;  // a gang's boss: the AK-47 (30), the state's: the M4 (31)
-    int health;
 };
 const Boss kBosses[] = {
-    {"TENPEN", TRP("Тенпенни", "Tenpenny"), 31, 900},           // 0
-    {"PULASKI", TRP("Пуласки", "Pulaski"), 31, 800},            // 1
-    {"HERN", TRP("Эрнандес", "Hernandez"), 31, 700},            // 2
-    {"SMOKEV", TRP("Биг Смоук", "Big Smoke"), 30, 1100},        // 3
-    {"RYDER", TRP("Райдер", "Ryder"), 30, 800},                 // 4
-    {"OGLOC", TRP("Оу Джи Лок", "OG Loc"), 30, 650},            // 5
-    {"TBONE", TRP("Ти-Бон Мендез", "T-Bone Mendez"), 30, 900},  // 6
-    {"JIZZY", TRP("Джиззи Би", "Jizzy B"), 30, 800},            // 7
-    {"TORENO", TRP("Майк Торено", "Mike Toreno"), 31, 1000},    // 8
+    {"TENPEN", TRP("Тенпенни", "Tenpenny"), 31},           // 0
+    {"PULASKI", TRP("Пуласки", "Pulaski"), 31},            // 1
+    {"HERN", TRP("Эрнандес", "Hernandez"), 31},            // 2
+    {"SMOKEV", TRP("Биг Смоук", "Big Smoke"), 30},         // 3
+    {"RYDER", TRP("Райдер", "Ryder"), 30},                 // 4
+    {"OGLOC", TRP("Оу Джи Лок", "OG Loc"), 30},            // 5
+    {"TBONE", TRP("Ти-Бон Мендез", "T-Bone Mendez"), 30},  // 6
+    {"JIZZY", TRP("Джиззи Би", "Jizzy B"), 30},            // 7
+    {"TORENO", TRP("Майк Торено", "Mike Toreno"), 31},     // 8
 };
 constexpr int kBossCount = (int)(sizeof(kBosses) / sizeof(kBosses[0]));
 
@@ -115,17 +123,12 @@ struct Place {
 const Place kPlaces[] = {
     {{TRP("притон", "crack"), TRP("смоук", "crack")}, TRP("Крэк-дворец Биг Смоука", "Big Smoke's crack palace"), 2, {2543.46f, -1308.38f, 1026.73f}, 14.0f, false, false},
     {{TRP("особняк", "mansion"), TRP("мэддогг", "mansion")}, TRP("Особняк Мэдд Догга", "Madd Dogg's mansion"), 5, {1267.66f, -781.32f, 1091.91f}, 18.0f, true, false},
-    {{TRP("калигула", "caligulas"), TRP("казино", "caligulas")}, TRP("Казино «Калигула»", "Caligula's casino"), 1, {2233.80f, 1712.23f, 1011.76f}, 22.0f, true, true},
-    {{TRP("драконы", "dragons"), TRP("четыре", "dragons")}, TRP("Казино «Четыре дракона»", "The Four Dragons casino"), 10, {2016.27f, 1017.78f, 996.88f}, 20.0f, true, true},
     {{TRP("мясокомбинат", "meat"), TRP("бойня", "meat")}, TRP("Мясокомбинат", "The meat factory"), 1, {963.42f, 2108.29f, 1011.03f}, 16.0f, true, false},
-    {{TRP("склад", "warehouse"), TRP("склад", "warehouse")}, TRP("Склад", "The warehouse"), 18, {1302.52f, -1.79f, 1001.03f}, 16.0f, false, false},
     {{TRP("мотель", "motel"), TRP("джефферсон", "motel")}, TRP("Мотель «Джефферсон»", "The Jefferson motel"), 15, {2215.45f, -1147.48f, 1025.80f}, 20.0f, true, true},
     {{TRP("атриум", "atrium"), TRP("атриум", "atrium")}, TRP("Атриум", "The atrium"), 18, {1710.43f, -1669.38f, 20.23f}, 14.0f, false, true},
-    {{TRP("вузи", "woozie"), TRP("офис", "woozie")}, TRP("Офис Вузи", "Woozie's office"), 1, {-2159.12f, 641.52f, 1052.38f}, 10.0f, false, false},
     {{TRP("либерти", "liberty"), TRP("бистро", "liberty")}, TRP("Либерти-Сити (бистро Марко)", "Liberty City (Marco's bistro)"), 1, {-794.81f, 497.74f, 1376.20f}, 14.0f, false, false},
     {{TRP("полиция", "police"), TRP("участок", "police")}, TRP("Полицейский участок", "The police station"), 6, {246.78f, 63.90f, 1003.64f}, 14.0f, false, true},
-    {{TRP("дамба", "dam"), TRP("шерман", "dam")}, TRP("Дамба Шерман", "The Sherman dam"), 17, {-959.56f, 1848.58f, 9.00f}, 18.0f, true, false},
-    {{TRP("бладбоул", "bloodbowl"), TRP("стадион", "bloodbowl")}, TRP("Стадион «Кровавая чаша»", "The Bloodbowl stadium"), 15, {-1398.10f, 937.63f, 1036.48f}, 40.0f, true, true},
+    {{TRP("дамба", "dam"), TRP("шерман", "dam")}, TRP("Дамба Шерман", "The Sherman dam"), 17, {-959.56f, 1848.58f, 9.00f}, 30.0f, true, false},
     {{TRP("кикстарт", "kickstart"), TRP("кикстарт", "kickstart")}, TRP("Стадион «Кикстарт»", "The Kickstart stadium"), 14, {-1465.27f, 1557.87f, 1052.53f}, 35.0f, true, true},
 };
 constexpr int kPlaceCount = (int)(sizeof(kPlaces) / sizeof(kPlaces[0]));
@@ -209,6 +212,90 @@ void Teleport(int area, const CVector& p, float heading) {
     LightArea(area, p);
 }
 
+// The place's doors out (its entrances' markers) are shut while the battle is on: SET_INTERIOR_ACCESS off by the
+// names of the entrances in it (a name is both sides of a door), and every entrance's flags as they were afterwards.
+std::vector<std::pair<int, uint16_t>> g_enexFlags;  // pool index, CEntryExit::m_nFlags
+void ShutDoors(bool shut) {
+    auto* pool = Ref<CPoolHeader*>(0x96A7D8);  // CEntryExitManager::mp_poolEntryExits, CEntryExit 0x3C bytes
+    if (!pool) return;
+    if (!shut) {
+        for (auto& [i, flags] : g_enexFlags)
+            if (i < pool->size && pool->byteMap[i] >= 0) Ref<uint16_t>((uintptr_t)pool->objects + (uintptr_t)i * 0x3C + 0x30) = flags;
+        if (!g_enexFlags.empty()) LOGI("Arena: the place's doors open again");
+        g_enexFlags.clear();
+        return;
+    }
+    g_enexFlags.clear();
+    const Place& pl = kPlaces[g_arena.place];
+    std::set<std::string> names;
+    for (int i = 0; i < pool->size; ++i) {
+        if (pool->byteMap[i] < 0) continue;
+        uintptr_t e = (uintptr_t)pool->objects + (uintptr_t)i * 0x3C;
+        g_enexFlags.push_back({i, Ref<uint16_t>(e + 0x30)});
+        if (Ref<int8_t>(e + 0x32) != pl.area || (DoorSpot((void*)e) - pl.pos).Length2D() > 150.0f) continue;  // m_nArea
+        char name[9] = {};
+        std::memcpy(name, (const void*)e, 8);  // CEntryExit::m_szName
+        if (name[0]) names.insert(name);
+    }
+    for (const std::string& n : names) Cmd(0x07FB).S8(n.c_str()).I(0).Run();  // SET_INTERIOR_ACCESS: off
+    LOGI("Arena: %d doors of the place shut", (int)names.size());
+}
+
+// The police's and the SWAT's knifeman is Cerberus (Manhunt) when the game has his model: cerberus.dff and .txd in
+// gta3.img (or in modloader), loaded as a special character; without it, a man of the force as before
+bool ImgHas(const std::string& file) {
+    std::wstring dir = ModuleDir();  // the game's
+    if (FILE* f = _wfopen((dir + L"models\\gta3.img").c_str(), L"rb")) {
+        char head[8] = {};
+        bool found = false;
+        if (std::fread(head, 1, 8, f) == 8 && std::memcmp(head, "VER2", 4) == 0) {
+            uint32_t count = 0;
+            std::memcpy(&count, head + 4, 4);
+            char entry[32];
+            for (uint32_t k = 0; k < count && k < 40000 && std::fread(entry, 1, 32, f) == 32; ++k) {
+                char name[25] = {};
+                std::memcpy(name, entry + 8, 24);
+                if (_stricmp(name, file.c_str()) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        std::fclose(f);
+        if (found) return true;
+    }
+    // modloader: any folder of it
+    std::vector<std::wstring> todo{dir + L"modloader"};
+    std::wstring want = Utf8ToWide(file);
+    for (size_t n = 0; n < todo.size() && n < 400; ++n) {
+        WIN32_FIND_DATAW fd;
+        HANDLE hf = FindFirstFileW((todo[n] + L"\\*").c_str(), &fd);
+        if (hf == INVALID_HANDLE_VALUE) continue;
+        do {
+            std::wstring nm = fd.cFileName;
+            if (nm == L"." || nm == L"..") continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) todo.push_back(todo[n] + L"\\" + nm);
+            else if (_wcsicmp(nm.c_str(), want.c_str()) == 0) {
+                FindClose(hf);
+                return true;
+            }
+        } while (FindNextFileW(hf, &fd));
+        FindClose(hf);
+    }
+    return false;
+}
+void LoadKnifeModel() {
+    g_knifeModel = -1;
+    if (kFactions[g_arena.faction].models[0] != 280 && kFactions[g_arena.faction].models[0] != 285) return;  // the police, SWAT
+    static int known = -1;  // looked for once
+    if (known < 0) known = ImgHas("cerberus.dff") && ImgHas("cerberus.txd") ? 1 : 0;
+    if (!known) return;
+    Cmd(0x023C).I(kKnifeSlot).S8("CERBERUS").Run();  // LOAD_SPECIAL_CHARACTER
+    Cmd(0x038B).Run();                               // LOAD_ALL_MODELS_NOW
+    if (IsModelLoaded(kKnifeSpecial)) g_knifeModel = kKnifeSpecial;
+    LOGI("Arena: the knifemen are Cerberus (%s)", g_knifeModel >= 0 ? "loaded" : "not loaded");
+}
+
 // into the place, a little apart from the others
 void TakeIn() {
     CPlayerPed* me = FindPlayerPed(0);
@@ -223,6 +310,7 @@ void TakeIn() {
     Teleport(pl.area, at, Rand(0.0f, 360.0f));
     if (me->Armour() < 100.0f) me->Armour() = 100.0f;
     g_arena.taken = true;
+    ShutDoors(true);
 }
 
 void TakeBack() {
@@ -259,10 +347,12 @@ bool Clear(const CVector& a, const CVector& b) {
 struct Cell {
     CVector p;              // the floor
     std::vector<int> next;  // the cells a step away
+    bool room = false;      // half a metre free all round at the waist: one can stand there (not against a wall)
 };
 std::vector<Cell> g_cells;
 std::map<int64_t, int> g_cellAt;  // (column, row, storey) -> cell
 std::vector<int> g_open;          // the cells whose neighbours are still to be tried
+std::vector<int> g_roomy;         // the cells with room round them
 float g_step = 1.5f;
 int g_reachCells = 0;
 bool g_gridDone = false;
@@ -276,24 +366,38 @@ bool FloorBelow(float x, float y, float fromZ, float& z) {
     return true;
 }
 
+bool Roomy(const CVector& floor) {
+    CVector waist = floor + CVector{0, 0, 1.0f}, knee = floor + CVector{0, 0, 0.45f};
+    const float r = 0.45f;
+    for (const CVector& d : {CVector{r, 0, 0}, CVector{-r, 0, 0}, CVector{0, r, 0}, CVector{0, -r, 0}})
+        if (!Clear(waist, waist + d) || !Clear(knee, knee + d)) return false;
+    return true;
+}
+
 void StartGrid() {
     g_cells.clear();
     g_cellAt.clear();
     g_open.clear();
+    g_roomy.clear();
     g_gridDone = false;
     const Place& pl = kPlaces[g_arena.place];
-    g_step = pl.reach > 25.0f ? 2.0f : 1.5f;
+    g_step = pl.reach > 30.0f ? 2.0f : 1.5f;
     g_reachCells = (int)(pl.reach * 1.2f / g_step) + 1;
     float z = 0;
     if (!FloorBelow(pl.pos.x, pl.pos.y, pl.pos.z + 1.0f, z)) z = pl.pos.z - 1.0f;
-    g_cells.push_back({{pl.pos.x, pl.pos.y, z}, {}});
+    CVector start{pl.pos.x, pl.pos.y, z};
+    g_cells.push_back({start, {}, Roomy(start)});
     g_cellAt[CellKey(0, 0, z)] = 0;
     g_open.push_back(0);
 }
 
+// A step to a neighbour square: its middle first, and when that does not go (a doorway narrower than the grid, a
+// pillar on the way) four spots off the middle of the square; the cell keeps the spot that went.
 void GridStep() {  // a part of it each frame
     const Place& pl = kPlaces[g_arena.place];
-    for (int budget = 40; budget > 0 && !g_open.empty() && g_cells.size() < 3000; --budget) {
+    const float o = g_step * 0.3f;
+    const float offs[5][2] = {{0, 0}, {o, 0}, {-o, 0}, {0, o}, {0, -o}};
+    for (int budget = 25; budget > 0 && !g_open.empty() && g_cells.size() < 3000; --budget) {
         int ci = g_open.back();
         g_open.pop_back();
         CVector c = g_cells[(size_t)ci].p;
@@ -303,32 +407,50 @@ void GridStep() {  // a part of it each frame
                 if (!di && !dj) continue;
                 int i = i0 + di, j = j0 + dj;
                 if (std::abs(i) > g_reachCells || std::abs(j) > g_reachCells) continue;
-                float x = pl.pos.x + (float)i * g_step, y = pl.pos.y + (float)j * g_step, z = 0;
-                if (!FloorBelow(x, y, c.z + 1.3f, z) || std::fabs(z - c.z) > 1.0f) continue;
-                CVector n{x, y, z};
-                auto known = g_cellAt.find(CellKey(i, j, z));
-                if (known != g_cellAt.end()) {  // a way to a cell found before
-                    auto& a = g_cells[(size_t)ci].next;
-                    if (std::find(a.begin(), a.end(), known->second) == a.end() && Clear(c + CVector{0, 0, 0.9f}, n + CVector{0, 0, 0.9f}))
-                        a.push_back(known->second), g_cells[(size_t)known->second].next.push_back(ci);
-                    continue;
+                for (const auto& of : offs) {
+                    float x = pl.pos.x + (float)i * g_step + of[0], y = pl.pos.y + (float)j * g_step + of[1], z = 0;
+                    if (!FloorBelow(x, y, c.z + 1.3f, z) || std::fabs(z - c.z) > 1.0f) continue;
+                    auto known = g_cellAt.find(CellKey(i, j, z));
+                    if (known != g_cellAt.end()) {  // a way to a cell found before
+                        auto& a = g_cells[(size_t)ci].next;
+                        CVector kp = g_cells[(size_t)known->second].p;
+                        if (known->second != ci && std::find(a.begin(), a.end(), known->second) == a.end() &&
+                            Clear(c + CVector{0, 0, 0.9f}, kp + CVector{0, 0, 0.9f}))
+                            a.push_back(known->second), g_cells[(size_t)known->second].next.push_back(ci);
+                        break;
+                    }
+                    CVector n{x, y, z};
+                    if (!Clear(c + CVector{0, 0, 0.9f}, n + CVector{0, 0, 0.9f}) || !Clear(c + CVector{0, 0, 1.5f}, n + CVector{0, 0, 1.5f}) ||
+                        !Clear(n + CVector{0, 0, 0.2f}, n + CVector{0, 0, 1.85f}))
+                        continue;
+                    int ni = (int)g_cells.size();
+                    g_cells.push_back({n, {ci}, Roomy(n)});
+                    g_cells[(size_t)ci].next.push_back(ni);
+                    g_cellAt[CellKey(i, j, z)] = ni;
+                    g_open.push_back(ni);
+                    break;
                 }
-                if (!Clear(c + CVector{0, 0, 0.9f}, n + CVector{0, 0, 0.9f}) || !Clear(c + CVector{0, 0, 1.5f}, n + CVector{0, 0, 1.5f}) ||
-                    !Clear(n + CVector{0, 0, 0.2f}, n + CVector{0, 0, 1.85f}))
-                    continue;
-                int ni = (int)g_cells.size();
-                g_cells.push_back({n, {ci}});
-                g_cells[(size_t)ci].next.push_back(ni);
-                g_cellAt[CellKey(i, j, z)] = ni;
-                g_open.push_back(ni);
             }
     }
     if (g_open.empty() || g_cells.size() >= 3000) {
         g_gridDone = true;
-        LOGI("Arena: %d cells of floor found in %s", (int)g_cells.size(), kPlaces[g_arena.place].name[1]);
+        for (size_t k = 0; k < g_cells.size(); ++k)
+            if (g_cells[k].room) g_roomy.push_back((int)k);
+        LOGI("Arena: %d cells of floor found in %s (%d with room round them)", (int)g_cells.size(), kPlaces[g_arena.place].name[1],
+             (int)g_roomy.size());
     }
 }
 bool GridUsable() { return g_gridDone && g_cells.size() >= 15; }
+// the cells one may be put on: those with room round them (nobody comes out of a wall), all of them when too few
+const std::vector<int>& StandCells() {
+    static std::vector<int> all;
+    if (g_roomy.size() >= 15) return g_roomy;
+    if (all.size() != g_cells.size()) {
+        all.resize(g_cells.size());
+        for (size_t k = 0; k < all.size(); ++k) all[k] = (int)k;
+    }
+    return all;
+}
 
 int CellNear(const CVector& p, float within = 3.0f) {
     int best = -1;
@@ -374,11 +496,13 @@ float AngleDiff(float a, float b) {
 }
 
 // ---------------------------------------------------------------- the enemies
-constexpr int WEAPON_KNIFE = 4, WEAPON_GRENADE = 16, WEAPON_PISTOL = 22;
-enum Role : uint8_t { R_GUN, R_GRENADIER, R_KNIFE, R_BOSS };
+constexpr int WEAPON_KNIFE = 4, WEAPON_GRENADE = 16, WEAPON_PISTOL = 22, WEAPON_SNIPER = 34;
+constexpr int kEmptyDecisionMaker = 65542;  // SET_CHAR_DECISION_MAKER "Empty": reacts to nothing by itself
+enum Role : uint8_t { R_GUN, R_GRENADIER, R_KNIFE, R_BOSS, R_SNIPER };
 // what one does now: fights as the game has it, goes round to a back, runs to cover, holds it (down, up and shooting,
-// down), pushes on at the players
-enum Mode : uint8_t { M_FIGHT, M_FLANK, M_COVER_GO, M_COVER_HOLD, M_PUSH };
+// down), pushes on at the players, (a knifeman) steals up to a back out of the player's sight, (a sniper) moves to
+// another spot it sees the players from
+enum Mode : uint8_t { M_FIGHT, M_FLANK, M_COVER_GO, M_COVER_HOLD, M_PUSH, M_SNEAK, M_RELOCATE };
 struct Enemy {
     int squad = 0;
     Role role = R_GUN;
@@ -395,8 +519,14 @@ struct Enemy {
     CPed* throwTarget = nullptr;
     float spawnHealth = 0;
     CPed* after = nullptr;  // the player it was set on
+    uint64_t setOnMs = 0;   // when it was set on it
     CVector lastPos;        // where it was when it last moved on
     uint64_t lastMoveMs = 0;
+    // going by the floor's cells (the player out of its sight): where to, since when
+    bool routing = false;
+    CVector routeTo;
+    uint64_t routeMs = 0;
+    uint64_t evalMs = 0, waitSince = 0, blindSince = 0;  // the knifeman's and the sniper's own reckoning
 };
 struct Squad {
     float angle = 0;  // where round the player it goes (degrees, 180 = behind)
@@ -415,8 +545,18 @@ bool OnFloor(CVector& p, float baseZ) {  // the fallback without the floor's cel
     return true;
 }
 
-// A spot to come from, towards `angle` round the players (radians), far from them, apart from the other spots of
-// this wave and the last one; `minApart` from those. Off the cells (too few): towards the angle from the middle.
+// any of the players sees a body at `at` (from their heads)
+bool PlayersSee(const CVector& at, const std::vector<CVector>& players) {
+    for (const CVector& q : players)
+        if (Clear(q + CVector{0, 0, 0.6f}, at + CVector{0, 0, 0.2f})) return true;
+    return false;
+}
+
+// A spot to come from (a body's, a metre over the floor): far from the players, as far as may be from the other
+// spots of this wave (the squads spread over the whole place, not in one heap), not where the last wave came from,
+// towards `angle` round the players (radians) if it can be, and out of the players' sight rather than in it. The
+// distance kept from the players is what the place allows (a narrow hall has its far ends only). `minApart` from this
+// wave's others; off the cells (too few): towards the angle from the middle.
 CVector SpawnSpot(float angle, float halfSector, float minApart) {
     const Place& pl = kPlaces[g_arena.place];
     std::vector<CVector> players = PlayerSpots();
@@ -424,28 +564,40 @@ CVector SpawnSpot(float angle, float halfSector, float minApart) {
     for (const CVector& q : players) mid = mid + q;
     mid = mid * (1.0f / (float)players.size());
     if (GridUsable()) {
-        float safe = pl.big ? 18.0f : 9.0f;
-        for (int pass = 0; pass < 3; ++pass, safe *= 0.6f, halfSector *= 2.0f, minApart *= 0.5f) {
-            int best = -1;
-            float bestScore = -1e9f;
-            for (size_t k = 0; k < g_cells.size(); ++k) {
-                const CVector& c = g_cells[k].p;
+        const std::vector<int>& cells = StandCells();
+        float farthest = 0;
+        for (int k : cells) farthest = std::max(farthest, DistToPlayers(g_cells[(size_t)k].p, players));
+        float safe = std::min(pl.big ? 18.0f : 9.0f, farthest * 0.6f);
+        for (int pass = 0; pass < 3; ++pass, safe *= 0.6f, minApart *= 0.5f) {
+            struct Cand {
+                int k;
+                float score;
+            };
+            std::vector<Cand> cands;
+            for (int k : cells) {
+                const CVector& c = g_cells[(size_t)k].p;
                 float dp = DistToPlayers(c, players);
                 if (dp < safe) continue;
-                float a = std::atan2(c.y - mid.y, c.x - mid.x);
-                if (AngleDiff(a, angle) > halfSector) continue;
-                bool apart = true;
-                for (const CVector& s : g_spawnsNow) apart &= (s - c).Length() >= minApart;
-                if (!apart) continue;
-                float score = std::min(dp, 40.0f) + Rand(0.0f, 8.0f);
-                for (const CVector& s : g_lastSpawns) score -= std::max(0.0f, 10.0f - (s - c).Length());  // not where they came from
-                if (score > bestScore) bestScore = score, best = (int)k;
+                float apart = 1e9f;
+                for (const CVector& sp : g_spawnsNow) apart = std::min(apart, (sp - c - CVector{0, 0, 1.0f}).Length());
+                if (apart < minApart) continue;
+                float off = AngleDiff(std::atan2(c.y - mid.y, c.x - mid.x), angle);
+                float score = std::min(dp, 30.0f) * 0.5f + std::min(apart, 30.0f) - std::max(0.0f, off - halfSector) * 6.0f + Rand(0.0f, 4.0f);
+                for (const CVector& sp : g_lastSpawns) score -= std::max(0.0f, 10.0f - (sp - c).Length());  // not where they came from
+                cands.push_back({k, score});
             }
-            if (best >= 0) {
-                CVector p = g_cells[(size_t)best].p + CVector{0, 0, 1.0f};
-                g_spawnsNow.push_back(p);
-                return p;
+            if (cands.empty()) continue;
+            std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+            int best = cands[0].k;
+            float bestScore = -1e9f;
+            for (size_t n = 0; n < cands.size() && n < 12; ++n) {  // the best few: one out of sight is better
+                CVector body = g_cells[(size_t)cands[n].k].p + CVector{0, 0, 1.0f};
+                float score = cands[n].score + (PlayersSee(body, players) ? 0.0f : 8.0f);
+                if (score > bestScore) bestScore = score, best = cands[n].k;
             }
+            CVector p = g_cells[(size_t)best].p + CVector{0, 0, 1.0f};
+            g_spawnsNow.push_back(p);
+            return p;
         }
     }
     CVector best = pl.pos;
@@ -460,13 +612,14 @@ CVector SpawnSpot(float angle, float halfSector, float minApart) {
     g_spawnsNow.push_back(best);
     return best;
 }
-// a member's place by its squad's (a cell a few metres off it)
+// a member's place by its squad's (a cell with room round it a few metres off it, a way from it)
 CVector MemberSpot(const CVector& anchor, int k) {
     if (GridUsable()) {
         std::vector<int> close;
-        for (size_t i = 0; i < g_cells.size(); ++i) {
-            CVector d = g_cells[i].p + CVector{0, 0, 1.0f} - anchor;
-            if (d.Length2D() > 0.9f && d.Length2D() < 4.0f && std::fabs(d.z) < 1.5f) close.push_back((int)i);
+        for (int i : StandCells()) {
+            CVector d = g_cells[(size_t)i].p + CVector{0, 0, 1.0f} - anchor;
+            if (d.Length2D() > 0.9f && d.Length2D() < 4.0f && std::fabs(d.z) < 1.5f && Clear(anchor, g_cells[(size_t)i].p + CVector{0, 0, 1.0f}))
+                close.push_back(i);
         }
         if (!close.empty()) return g_cells[(size_t)close[(size_t)RandInt(0, (int)close.size() - 1)]].p + CVector{0, 0, 1.0f};
     }
@@ -508,36 +661,52 @@ void Give(int h, int weapon, int ammo) {
 
 void SetOn(CPed* p, Enemy& e, CPed* target) {
     e.after = target;
+    e.routing = false;
+    e.setOnMs = NowMs();
     if (!target) return;
     int h = GetPedRef(p), t = GetPedRef(target);
     const Squad& sq = g_squads[(size_t)e.squad];
     if (e.mode == M_FLANK) {
         // round to the player's back (the offset turns with the player), then the fight
-        Cmd(0x06A8).I(h).I(t).I(14000).F(e.role == R_KNIFE ? 1.0f : 7.0f).F(sq.angle).Run();  // TASK_GOTO_CHAR_OFFSET
+        Cmd(0x06A8).I(h).I(t).I(14000).F(7.0f).F(sq.angle).Run();  // TASK_GOTO_CHAR_OFFSET
     } else {
         Cmd(0x05E2).I(h).I(t).Run();  // TASK_KILL_CHAR_ON_FOOT
     }
 }
 
+// on to a spot (the floor's) running (6) or sprinting (7); not given again while it is on its way to the same one
+void GoTo(CPed* p, Enemy& e, const CVector& to, int move) {
+    uint64_t now = NowMs();
+    if (e.routing && (e.routeTo - to).Length() < 0.6f && now - e.routeMs < 2500) return;
+    e.routing = true;
+    e.routeTo = to;
+    e.routeMs = now;
+    Cmd(0x05D3).I(GetPedRef(p)).F(to.x).F(to.y).F(to.z).I(move).I(5000).Run();  // TASK_GO_STRAIGHT_TO_COORD
+}
+
 int MakeEnemy(int model, int weapon, int health, int armour, int accuracy, const CVector& at, int squad, Role role, bool silent) {
     if (!HasRoom(PedPool(), kKeepPeds + 2, "ped") || !LoadModelNow(model)) return -1;
     int h = -1;
-    Cmd(0x009A).I(PED_TYPE_MISSION1).I(model).F(at.x).F(at.y).F(at.z).Out(&h).Run();  // CREATE_CHAR
+    Cmd(0x009A).I(PED_TYPE_MISSION1).I(model).F(at.x).F(at.y).F(at.z - 1.0f).Out(&h).Run();  // CREATE_CHAR (on the floor)
     if (h < 0) return -1;
     if (CPed* made = GetPed(h)) Peds::Instance().Share(made);  // the others see it (no mission made it)
     Cmd(0x0860).I(h).I(kPlaces[g_arena.place].area).Run();  // SET_CHAR_AREA_VISIBLE
     Cmd(0x087E).I(h).I(0).Run();                             // SET_CHAR_DROPS_WEAPONS_WHEN_DEAD: none
     Cmd(0x0223).I(h).I(health).Run();                        // SET_CHAR_HEALTH
     Cmd(0x02E2).I(h).I(accuracy).Run();                      // SET_CHAR_ACCURACY
-    Cmd(0x060F).I(h).F(60.0f).Run();                         // SET_SENSE_RANGE: it sees across the place
+    Cmd(0x060F).I(h).F(150.0f).Run();                        // SET_SENSE_RANGE: it knows where the players are
+    Cmd(0x060B).I(h).I(kEmptyDecisionMaker).Run();           // SET_CHAR_DECISION_MAKER: no fear (no running off, no cowering)
     if (silent) Cmd(0x094E).I(h).I(1).Run();                 // DISABLE_CHAR_SPEECH
+    if (role == R_BOSS) Cmd(0x0446).I(h).I(0).Run();         // SET_CHAR_SUFFERS_CRITICAL_HITS: no one-shot headshot
     if (role == R_KNIFE) {
         Give(h, WEAPON_KNIFE, 1);
         weapon = WEAPON_KNIFE;
+        Cmd(0x0245).I(h).S8("player").Run();  // SET_ANIM_GROUP_FOR_CHAR: it runs as CJ does
     } else {
-        Give(h, weapon, 500);
+        Give(h, weapon, role == R_SNIPER ? 80 : 500);
         weapon = GunFor(weapon);
     }
+    if (role == R_SNIPER) Cmd(0x0350).I(h).I(1).Run();  // SET_CHAR_STAY_IN_SAME_PLACE: it shoots from where it is
     if (weapon) Cmd(0x01B9).I(h).I(weapon).Run();  // SET_CURRENT_CHAR_WEAPON
     CPed* ped = GetPed(h);
     if (!ped) return h;
@@ -548,7 +717,7 @@ int MakeEnemy(int model, int weapon, int health, int armour, int accuracy, const
     e.weapon = weapon;
     e.spawnHealth = (float)health;
     e.grenades = role == R_GRENADIER ? 6 : 0;
-    e.mode = g_squads[(size_t)squad].flank || role == R_KNIFE ? M_FLANK : M_FIGHT;
+    e.mode = role == R_KNIFE ? M_SNEAK : g_squads[(size_t)squad].flank ? M_FLANK : M_FIGHT;
     e.modeUntil = NowMs() + 14000;
     e.nextCoverMs = NowMs() + (uint64_t)RandInt(3000, 8000);
     e.lastPos = at;
@@ -556,8 +725,15 @@ int MakeEnemy(int model, int weapon, int health, int armour, int accuracy, const
     g_info[ped] = e;
     g_enemies.insert(ped);
     if (role == R_KNIFE) knife::MarkKnifeman(ped);
-    SetOn(ped, g_info[ped], NearestPlayer(at));
+    if (role != R_KNIFE) SetOn(ped, g_info[ped], NearestPlayer(at));
+    else g_info[ped].after = NearestPlayer(at);
     return h;
+}
+
+// the SWAT's armour is half the others' (they do not die of a headshot, Difficulty)
+int ArmourFor(int wave, int extra) {
+    int a = std::min(250, 25 * wave + extra);
+    return kFactions[g_arena.faction].models[0] == 285 ? a / 2 : a;
 }
 
 // a squad of 3-4 towards angle `dir` (radians round the players), going round to `aroundDeg` (180: the back) or not
@@ -580,7 +756,7 @@ int MakeSquad(float dir, float halfSector, bool flank, float aroundDeg, int size
         CVector at = k == 0 ? anchor : scatter ? SpawnSpot(dir, halfSector * 1.3f, 6.0f) : MemberSpot(anchor, k);
         int weapon = f.weapons[std::clamp(gunTier - (k == 2 ? 1 : 0), 0, 3)];
         int model = f.models[(size_t)RandInt(0, 3)];
-        int health = 100 + 15 * wave, armour = std::min(250, 25 * wave + (minions ? 50 : 0));
+        int health = 100 + 15 * wave, armour = ArmourFor(wave, minions ? 50 : 0);
         int accuracy = std::clamp(40 + 6 * wave + (minions ? 10 : 0), 40, 90);
         made += MakeEnemy(model, weapon, health, armour, accuracy, at, squad, role, minions) >= 0;
     }
@@ -599,20 +775,60 @@ void MakeKnifeman(int wave) {
     bool found = false;
     if (GridUsable()) {
         float best = -1;
-        for (const Cell& c : g_cells) {
-            CVector p = c.p + CVector{0, 0, 1.0f};
+        for (int k : StandCells()) {
+            CVector p = g_cells[(size_t)k].p + CVector{0, 0, 1.0f};
             float fromSquads = 1e9f;
             for (const CVector& s : g_spawnsNow) fromSquads = std::min(fromSquads, (s - p).Length());
             float dp = DistToPlayers(p, players);
             if (fromSquads < 10.0f || dp < 10.0f) continue;
             float score = std::min(fromSquads, dp) + Rand(0.0f, 5.0f);
+            if (score + 6.0f <= best) continue;
+            if (!PlayersSee(p, players)) score += 6.0f;  // out of their sight is better
             if (score > best) best = score, at = p, found = true;
         }
     }
     if (!found) at = SpawnSpot(Rand(0.0f, 6.2831853f), 3.2f, 10.0f);
     else g_spawnsNow.push_back(at);
-    MakeEnemy(f.models[(size_t)RandInt(0, 3)], WEAPON_KNIFE, 100 + 15 * wave, std::min(250, 25 * wave), 60, at,
-              (int)g_squads.size() - 1, R_KNIFE, true);
+    int model = g_knifeModel >= 0 && IsModelLoaded(g_knifeModel) ? g_knifeModel : f.models[(size_t)RandInt(0, 3)];
+    MakeEnemy(model, WEAPON_KNIFE, 100 + 15 * wave, ArmourFor(wave, 0), 60, at, (int)g_squads.size() - 1, R_KNIFE, true);
+}
+
+// Snipers (the last two waves): each alone on a spot far off that sees a player, staying there and shooting from
+// there; one that loses sight of the players for 5 s moves to another such spot
+bool SniperSpot(const CVector& from, CPed* target, float maxMove, CVector& out) {
+    std::vector<CVector> players;
+    if (target) players.push_back(target->GetPosition());
+    else players = PlayerSpots();
+    const Place& pl = kPlaces[g_arena.place];
+    float want = pl.big ? 20.0f : 10.0f, best = -1e9f;
+    for (int k : StandCells()) {
+        CVector body = g_cells[(size_t)k].p + CVector{0, 0, 1.0f};
+        if (maxMove > 0 && (body - from).Length() > maxMove) continue;
+        float dp = DistToPlayers(body, players);
+        if (dp < want * 0.5f) continue;
+        bool apart = true;
+        for (auto& [q, e] : g_info)
+            if (e.role == R_SNIPER && IsPedValid(q) && (q->GetPosition() - body).Length() < 8.0f && (q->GetPosition() - from).Length() > 1.0f)
+                apart = false;
+        if (!apart) continue;
+        float score = std::min(dp, 45.0f) + Rand(0.0f, 5.0f) - (dp < want ? 15.0f : 0.0f);
+        if (score <= best) continue;
+        CVector eye = body + CVector{0, 0, 0.6f};
+        bool sees = false;
+        for (const CVector& q : players) sees |= Clear(eye, q + CVector{0, 0, 0.4f});
+        if (!sees) continue;
+        best = score, out = body;
+    }
+    return best > -1e8f;
+}
+void MakeSniper(int wave) {
+    const Faction& f = kFactions[g_arena.faction];
+    g_squads.push_back(Squad{});
+    CVector at;
+    if (!GridUsable() || !SniperSpot({}, nullptr, 0.0f, at)) at = SpawnSpot(Rand(0.0f, 6.2831853f), 3.2f, 8.0f);
+    else g_spawnsNow.push_back(at);
+    MakeEnemy(f.models[(size_t)RandInt(0, 3)], WEAPON_SNIPER, 100 + 15 * wave, ArmourFor(wave, 0) / 2, 80, at,
+              (int)g_squads.size() - 1, R_SNIPER, false);
 }
 
 void ReleaseDead() {  // the last wave's dead: the game's own again (they filled the ped pool)
@@ -796,6 +1012,11 @@ void SpawnWave() {
         MakeSquad(dir, half, i > 0, around[(size_t)(i - 1 + 5) % 5], size, w, false);
     }
     for (int k = 0; k < knives; ++k) MakeKnifeman(w);
+    // the last two waves: snipers far off (1, 2 in a big place, one more with three players or more)
+    if (w >= std::max(1, g_arena.waves - 1)) {
+        int snipers = (kPlaces[g_arena.place].big ? 2 : 1) + (PlayersIn() >= 3 ? 1 : 0);
+        for (int k = 0; k < snipers; ++k) MakeSniper(w);
+    }
     std::string bossLine;
     if (w == g_arena.waves) {
         int b = PickBoss(g_arena.faction);
@@ -806,8 +1027,8 @@ void SpawnWave() {
         int model = special ? kBossModel : f.models[0];
         g_squads.push_back(Squad{});
         int bossSquad = (int)g_squads.size() - 1;
-        int h = MakeEnemy(model, kBosses[b].weapon, kBosses[b].health + 150 * (PlayersIn() - 1), 100 + 30 * g_arena.waves, 85,
-                          SpawnSpot(base + 3.14159f, 1.0f, 8.0f), bossSquad, R_BOSS, false);
+        // as tough as the SWAT were in 0.4.1: 100 health, 100 armour, no one-shot headshot
+        int h = MakeEnemy(model, kBosses[b].weapon, 100, 100, 85, SpawnSpot(base + 3.14159f, 1.0f, 8.0f), bossSquad, R_BOSS, false);
         if (CPed* p = h >= 0 ? GetPed(h) : nullptr) g_bossPed = p;
         // his men: once, unannounced, silent, round to the players' backs
         int men = std::min(6, 3 + PlayersIn() - 1);
@@ -933,23 +1154,223 @@ void Throws() {  // every frame: the grenades that leave the hand now
 }
 
 // ---- how they fight
-// Every 0.5 s each one: the ones going round turn to the fight when they are there (or close, hurt, 14 s on). In the
-// fight one with the player in sight within 28 m now and then runs to cover (a cell of the floor within 9 m where,
-// crouched, nothing of it shows to the player and, standing, it sees the player) and holds it some 5-10 s: down, then
-// up shooting for 2 s, down again; then it pushes on at the player for a while (the game's own fight: it runs at it
-// shooting), and later looks for the next cover. A squad pushes all together every 18-26 s. The grenadiers throw when
-// the arc is clear. One that has not moved for 4 s while the player is out of its sight is stuck (a corner, a door
-// it does not find): it is set one step on along the floor's cells towards the player.
-std::vector<int> g_stepsTo;  // steps to the cell of g_stepsFor (a player), cached for a while
-CPed* g_stepsFor = nullptr;
-uint64_t g_stepsMs = 0;
+// Every 0.5 s each one. They always know where the players are (sense range over the place, the floor's cells):
+// one that does not see its player goes to it along the cells (to the farthest of the next few cells it sees straight,
+// running), not by the game's own way-finding, which in these interiors walked into walls; in sight it fights. The
+// ones going round turn to the fight when they are there (or close, hurt, 14 s on). In the fight one with the player
+// in sight within 28 m now and then runs to cover (a cell of the floor within 9 m where, crouched, nothing of it shows
+// to the player and, standing, it sees the player) and holds it some 5-10 s: down, then up shooting for 2 s, down
+// again; then it pushes on at the player for a while, and later looks for the next cover. A squad pushes all together
+// every 18-26 s. The grenadiers throw when the arc is clear. One that has not moved for 4 s while the player is out
+// of its sight is stuck: it is set one step on along the floor's cells towards the player. The knifemen steal up to a
+// back out of the player's sight (Sneak), the snipers stay far off (Snipe).
+struct Paths {
+    std::vector<int> steps;  // steps from every cell to the player's (-1: no way)
+    int cell = -1;
+    uint64_t ms = 0;
+};
+std::map<CPed*, Paths> g_paths;
+
+const std::vector<int>& StepsFor(CPed* t) {
+    Paths& pa = g_paths[t];
+    uint64_t now = NowMs();
+    if (pa.steps.size() != g_cells.size() || now - pa.ms > 1500) {
+        int cell = CellNear(t->GetPosition());
+        if (cell >= 0 || pa.steps.size() != g_cells.size()) {
+            pa.cell = cell;
+            pa.steps = StepsTo(cell);
+        }
+        pa.ms = now;
+    }
+    return pa.steps;
+}
+
+// the cell it stands on, or the nearest within 6 m that leads somewhere
+int CellOf(CPed* p, const std::vector<int>* steps = nullptr) {
+    int here = CellNear(p->GetPosition());
+    if (here >= 0 && (!steps || (*steps)[(size_t)here] >= 0)) return here;
+    int best = -1;
+    float bestD = 6.0f;
+    for (size_t k = 0; k < g_cells.size(); ++k) {
+        float d = (g_cells[k].p + CVector{0, 0, 1.0f} - p->GetPosition()).Length();
+        if ((!steps || (*steps)[k] >= 0) && d < bestD) bestD = d, best = (int)k;
+    }
+    return best;
+}
+
+// straight from a body to a floor cell: nothing at the knees or the chest
+bool Straight(const CVector& body, const CVector& floor) {
+    return Clear(body - CVector{0, 0, 0.4f}, floor + CVector{0, 0, 0.6f}) && Clear(body + CVector{0, 0, 0.4f}, floor + CVector{0, 0, 1.4f});
+}
+
+// the next spot on the way to the player: of the next 6 cells down the steps the farthest it sees straight
+bool Waypoint(CPed* p, CPed* t, CVector& out) {
+    if (!GridUsable()) return false;
+    const std::vector<int>& steps = StepsFor(t);
+    int cur = CellOf(p, &steps);
+    if (cur < 0) return false;
+    CVector from = p->GetPosition();
+    int best = -1;
+    for (int s = 0; s < 6; ++s) {
+        int next = cur;
+        for (int n : g_cells[(size_t)cur].next)
+            if (steps[(size_t)n] >= 0 && steps[(size_t)n] < steps[(size_t)next]) next = n;
+        if (next == cur) break;
+        cur = next;
+        if (!Straight(from, g_cells[(size_t)cur].p)) break;
+        best = cur;
+    }
+    if (best < 0) best = cur;  // round a corner: the next one at least
+    out = g_cells[(size_t)best].p;
+    return (out - (from - CVector{0, 0, 1.0f})).Length2D() > 0.4f;
+}
+
+// where the player looks: its camera (this game's own, or the one its state carries)
+CVector ViewOf(CPed* t) {
+    CVector f;
+    if (t == FindPlayerPed(0)) f = cam::Front();
+    else if (const RemotePlayer* rp = Players::Instance().FindByPed(t); rp && rp->hasState) f = rp->state.cam.front;
+    else f = {-std::sin(t->GetHeading()), std::cos(t->GetHeading()), 0.0f};
+    f.z = 0;
+    float l = f.Length();
+    return l > 0.01f ? f * (1.0f / l) : CVector{0, 1, 0};
+}
+
+// the player would see a body there: within 50 m, within some 70 degrees of where it looks, nothing between
+bool InView(CPed* t, const CVector& view, const CVector& body) {
+    CVector eye = t->GetPosition() + CVector{0, 0, 0.6f}, d = body - eye;
+    float l = d.Length2D();
+    if (l > 50.0f) return false;
+    if (l > 0.5f && (d.x * view.x + d.y * view.y) < l * 0.34f) return false;
+    return Clear(eye, body + CVector{0, 0, 0.3f});
+}
+
+// The knifeman: up to the player's back by the cells it would not be seen on (Dijkstra: a cell in the player's view
+// costs as much as eight out of it), to a cell 1.2-4 m behind it; from there the last steps (TASK_GOTO_CHAR_OFFSET
+// behind it) and the knife (StealthKnife). Out of sight with the next step in sight it waits for the player to look
+// away (up to 6 s). Seen close by, it goes for the player at once.
+void Sneak(CPed* p, Enemy& e, CPed* t, float d, uint64_t now) {
+    int h = GetPedRef(p);
+    CVector view = ViewOf(t), body = p->GetPosition(), rel = body - t->GetPosition();
+    bool seen = InView(t, view, body);
+    bool behind = rel.x * view.x + rel.y * view.y < -0.2f * std::max(0.1f, rel.Length2D());
+    if (d < 4.5f && (!seen || d < 2.5f)) {  // the last steps
+        if (e.routing || now - e.setOnMs > 3000) {
+            e.routing = false;
+            e.setOnMs = now;
+            if (behind || !seen) Cmd(0x06A8).I(h).I(GetPedRef(t)).I(5000).F(0.8f).F(180.0f).Run();  // TASK_GOTO_CHAR_OFFSET: behind it
+            else Cmd(0x05E2).I(h).I(GetPedRef(t)).Run();                                            // TASK_KILL_CHAR_ON_FOOT
+        }
+        return;
+    }
+    if (seen && d < 6.0f) {  // seen close by: at it
+        if (e.routing || now - e.setOnMs > 3000) {
+            e.routing = false;
+            e.setOnMs = now;
+            Cmd(0x05E2).I(h).I(GetPedRef(t)).Run();
+        }
+        return;
+    }
+    if (now < e.evalMs || !GridUsable()) return;
+    e.evalMs = now + 600;
+    int start = CellOf(p);
+    if (start < 0) {
+        if (!e.routing) Cmd(0x06A8).I(h).I(GetPedRef(t)).I(5000).F(1.0f).F(180.0f).Run(), e.routing = true, e.routeMs = now;
+        return;
+    }
+    size_t n = g_cells.size();
+    std::vector<int8_t> vis(n, -1);  // -1: not looked at yet
+    auto visible = [&](int k) {
+        if (vis[(size_t)k] < 0) vis[(size_t)k] = InView(t, view, g_cells[(size_t)k].p + CVector{0, 0, 1.0f}) ? 1 : 0;
+        return vis[(size_t)k] == 1;
+    };
+    std::vector<float> cost(n, 1e9f);
+    std::vector<int> from(n, -1);
+    using Q = std::pair<float, int>;
+    std::priority_queue<Q, std::vector<Q>, std::greater<Q>> q;
+    cost[(size_t)start] = 0;
+    q.push({0.0f, start});
+    CVector tp = t->GetPosition();
+    int goal = -1, expanded = 0;
+    while (!q.empty() && expanded < 1500) {
+        auto [c, k] = q.top();
+        q.pop();
+        if (c > cost[(size_t)k]) continue;
+        ++expanded;
+        CVector cp = g_cells[(size_t)k].p + CVector{0, 0, 1.0f}, r = cp - tp;
+        float dist = r.Length2D();
+        if (dist > 1.2f && dist < 4.0f && std::fabs(r.z) < 1.5f && r.x * view.x + r.y * view.y < -0.2f * dist && !visible(k)) {
+            goal = k;
+            break;
+        }
+        for (int m : g_cells[(size_t)k].next) {
+            float nc = c + (visible(m) ? 8.0f : 1.0f);
+            if (nc < cost[(size_t)m]) cost[(size_t)m] = nc, from[(size_t)m] = k, q.push({nc, m});
+        }
+    }
+    if (goal < 0) {  // no way behind it now: round to its back the game's way
+        if (!e.routing || now - e.routeMs > 4000) {
+            Cmd(0x06A8).I(h).I(GetPedRef(t)).I(5000).F(1.0f).F(180.0f).Run();
+            e.routing = true, e.routeMs = now, e.routeTo = tp;
+        }
+        return;
+    }
+    std::vector<int> path;  // start .. goal
+    for (int k = goal; k >= 0; k = from[(size_t)k]) path.push_back(k);
+    std::reverse(path.begin(), path.end());
+    // the next spot: the farthest of the next 6 it sees straight
+    int next = path.size() > 1 ? path[1] : path[0];
+    for (size_t s = 1; s < path.size() && s <= 6; ++s) {
+        if (!Straight(body, g_cells[(size_t)path[s]].p)) break;
+        next = path[s];
+    }
+    if (!seen && visible(next) && (path.size() < 2 || visible(path[1]))) {  // one step on it would be seen: it waits
+        if (!e.waitSince) e.waitSince = now;
+        if (now - e.waitSince < 6000) {
+            if (e.routing) Cmd(0x05BA).I(h).I(1000).Run(), e.routing = false;  // TASK_STAND_STILL
+            return;
+        }
+    } else {
+        e.waitSince = 0;
+    }
+    GoTo(p, e, g_cells[(size_t)next].p, 7);  // sprinting
+}
+
+// A sniper stays where it is and shoots at whom it sees; out of sight of the players for 5 s it moves on to a spot
+// (within 25 m) far from its player that sees it
+void Snipe(CPed* p, Enemy& e, CPed* t, bool sees, uint64_t now) {
+    int h = GetPedRef(p);
+    if (e.mode == M_RELOCATE) {
+        if ((p->GetPosition() - e.routeTo - CVector{0, 0, 1.0f}).Length2D() < 1.3f || now > e.modeUntil) {
+            e.mode = M_FIGHT;
+            Cmd(0x0350).I(h).I(1).Run();  // SET_CHAR_STAY_IN_SAME_PLACE
+            SetOn(p, e, t);
+        }
+        return;
+    }
+    if (sees) {
+        e.blindSince = 0;
+        if (t != e.after || now - e.setOnMs > 8000) SetOn(p, e, t);
+        return;
+    }
+    if (!e.blindSince) e.blindSince = now;
+    CVector to;
+    if (now - e.blindSince > 5000 && GridUsable() && SniperSpot(p->GetPosition(), t, 25.0f, to)) {
+        e.blindSince = 0;
+        e.mode = M_RELOCATE;
+        e.modeUntil = now + 9000;
+        Cmd(0x0350).I(h).I(0).Run();
+        GoTo(p, e, to - CVector{0, 0, 1.0f}, 6);
+    }
+}
 
 bool FindCover(CPed* p, CPed* t, CVector& out) {
     if (!GridUsable()) return false;
     CVector eye = t->GetPosition() + CVector{0, 0, 0.6f}, here = p->GetPosition();
     float best = -1e9f;
     int tries = 0;
-    for (const Cell& c : g_cells) {
+    for (int k : StandCells()) {
+        const Cell& c = g_cells[(size_t)k];
         CVector d = c.p - here;
         if (d.Length2D() > 9.0f || std::fabs(d.z + 1.0f) > 2.0f) continue;
         float toT = (c.p - t->GetPosition()).Length();
@@ -967,29 +1388,18 @@ bool FindCover(CPed* p, CPed* t, CVector& out) {
 
 void Unstick(CPed* p, CPed* t) {
     if (!GridUsable()) return;
-    if (g_stepsFor != t || NowMs() - g_stepsMs > 2000) {
-        g_stepsTo = StepsTo(CellNear(t->GetPosition()));
-        g_stepsFor = t;
-        g_stepsMs = NowMs();
-    }
-    int here = CellNear(p->GetPosition());
-    if (here < 0 || g_stepsTo[(size_t)here] < 0) {  // off the floor's cells: onto the nearest that leads somewhere
-        int best = -1;
-        float bestD = 6.0f;
-        for (size_t k = 0; k < g_cells.size(); ++k) {
-            float d = (g_cells[k].p - p->GetPosition()).Length();
-            if (g_stepsTo[k] >= 0 && d < bestD) bestD = d, best = (int)k;
-        }
-        here = best;
-    } else {  // two steps on along the way
+    const std::vector<int>& steps = StepsFor(t);
+    int here = CellOf(p, &steps);
+    if (here < 0) return;
+    if ((g_cells[(size_t)here].p + CVector{0, 0, 1.0f} - p->GetPosition()).Length() < 1.0f) {  // on it: two steps on
         for (int s = 0; s < 2; ++s) {
             int next = here;
             for (int n : g_cells[(size_t)here].next)
-                if (g_stepsTo[(size_t)n] >= 0 && g_stepsTo[(size_t)n] < g_stepsTo[(size_t)next]) next = n;
+                if (steps[(size_t)n] >= 0 && steps[(size_t)n] < steps[(size_t)next] && (g_cells[(size_t)n].room || !g_cells[(size_t)next].room))
+                    next = n;
             here = next;
         }
     }
-    if (here < 0) return;
     CVector to = g_cells[(size_t)here].p;
     Cmd(0x00A1).I(GetPedRef(p)).F(to.x).F(to.y).F(to.z).Run();  // SET_CHAR_COORDINATES (feet on the floor)
     LOGD("Arena: an enemy stuck for 4 s set on towards its player");
@@ -1000,6 +1410,7 @@ void Tactics() {
     // a squad's push: all of it at the players together
     for (auto& [p, e] : g_info) {
         Squad& sq = g_squads[(size_t)e.squad];
+        if (e.role == R_KNIFE || e.role == R_SNIPER) continue;
         if (sq.nextPushMs && now >= sq.nextPushMs && (e.mode == M_FIGHT || e.mode == M_COVER_HOLD || e.mode == M_COVER_GO)) {
             e.mode = M_PUSH;
             e.modeUntil = now + (uint64_t)RandInt(7000, 11000);
@@ -1008,6 +1419,7 @@ void Tactics() {
     }
     for (auto& sq : g_squads)
         if (sq.nextPushMs && now >= sq.nextPushMs) sq.nextPushMs = now + (uint64_t)RandInt(18000, 26000);
+    for (auto it = g_paths.begin(); it != g_paths.end();) it = now - it->second.ms > 10000 ? g_paths.erase(it) : std::next(it);
 
     for (CPed* p : g_enemies) {
         if (!IsPedValid(p) || p->Health() <= 0.0f) continue;
@@ -1024,15 +1436,26 @@ void Tactics() {
         CVector eye = p->GetPosition() + CVector{0, 0, 0.6f}, at = t->GetPosition() + CVector{0, 0, 0.4f};
         bool sees = Clear(eye, at);
         // stuck: no step on in 4 s, the player out of its sight and not next to it
-        if ((p->GetPosition() - e.lastPos).Length() > 0.7f || e.mode == M_COVER_HOLD || sees || d < 4.0f) {
+        bool still = e.mode == M_COVER_HOLD || (e.role == R_SNIPER && e.mode != M_RELOCATE) || (e.role == R_KNIFE && e.waitSince);
+        if ((p->GetPosition() - e.lastPos).Length() > 0.7f || still || sees || d < 4.0f) {
             e.lastPos = p->GetPosition();
             e.lastMoveMs = now;
         } else if (now - e.lastMoveMs > 4000 && !e.grenadeUntil) {
             Unstick(p, t);
             e.lastPos = p->GetPosition();
             e.lastMoveMs = now;
+            e.routing = false;
             if (e.mode == M_COVER_GO || e.mode == M_COVER_HOLD) e.mode = M_FIGHT;
-            SetOn(p, e, t);
+            if (e.role != R_KNIFE) SetOn(p, e, t);
+            continue;
+        }
+        if (e.role == R_KNIFE) {
+            e.after = t;
+            Sneak(p, e, t, d, now);
+            continue;
+        }
+        if (e.role == R_SNIPER) {
+            Snipe(p, e, t, sees, now);
             continue;
         }
         // the throw done: back to what it did
@@ -1046,9 +1469,9 @@ void Tactics() {
         }
         switch (e.mode) {
             case M_FLANK: {
-                bool close = d < (e.role == R_KNIFE ? 2.5f : 9.0f);
+                bool close = d < 9.0f;
                 bool hurt = p->Health() < e.spawnHealth - 1.0f;
-                if ((close && e.role != R_KNIFE) || hurt || now > e.modeUntil) {
+                if (close || hurt || now > e.modeUntil) {
                     e.mode = M_FIGHT;
                     SetOn(p, e, t);
                     continue;
@@ -1056,11 +1479,12 @@ void Tactics() {
                 break;
             }
             case M_FIGHT:
-                if (e.role != R_KNIFE && sees && d < 28.0f && now >= e.nextCoverMs) {
+                if (sees && d < 28.0f && now >= e.nextCoverMs) {
                     e.nextCoverMs = now + (uint64_t)RandInt(6000, 12000);
                     if (RandInt(0, 99) < 60 && FindCover(p, t, e.cover)) {
                         e.mode = M_COVER_GO;
                         e.modeUntil = now + 6000;
+                        e.routing = false;
                         Cmd(0x05D3).I(h).F(e.cover.x).F(e.cover.y).F(e.cover.z).I(6).I(6000).Run();  // TASK_GO_STRAIGHT_TO_COORD, running
                         continue;
                     }
@@ -1096,8 +1520,21 @@ void Tactics() {
             case M_PUSH:
                 if (now > e.modeUntil) e.mode = M_FIGHT, e.nextCoverMs = now + (uint64_t)RandInt(3000, 6000);
                 break;
+            default:
+                break;
         }
-        if (t != e.after && e.mode != M_COVER_HOLD) SetOn(p, e, t);
+        // the player out of sight: to it along the floor's cells; in sight: the fight (given again now and then, the
+        // game's fight ends by itself when its player goes down)
+        if ((e.mode == M_FIGHT || e.mode == M_PUSH) && !sees && d > 7.0f) {
+            CVector wp;
+            if (Waypoint(p, t, wp)) {
+                e.after = t;
+                GoTo(p, e, wp, 6);
+                continue;
+            }
+        }
+        if (e.mode != M_COVER_HOLD && (t != e.after || e.routing || ((e.mode == M_FIGHT || e.mode == M_PUSH) && now - e.setOnMs > 8000)))
+            SetOn(p, e, t);
         // a grenade: 8-26 m, the player in sight, none of its own near the player, the arc clear (StartThrow)
         Squad& sq = g_squads[(size_t)e.squad];
         if (e.role == R_GRENADIER && e.mode != M_FLANK && e.mode != M_COVER_GO && now >= sq.nextGrenadeMs && d > 8.0f && d < 26.0f &&
@@ -1130,37 +1567,7 @@ void SetMarks(const std::vector<CVector>& at) {
     }
 }
 
-void DrawMarks() {
-    CPlayerPed* me = FindPlayerPed(0);
-    if (g_marks.empty() || !me) return;
-    auto& g = ui::Gfx();
-    float s = g.Scale(), W = g.Width(), H = g.Height();
-    CVector camF = cam::Front(), camS = cam::Source();
-    for (const CVector& at : g_marks) {
-        CVector top = at + CVector{0, 0, 1.3f};
-        float dist = (at - me->GetPosition()).Length();
-        float sx = 0, sy = 0, depth = 0;
-        bool ahead = (top - camS).Dot(camF) > 0.5f;
-        if (ahead && WorldToScreen(top, sx, sy, depth) && sx > 20 * s && sx < W - 20 * s && sy > 20 * s && sy < H - 20 * s) {
-            float r = 10 * s;
-            g.Poly4(sx, sy - r, sx + r * 0.7f, sy, sx, sy + r, sx - r * 0.7f, sy, 0xE0FF3030);  // a diamond
-            g.Text(ui::FONT_SMALL, sx, sy + r + 2 * s, Format(TR("%.0f м", "%.0f m"), dist), 0xFFFF6060, ui::TEXT_CENTER | ui::TEXT_OUTLINE);
-            continue;
-        }
-        // aside or behind: an arrow on the screen's edge, turned the way to it
-        CVector d = at - camS;
-        CVector right{camF.y, -camF.x, 0.0f};
-        float x = d.Dot(right), y = d.Dot(CVector{camF.x, camF.y, 0.0f});
-        float a = std::atan2(x, y);  // 0: ahead, +: to the right
-        float cx = W * 0.5f + std::sin(a) * W * 0.42f, cy = H * 0.5f - std::cos(a) * H * 0.40f;
-        float r = 14 * s;
-        // the arrow points along (sin a, -cos a) on the screen
-        float ux = std::sin(a), uy = -std::cos(a), vx = -uy, vy = ux;
-        g.Tri(cx + ux * r, cy + uy * r, cx - ux * r * 0.6f + vx * r * 0.7f, cy - uy * r * 0.6f + vy * r * 0.7f,
-              cx - ux * r * 0.6f - vx * r * 0.7f, cy - uy * r * 0.6f - vy * r * 0.7f, 0xE0FF3030);
-        g.Text(ui::FONT_SMALL, cx, cy + r, Format(TR("%.0f м", "%.0f m"), dist), 0xFFFF6060, ui::TEXT_CENTER | ui::TEXT_OUTLINE);
-    }
-}
+void DrawMarks() { ui::DrawWorldMarks(g_marks, 0xE0FF3030); }
 
 void Finish(bool won) {
     g_arena.won = won;
@@ -1184,6 +1591,9 @@ void Clear() {
     RemoveItems();
     SetMarks({});
     if (g_arena.boss >= 0) UnloadBoss();
+    if (g_knifeModel >= 0) Cmd(0x0296).I(kKnifeSlot).Run();  // UNLOAD_SPECIAL_CHARACTER
+    g_knifeModel = -1;
+    g_paths.clear();
     for (int k = 0; k < 16; ++k) radar::RemoveIcon(9700 + k);
 }
 
@@ -1191,7 +1601,10 @@ void End(bool tell) {
     if (!g_arena.on) return;
     if (tell && g_arena.host) Send(A_END, [](Writer& w) { w.U8(g_arena.won); });
     Clear();
+    bool was = g_arena.taken;
+    ShutDoors(false);
     TakeBack();
+    if (CPlayerPed* me = FindPlayerPed(0); me && was) me->Armour() = 0.0f;  // the armour of the battle stays there
     game::challenge::End();
     LOGI("Arena over (%s)", g_arena.won ? "won" : "lost");
     g_arena = Arena{};
@@ -1212,6 +1625,7 @@ void Start(int faction, int place, int waves) {
     if (g_arena.host) {
         StartGrid();  // the floor's cells, over the next frames (the scene's collision is in by then)
         g_arena.itemsFor = 1;
+        LoadKnifeModel();
     }
     ui::TheChat().AddSystem(Format(TR("Арена: %s, %s, волн: %d. Первая волна через %d секунд — соберите оружие и броню!",
                                       "Arena: %s at %s, %d waves. The first wave in %d seconds: pick up weapons and armour!"),
